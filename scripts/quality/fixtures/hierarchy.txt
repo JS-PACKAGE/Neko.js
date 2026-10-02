@@ -1,0 +1,300 @@
+Observation H001: station S001 at Alder plot measured soil moisture 10 percent on 2025-01-01.
+Observation H002: station S002 at Birch plot measured river temperature 27 degrees Celsius on 2025-01-02.
+Observation H003: station S003 at Cedar plot measured wind speed 44 kilometers per hour on 2025-01-03.
+Observation H004: station S004 at Delta plot measured rainfall 61 millimeters on 2025-01-04.
+Observation H005: station S005 at Elm plot measured soil moisture 78 percent on 2025-01-05.
+Observation H006: station S006 at Fir plot measured river temperature 95 degrees Celsius on 2025-01-06.
+Observation H007: station S007 at Alder plot measured wind speed 23 kilometers per hour on 2025-01-07.
+Observation H008: station S008 at Birch plot measured rainfall 40 millimeters on 2025-01-08.
+Observation H009: station S009 at Cedar plot measured soil moisture 57 percent on 2025-01-09.
+Observation H010: station S010 at Delta plot measured river temperature 74 degrees Celsius on 2025-01-10.
+Observation H011: station S011 at Elm plot measured wind speed 91 kilometers per hour on 2025-01-11.
+Observation H012: station S012 at Fir plot measured rainfall 19 millimeters on 2025-01-12.
+Observation H013: station S013 at Alder plot measured soil moisture 36 percent on 2025-01-13.
+Observation H014: station S014 at Birch plot measured river temperature 53 degrees Celsius on 2025-01-14.
+Observation H015: station S015 at Cedar plot measured wind speed 70 kilometers per hour on 2025-01-15.
+Observation H016: station S016 at Delta plot measured rainfall 87 millimeters on 2025-01-16.
+Observation H017: station S017 at Elm plot measured soil moisture 15 percent on 2025-01-17.
+Observation H018: station S018 at Fir plot measured river temperature 32 degrees Celsius on 2025-01-18.
+Observation H019: station S019 at Alder plot measured wind speed 49 kilometers per hour on 2025-01-19.
+Observation H020: station S020 at Birch plot measured rainfall 66 millimeters on 2025-01-20.
+Observation H021: station S021 at Cedar plot measured soil moisture 83 percent on 2025-01-21.
+Observation H022: station S022 at Delta plot measured river temperature 11 degrees Celsius on 2025-01-22.
+Observation H023: station S023 at Elm plot measured wind speed 28 kilometers per hour on 2025-01-23.
+Observation H024: station S024 at Fir plot measured rainfall 45 millimeters on 2025-01-24.
+Observation H025: station S025 at Alder plot measured soil moisture 62 percent on 2025-01-25.
+Observation H026: station S026 at Birch plot measured river temperature 79 degrees Celsius on 2025-01-26.
+Observation H027: station S027 at Cedar plot measured wind speed 96 kilometers per hour on 2025-01-27.
+Observation H028: station S028 at Delta plot measured rainfall 24 millimeters on 2025-01-28.
+Observation H029: station S029 at Elm plot measured soil moisture 41 percent on 2025-02-01.
+Observation H030: station S030 at Fir plot measured river temperature 58 degrees Celsius on 2025-02-02.
+Observation H031: station S031 at Alder plot measured wind speed 75 kilometers per hour on 2025-02-03.
+Observation H032: station S032 at Birch plot measured rainfall 92 millimeters on 2025-02-04.
+Observation H033: station S033 at Cedar plot measured soil moisture 20 percent on 2025-02-05.
+Observation H034: station S034 at Delta plot measured river temperature 37 degrees Celsius on 2025-02-06.
+Observation H035: station S035 at Elm plot measured wind speed 54 kilometers per hour on 2025-02-07.
+Observation H036: station S036 at Fir plot measured rainfall 71 millimeters on 2025-02-08.
+Observation H037: station S037 at Alder plot measured soil moisture 88 percent on 2025-02-09.
+Observation H038: station S038 at Birch plot measured river temperature 16 degrees Celsius on 2025-02-10.
+Observation H039: station S039 at Cedar plot measured wind speed 33 kilometers per hour on 2025-02-11.
+Observation H040: station S040 at Delta plot measured rainfall 50 millimeters on 2025-02-12.
+Observation H041: station S041 at Elm plot measured soil moisture 67 percent on 2025-02-13.
+Observation H042: station S042 at Fir plot measured river temperature 84 degrees Celsius on 2025-02-14.
+Observation H043: station S043 at Alder plot measured wind speed 12 kilometers per hour on 2025-02-15.
+Observation H044: station S044 at Birch plot measured rainfall 29 millimeters on 2025-02-16.
+Observation H045: station S045 at Cedar plot measured soil moisture 46 percent on 2025-02-17.
+Observation H046: station S046 at Delta plot measured river temperature 63 degrees Celsius on 2025-02-18.
+Observation H047: station S047 at Elm plot measured wind speed 80 kilometers per hour on 2025-02-19.
+Observation H048: station S048 at Fir plot measured rainfall 97 millimeters on 2025-02-20.
+Observation H049: station S049 at Alder plot measured soil moisture 25 percent on 2025-02-21.
+Observation H050: station S050 at Birch plot measured river temperature 42 degrees Celsius on 2025-02-22.
+Observation H051: station S051 at Cedar plot measured wind speed 59 kilometers per hour on 2025-02-23.
+Observation H052: station S052 at Delta plot measured rainfall 76 millimeters on 2025-02-24.
+Observation H053: station S053 at Elm plot measured soil moisture 93 percent on 2025-02-25.
+Observation H054: station S054 at Fir plot measured river temperature 21 degrees Celsius on 2025-02-26.
+Observation H055: station S055 at Alder plot measured wind speed 38 kilometers per hour on 2025-02-27.
+Observation H056: station S056 at Birch plot measured rainfall 55 millimeters on 2025-02-28.
+Observation H057: station S057 at Cedar plot measured soil moisture 72 percent on 2025-03-01.
+Observation H058: station S058 at Delta plot measured river temperature 89 degrees Celsius on 2025-03-02.
+Observation H059: station S059 at Elm plot measured wind speed 17 kilometers per hour on 2025-03-03.
+Observation H060: station S060 at Fir plot measured rainfall 34 millimeters on 2025-03-04.
+Observation H061: station S061 at Alder plot measured soil moisture 51 percent on 2025-03-05.
+Observation H062: station S062 at Birch plot measured river temperature 68 degrees Celsius on 2025-03-06.
+Observation H063: station S063 at Cedar plot measured wind speed 85 kilometers per hour on 2025-03-07.
+Observation H064: station S064 at Delta plot measured rainfall 13 millimeters on 2025-03-08.
+Observation H065: station S065 at Elm plot measured soil moisture 30 percent on 2025-03-09.
+Observation H066: station S066 at Fir plot measured river temperature 47 degrees Celsius on 2025-03-10.
+Observation H067: station S067 at Alder plot measured wind speed 64 kilometers per hour on 2025-03-11.
+Observation H068: station S068 at Birch plot measured rainfall 81 millimeters on 2025-03-12.
+Observation H069: station S069 at Cedar plot measured soil moisture 98 percent on 2025-03-13.
+Observation H070: station S070 at Delta plot measured river temperature 26 degrees Celsius on 2025-03-14.
+Observation H071: station S071 at Elm plot measured wind speed 43 kilometers per hour on 2025-03-15.
+Observation H072: station S072 at Fir plot measured rainfall 60 millimeters on 2025-03-16.
+Observation H073: station S073 at Alder plot measured soil moisture 77 percent on 2025-03-17.
+Observation H074: station S074 at Birch plot measured river temperature 94 degrees Celsius on 2025-03-18.
+Observation H075: station S075 at Cedar plot measured wind speed 22 kilometers per hour on 2025-03-19.
+Observation H076: station S076 at Delta plot measured rainfall 39 millimeters on 2025-03-20.
+Observation H077: station S077 at Elm plot measured soil moisture 56 percent on 2025-03-21.
+Observation H078: station S078 at Fir plot measured river temperature 73 degrees Celsius on 2025-03-22.
+Observation H079: station S079 at Alder plot measured wind speed 90 kilometers per hour on 2025-03-23.
+Observation H080: station S080 at Birch plot measured rainfall 18 millimeters on 2025-03-24.
+Observation H081: station S081 at Cedar plot measured soil moisture 35 percent on 2025-03-25.
+Observation H082: station S082 at Delta plot measured river temperature 52 degrees Celsius on 2025-03-26.
+Observation H083: station S083 at Elm plot measured wind speed 69 kilometers per hour on 2025-03-27.
+Observation H084: station S084 at Fir plot measured rainfall 86 millimeters on 2025-03-28.
+Observation H085: station S085 at Alder plot measured soil moisture 14 percent on 2025-04-01.
+Observation H086: station S086 at Birch plot measured river temperature 31 degrees Celsius on 2025-04-02.
+Observation H087: station S087 at Cedar plot measured wind speed 48 kilometers per hour on 2025-04-03.
+Observation H088: station S088 at Delta plot measured rainfall 65 millimeters on 2025-04-04.
+Observation H089: station S089 at Elm plot measured soil moisture 82 percent on 2025-04-05.
+Observation H090: station S090 at Fir plot measured river temperature 10 degrees Celsius on 2025-04-06.
+Observation H091: station S091 at Alder plot measured wind speed 27 kilometers per hour on 2025-04-07.
+Observation H092: station S092 at Birch plot measured rainfall 44 millimeters on 2025-04-08.
+Observation H093: station S093 at Cedar plot measured soil moisture 61 percent on 2025-04-09.
+Observation H094: station S094 at Delta plot measured river temperature 78 degrees Celsius on 2025-04-10.
+Observation H095: station S095 at Elm plot measured wind speed 95 kilometers per hour on 2025-04-11.
+Observation H096: station S096 at Fir plot measured rainfall 23 millimeters on 2025-04-12.
+Observation H097: station S097 at Alder plot measured soil moisture 40 percent on 2025-04-13.
+Observation H098: station S098 at Birch plot measured river temperature 57 degrees Celsius on 2025-04-14.
+Observation H099: station S099 at Cedar plot measured wind speed 74 kilometers per hour on 2025-04-15.
+Observation H100: station S100 at Delta plot measured rainfall 91 millimeters on 2025-04-16.
+Observation H101: station S101 at Elm plot measured soil moisture 19 percent on 2025-04-17.
+Observation H102: station S102 at Fir plot measured river temperature 36 degrees Celsius on 2025-04-18.
+Observation H103: station S103 at Alder plot measured wind speed 53 kilometers per hour on 2025-04-19.
+Observation H104: station S104 at Birch plot measured rainfall 70 millimeters on 2025-04-20.
+Observation H105: station S105 at Cedar plot measured soil moisture 87 percent on 2025-04-21.
+Observation H106: station S106 at Delta plot measured river temperature 15 degrees Celsius on 2025-04-22.
+Observation H107: station S107 at Elm plot measured wind speed 32 kilometers per hour on 2025-04-23.
+Observation H108: station S108 at Fir plot measured rainfall 49 millimeters on 2025-04-24.
+Observation H109: station S109 at Alder plot measured soil moisture 66 percent on 2025-04-25.
+Observation H110: station S110 at Birch plot measured river temperature 83 degrees Celsius on 2025-04-26.
+Observation H111: station S111 at Cedar plot measured wind speed 11 kilometers per hour on 2025-04-27.
+Observation H112: station S112 at Delta plot measured rainfall 28 millimeters on 2025-04-28.
+Observation H113: station S113 at Elm plot measured soil moisture 45 percent on 2025-05-01.
+Observation H114: station S114 at Fir plot measured river temperature 62 degrees Celsius on 2025-05-02.
+Observation H115: station S115 at Alder plot measured wind speed 79 kilometers per hour on 2025-05-03.
+Observation H116: station S116 at Birch plot measured rainfall 96 millimeters on 2025-05-04.
+Observation H117: station S117 at Cedar plot measured soil moisture 24 percent on 2025-05-05.
+Observation H118: station S118 at Delta plot measured river temperature 41 degrees Celsius on 2025-05-06.
+Observation H119: station S119 at Elm plot measured wind speed 58 kilometers per hour on 2025-05-07.
+Observation H120: station S120 at Fir plot measured rainfall 75 millimeters on 2025-05-08.
+Observation H121: station S121 at Alder plot measured soil moisture 92 percent on 2025-05-09.
+Observation H122: station S122 at Birch plot measured river temperature 20 degrees Celsius on 2025-05-10.
+Observation H123: station S123 at Cedar plot measured wind speed 37 kilometers per hour on 2025-05-11.
+Observation H124: station S124 at Delta plot measured rainfall 54 millimeters on 2025-05-12.
+Observation H125: station S125 at Elm plot measured soil moisture 71 percent on 2025-05-13.
+Observation H126: station S126 at Fir plot measured river temperature 88 degrees Celsius on 2025-05-14.
+Observation H127: station S127 at Alder plot measured wind speed 16 kilometers per hour on 2025-05-15.
+Observation H128: station S128 at Birch plot measured rainfall 33 millimeters on 2025-05-16.
+Observation H129: station S129 at Cedar plot measured soil moisture 50 percent on 2025-05-17.
+Observation H130: station S130 at Delta plot measured river temperature 67 degrees Celsius on 2025-05-18.
+Observation H131: station S131 at Elm plot measured wind speed 84 kilometers per hour on 2025-05-19.
+Observation H132: station S132 at Fir plot measured rainfall 12 millimeters on 2025-05-20.
+Observation H133: station S133 at Alder plot measured soil moisture 29 percent on 2025-05-21.
+Observation H134: station S134 at Birch plot measured river temperature 46 degrees Celsius on 2025-05-22.
+Observation H135: station S135 at Cedar plot measured wind speed 63 kilometers per hour on 2025-05-23.
+Observation H136: station S136 at Delta plot measured rainfall 80 millimeters on 2025-05-24.
+Observation H137: station S137 at Elm plot measured soil moisture 97 percent on 2025-05-25.
+Observation H138: station S138 at Fir plot measured river temperature 25 degrees Celsius on 2025-05-26.
+Observation H139: station S139 at Alder plot measured wind speed 42 kilometers per hour on 2025-05-27.
+Observation H140: station S140 at Birch plot measured rainfall 59 millimeters on 2025-05-28.
+Observation H141: station S141 at Cedar plot measured soil moisture 76 percent on 2025-06-01.
+Observation H142: station S142 at Delta plot measured river temperature 93 degrees Celsius on 2025-06-02.
+Observation H143: station S143 at Elm plot measured wind speed 21 kilometers per hour on 2025-06-03.
+Observation H144: station S144 at Fir plot measured rainfall 38 millimeters on 2025-06-04.
+Observation H145: station S145 at Alder plot measured soil moisture 55 percent on 2025-06-05.
+Observation H146: station S146 at Birch plot measured river temperature 72 degrees Celsius on 2025-06-06.
+Observation H147: station S147 at Cedar plot measured wind speed 89 kilometers per hour on 2025-06-07.
+Observation H148: station S148 at Delta plot measured rainfall 17 millimeters on 2025-06-08.
+Observation H149: station S149 at Elm plot measured soil moisture 34 percent on 2025-06-09.
+Observation H150: station S150 at Fir plot measured river temperature 51 degrees Celsius on 2025-06-10.
+Observation H151: station S151 at Alder plot measured wind speed 68 kilometers per hour on 2025-06-11.
+Observation H152: station S152 at Birch plot measured rainfall 85 millimeters on 2025-06-12.
+Observation H153: station S153 at Cedar plot measured soil moisture 13 percent on 2025-06-13.
+Observation H154: station S154 at Delta plot measured river temperature 30 degrees Celsius on 2025-06-14.
+Observation H155: station S155 at Elm plot measured wind speed 47 kilometers per hour on 2025-06-15.
+Observation H156: station S156 at Fir plot measured rainfall 64 millimeters on 2025-06-16.
+Observation H157: station S157 at Alder plot measured soil moisture 81 percent on 2025-06-17.
+Observation H158: station S158 at Birch plot measured river temperature 98 degrees Celsius on 2025-06-18.
+Observation H159: station S159 at Cedar plot measured wind speed 26 kilometers per hour on 2025-06-19.
+Observation H160: station S160 at Delta plot measured rainfall 43 millimeters on 2025-06-20.
+Observation H161: station S161 at Elm plot measured soil moisture 60 percent on 2025-06-21.
+Observation H162: station S162 at Fir plot measured river temperature 77 degrees Celsius on 2025-06-22.
+Observation H163: station S163 at Alder plot measured wind speed 94 kilometers per hour on 2025-06-23.
+Observation H164: station S164 at Birch plot measured rainfall 22 millimeters on 2025-06-24.
+Observation H165: station S165 at Cedar plot measured soil moisture 39 percent on 2025-06-25.
+Observation H166: station S166 at Delta plot measured river temperature 56 degrees Celsius on 2025-06-26.
+Observation H167: station S167 at Elm plot measured wind speed 73 kilometers per hour on 2025-06-27.
+Observation H168: station S168 at Fir plot measured rainfall 90 millimeters on 2025-06-28.
+Observation H169: station S169 at Alder plot measured soil moisture 18 percent on 2025-07-01.
+Observation H170: station S170 at Birch plot measured river temperature 35 degrees Celsius on 2025-07-02.
+Observation H171: station S171 at Cedar plot measured wind speed 52 kilometers per hour on 2025-07-03.
+Observation H172: station S172 at Delta plot measured rainfall 69 millimeters on 2025-07-04.
+Observation H173: station S173 at Elm plot measured soil moisture 86 percent on 2025-07-05.
+Observation H174: station S174 at Fir plot measured river temperature 14 degrees Celsius on 2025-07-06.
+Observation H175: station S175 at Alder plot measured wind speed 31 kilometers per hour on 2025-07-07.
+Observation H176: station S176 at Birch plot measured rainfall 48 millimeters on 2025-07-08.
+Observation H177: station S177 at Cedar plot measured soil moisture 65 percent on 2025-07-09.
+Observation H178: station S178 at Delta plot measured river temperature 82 degrees Celsius on 2025-07-10.
+Observation H179: station S179 at Elm plot measured wind speed 10 kilometers per hour on 2025-07-11.
+Observation H180: station S180 at Fir plot measured rainfall 27 millimeters on 2025-07-12.
+Observation H181: station S181 at Alder plot measured soil moisture 44 percent on 2025-07-13.
+Observation H182: station S182 at Birch plot measured river temperature 61 degrees Celsius on 2025-07-14.
+Observation H183: station S183 at Cedar plot measured wind speed 78 kilometers per hour on 2025-07-15.
+Observation H184: station S184 at Delta plot measured rainfall 95 millimeters on 2025-07-16.
+Observation H185: station S185 at Elm plot measured soil moisture 23 percent on 2025-07-17.
+Observation H186: station S186 at Fir plot measured river temperature 40 degrees Celsius on 2025-07-18.
+Observation H187: station S187 at Alder plot measured wind speed 57 kilometers per hour on 2025-07-19.
+Observation H188: station S188 at Birch plot measured rainfall 74 millimeters on 2025-07-20.
+Observation H189: station S189 at Cedar plot measured soil moisture 91 percent on 2025-07-21.
+Observation H190: station S190 at Delta plot measured river temperature 19 degrees Celsius on 2025-07-22.
+Observation H191: station S191 at Elm plot measured wind speed 36 kilometers per hour on 2025-07-23.
+Observation H192: station S192 at Fir plot measured rainfall 53 millimeters on 2025-07-24.
+Observation H193: station S193 at Alder plot measured soil moisture 70 percent on 2025-07-25.
+Observation H194: station S194 at Birch plot measured river temperature 87 degrees Celsius on 2025-07-26.
+Observation H195: station S195 at Cedar plot measured wind speed 15 kilometers per hour on 2025-07-27.
+Observation H196: station S196 at Delta plot measured rainfall 32 millimeters on 2025-07-28.
+Observation H197: station S197 at Elm plot measured soil moisture 49 percent on 2025-08-01.
+Observation H198: station S198 at Fir plot measured river temperature 66 degrees Celsius on 2025-08-02.
+Observation H199: station S199 at Alder plot measured wind speed 83 kilometers per hour on 2025-08-03.
+Observation H200: station S200 at Birch plot measured rainfall 11 millimeters on 2025-08-04.
+Observation H201: station S201 at Cedar plot measured soil moisture 28 percent on 2025-08-05.
+Observation H202: station S202 at Delta plot measured river temperature 45 degrees Celsius on 2025-08-06.
+Observation H203: station S203 at Elm plot measured wind speed 62 kilometers per hour on 2025-08-07.
+Observation H204: station S204 at Fir plot measured rainfall 79 millimeters on 2025-08-08.
+Observation H205: station S205 at Alder plot measured soil moisture 96 percent on 2025-08-09.
+Observation H206: station S206 at Birch plot measured river temperature 24 degrees Celsius on 2025-08-10.
+Observation H207: station S207 at Cedar plot measured wind speed 41 kilometers per hour on 2025-08-11.
+Observation H208: station S208 at Delta plot measured rainfall 58 millimeters on 2025-08-12.
+Observation H209: station S209 at Elm plot measured soil moisture 75 percent on 2025-08-13.
+Observation H210: station S210 at Fir plot measured river temperature 92 degrees Celsius on 2025-08-14.
+Observation H211: station S211 at Alder plot measured wind speed 20 kilometers per hour on 2025-08-15.
+Observation H212: station S212 at Birch plot measured rainfall 37 millimeters on 2025-08-16.
+Observation H213: station S213 at Cedar plot measured soil moisture 54 percent on 2025-08-17.
+Observation H214: station S214 at Delta plot measured river temperature 71 degrees Celsius on 2025-08-18.
+Observation H215: station S215 at Elm plot measured wind speed 88 kilometers per hour on 2025-08-19.
+Observation H216: station S216 at Fir plot measured rainfall 16 millimeters on 2025-08-20.
+Observation H217: station S217 at Alder plot measured soil moisture 33 percent on 2025-08-21.
+Observation H218: station S218 at Birch plot measured river temperature 50 degrees Celsius on 2025-08-22.
+Observation H219: station S219 at Cedar plot measured wind speed 67 kilometers per hour on 2025-08-23.
+Observation H220: station S220 at Delta plot measured rainfall 84 millimeters on 2025-08-24.
+Observation H221: station S221 at Elm plot measured soil moisture 12 percent on 2025-08-25.
+Observation H222: station S222 at Fir plot measured river temperature 29 degrees Celsius on 2025-08-26.
+Observation H223: station S223 at Alder plot measured wind speed 46 kilometers per hour on 2025-08-27.
+Observation H224: station S224 at Birch plot measured rainfall 63 millimeters on 2025-08-28.
+Observation H225: station S225 at Cedar plot measured soil moisture 80 percent on 2025-09-01.
+Observation H226: station S226 at Delta plot measured river temperature 97 degrees Celsius on 2025-09-02.
+Observation H227: station S227 at Elm plot measured wind speed 25 kilometers per hour on 2025-09-03.
+Observation H228: station S228 at Fir plot measured rainfall 42 millimeters on 2025-09-04.
+Observation H229: station S229 at Alder plot measured soil moisture 59 percent on 2025-09-05.
+Observation H230: station S230 at Birch plot measured river temperature 76 degrees Celsius on 2025-09-06.
+Observation H231: station S231 at Cedar plot measured wind speed 93 kilometers per hour on 2025-09-07.
+Observation H232: station S232 at Delta plot measured rainfall 21 millimeters on 2025-09-08.
+Observation H233: station S233 at Elm plot measured soil moisture 38 percent on 2025-09-09.
+Observation H234: station S234 at Fir plot measured river temperature 55 degrees Celsius on 2025-09-10.
+Observation H235: station S235 at Alder plot measured wind speed 72 kilometers per hour on 2025-09-11.
+Observation H236: station S236 at Birch plot measured rainfall 89 millimeters on 2025-09-12.
+Observation H237: station S237 at Cedar plot measured soil moisture 17 percent on 2025-09-13.
+Observation H238: station S238 at Delta plot measured river temperature 34 degrees Celsius on 2025-09-14.
+Observation H239: station S239 at Elm plot measured wind speed 51 kilometers per hour on 2025-09-15.
+Observation H240: station S240 at Fir plot measured rainfall 68 millimeters on 2025-09-16.
+Observation H241: station S241 at Alder plot measured soil moisture 85 percent on 2025-09-17.
+Observation H242: station S242 at Birch plot measured river temperature 13 degrees Celsius on 2025-09-18.
+Observation H243: station S243 at Cedar plot measured wind speed 30 kilometers per hour on 2025-09-19.
+Observation H244: station S244 at Delta plot measured rainfall 47 millimeters on 2025-09-20.
+Observation H245: station S245 at Elm plot measured soil moisture 64 percent on 2025-09-21.
+Observation H246: station S246 at Fir plot measured river temperature 81 degrees Celsius on 2025-09-22.
+Observation H247: station S247 at Alder plot measured wind speed 98 kilometers per hour on 2025-09-23.
+Observation H248: station S248 at Birch plot measured rainfall 26 millimeters on 2025-09-24.
+Observation H249: station S249 at Cedar plot measured soil moisture 43 percent on 2025-09-25.
+Observation H250: station S250 at Delta plot measured river temperature 60 degrees Celsius on 2025-09-26.
+Observation H251: station S251 at Elm plot measured wind speed 77 kilometers per hour on 2025-09-27.
+Observation H252: station S252 at Fir plot measured rainfall 94 millimeters on 2025-09-28.
+Observation H253: station S253 at Alder plot measured soil moisture 22 percent on 2025-10-01.
+Observation H254: station S254 at Birch plot measured river temperature 39 degrees Celsius on 2025-10-02.
+Observation H255: station S255 at Cedar plot measured wind speed 56 kilometers per hour on 2025-10-03.
+Observation H256: station S256 at Delta plot measured rainfall 73 millimeters on 2025-10-04.
+Observation H257: station S257 at Elm plot measured soil moisture 90 percent on 2025-10-05.
+Observation H258: station S258 at Fir plot measured river temperature 18 degrees Celsius on 2025-10-06.
+Observation H259: station S259 at Alder plot measured wind speed 35 kilometers per hour on 2025-10-07.
+Observation H260: station S260 at Birch plot measured rainfall 52 millimeters on 2025-10-08.
+Observation H261: station S261 at Cedar plot measured soil moisture 69 percent on 2025-10-09.
+Observation H262: station S262 at Delta plot measured river temperature 86 degrees Celsius on 2025-10-10.
+Observation H263: station S263 at Elm plot measured wind speed 14 kilometers per hour on 2025-10-11.
+Observation H264: station S264 at Fir plot measured rainfall 31 millimeters on 2025-10-12.
+Observation H265: station S265 at Alder plot measured soil moisture 48 percent on 2025-10-13.
+Observation H266: station S266 at Birch plot measured river temperature 65 degrees Celsius on 2025-10-14.
+Observation H267: station S267 at Cedar plot measured wind speed 82 kilometers per hour on 2025-10-15.
+Observation H268: station S268 at Delta plot measured rainfall 10 millimeters on 2025-10-16.
+Observation H269: station S269 at Elm plot measured soil moisture 27 percent on 2025-10-17.
+Observation H270: station S270 at Fir plot measured river temperature 44 degrees Celsius on 2025-10-18.
+Observation H271: station S271 at Alder plot measured wind speed 61 kilometers per hour on 2025-10-19.
+Observation H272: station S272 at Birch plot measured rainfall 78 millimeters on 2025-10-20.
+Observation H273: station S273 at Cedar plot measured soil moisture 95 percent on 2025-10-21.
+Observation H274: station S274 at Delta plot measured river temperature 23 degrees Celsius on 2025-10-22.
+Observation H275: station S275 at Elm plot measured wind speed 40 kilometers per hour on 2025-10-23.
+Observation H276: station S276 at Fir plot measured rainfall 57 millimeters on 2025-10-24.
+Observation H277: station S277 at Alder plot measured soil moisture 74 percent on 2025-10-25.
+Observation H278: station S278 at Birch plot measured river temperature 91 degrees Celsius on 2025-10-26.
+Observation H279: station S279 at Cedar plot measured wind speed 19 kilometers per hour on 2025-10-27.
+Observation H280: station S280 at Delta plot measured rainfall 36 millimeters on 2025-10-28.
+Observation H281: station S281 at Elm plot measured soil moisture 53 percent on 2025-11-01.
+Observation H282: station S282 at Fir plot measured river temperature 70 degrees Celsius on 2025-11-02.
+Observation H283: station S283 at Alder plot measured wind speed 87 kilometers per hour on 2025-11-03.
+Observation H284: station S284 at Birch plot measured rainfall 15 millimeters on 2025-11-04.
+Observation H285: station S285 at Cedar plot measured soil moisture 32 percent on 2025-11-05.
+Observation H286: station S286 at Delta plot measured river temperature 49 degrees Celsius on 2025-11-06.
+Observation H287: station S287 at Elm plot measured wind speed 66 kilometers per hour on 2025-11-07.
+Observation H288: station S288 at Fir plot measured rainfall 83 millimeters on 2025-11-08.
+Observation H289: station S289 at Alder plot measured soil moisture 11 percent on 2025-11-09.
+Observation H290: station S290 at Birch plot measured river temperature 28 degrees Celsius on 2025-11-10.
+Observation H291: station S291 at Cedar plot measured wind speed 45 kilometers per hour on 2025-11-11.
+Observation H292: station S292 at Delta plot measured rainfall 62 millimeters on 2025-11-12.
+Observation H293: station S293 at Elm plot measured soil moisture 79 percent on 2025-11-13.
+Observation H294: station S294 at Fir plot measured river temperature 96 degrees Celsius on 2025-11-14.
+Observation H295: station S295 at Alder plot measured wind speed 24 kilometers per hour on 2025-11-15.
+Observation H296: station S296 at Birch plot measured rainfall 41 millimeters on 2025-11-16.
+Observation H297: station S297 at Cedar plot measured soil moisture 58 percent on 2025-11-17.
+Observation H298: station S298 at Delta plot measured river temperature 75 degrees Celsius on 2025-11-18.
+Observation H299: station S299 at Elm plot measured wind speed 92 kilometers per hour on 2025-11-19.
+Observation H300: station S300 at Fir plot measured rainfall 20 millimeters on 2025-11-20.

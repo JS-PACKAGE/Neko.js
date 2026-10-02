@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Seed offline browser quality runs from the verified Node cache into the SDK CacheStorage contract, then enforce `localFilesOnly` and block external network requests; report seed and zero-HF-request evidence.
+- Correct quality claim scoring so supported cross-ID context does not invalidate a matching fact, and accept both equivalent circle-left-square / square-right-circle relations while rejecting opposite or negated positions.
+
 - Upgrade the pinned Node image-processing dependency to `sharp@0.35.4` to include upstream libheif and libvips security fixes; retain an exact-version install-script approval.
 - Add source-aware Page selection, full content snapshots, versioned citations and claim-evidence auditing; add aggregate report token/time budgets, resumable checkpoints, events, and deadline-bound async selector/resource/event/checkpoint hooks.
 - Add bounded FIFO request admission, real Node/browser workers, cancellation and streaming, queue status, and actual load/warmup/runtime readiness APIs.

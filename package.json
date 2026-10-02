@@ -51,7 +51,9 @@
     "test:package": "node scripts/test-package.mjs",
     "test:package:artifact": "node scripts/test-package.mjs --artifact-only",
     "test:browser": "playwright test",
-    "smoke:browser": "node scripts/smoke-browser.mjs"
+    "smoke:browser": "node scripts/smoke-browser.mjs",
+    "quality:benchmark": "node scripts/quality-benchmark.mjs",
+    "test:quality": "node --test scripts/quality/evaluate.test.mjs"
   },
   "dependencies": {
     "onnxruntime-node": "1.30.0",

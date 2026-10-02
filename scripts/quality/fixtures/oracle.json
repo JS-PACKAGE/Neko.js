@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "text": {
+    "id": "garden-text-v1",
+    "sourcePath": "scripts/quality/fixtures/text-garden.txt",
+    "rejectForeignMatches": true,
+    "prompt": "Read the source and return exactly one line per requested ID in the form FACT <ID>: <one factual statement>. Do not add an introduction, conclusion, or facts not in the source. Use these IDs: T-YEAR, T-TOMATOES, T-SUNLIGHT, T-CISTERN, T-PEPPERS.",
+    "facts": [
+      { "id": "T-YEAR", "pattern": "\\bgarden\\b[^.!?;]{0,55}\\b(?:opened|opening)\\b[^.!?;]{0,20}\\b2018\\b|\\bgarden\\b[^.!?;]{0,55}\\b(?:did not|does not|never)\\s+(?:open|opened)\\b[^.!?;]{0,20}\\b2018\\b", "negatedBy": ["\\bgarden\\b[^.!?;]{0,45}\\b(?:did not|does not|never)\\s+(?:open|opened|start|begin)\\b[^.!?;]{0,20}\\b2018\\b"] },
+      { "id": "T-TOMATOES", "pattern": "\\b(?:three|3)\\s+tomato(?:es)?\\s+(?:varieties|types|kinds)\\b|\\b(?:three|3)\\s+(?:varieties|types|kinds)\\s+of\\s+tomatoes?\\b", "negatedBy": ["\\b(?:garden|mira(?:\\s+chen)?)\\b[^.!?;]{0,40}\\b(?:does not|did not|never)\\s+grow\\b[^.!?;]{0,25}\\b(?:three|3)\\s+tomato"] },
+      { "id": "T-SUNLIGHT", "pattern": "\\b(?:west|western)\\s+greenhouse\\b[^.!?;]{0,60}\\b(?:six|6)\\s+hours?\\b[^.!?;]{0,25}\\b(?:direct\\s+)?sun(?:light|shine)\\b", "negatedBy": ["\\b(?:west|western)\\s+greenhouse\\b[^.!?;]{0,40}\\b(?:does not|did not|never)\\s+(?:receive|get)\\b[^.!?;]{0,30}\\b(?:six|6)\\s+hours?\\b"] },
+      { "id": "T-CISTERN", "pattern": "\\b120[- ]lit(?:er|re)s?\\b[^.!?;]{0,25}\\bceramic\\b[^.!?;]{0,20}\\b(?:cistern|tank)\\b", "negatedBy": ["\\b(?:cistern|tank)\\b[^.!?;]{0,35}\\b(?:is not|was not|isn't|wasn't|never)\\b[^.!?;]{0,25}\\b120[- ]lit"] },
+      { "id": "T-PEPPERS", "pattern": "\\b(?:no\\s+peppers?|peppers?\\s+(?:are|were)\\s+not\\s+(?:grown|planted|cultivated)|(?:do|does|did)\\s+not\\s+grow\\s+peppers?|(?:doesn'?t|don'?t|didn'?t)\\s+grow\\s+peppers?|(?:never|without|zero)\\s+peppers?)\\b", "allowNegation": true }
+    ],
+    "contradictions": [
+      { "id": "T-TOMATOES", "pattern": "\\b(?:four|4|five|5|two|2)\\s+(?:tomato\\s+)?(?:varieties|types|kinds)\\b|\\b(?:four|4|five|5|two|2)\\s+tomatoes\\b" },
+      { "id": "T-SUNLIGHT", "pattern": "\\b(?:eight|8|four|4|12|twelve)\\s+hours?\\b" },
+      { "id": "T-PEPPERS", "pattern": "\\b(?:garden|mira(?:\\s+chen)?|we)\\s+(?:grow|grows|plant|plants|cultivate|cultivates)\\s+(?!no\\b|not\\b|never\\b|zero\\b)(?:[\\p{L}-]+\\s+){0,2}peppers?\\b|\\bpeppers?\\s+(?:are|were)\\s+(?:being\\s+)?(?:grown|planted|cultivated)\\b" }
+    ],
+    "unsupported": [
+      { "id": "unsupported-fruit", "pattern": "\\b(?:lemons?|oranges?|watermelons?)\\b" }
+    ]
+  },
+  "image": {
+    "id": "garden-image-v1",
+    "sourcePath": "scripts/quality/fixtures/image-garden.svg",
+    "sourceSha256": "1748ebf763b102617f3f5fb58b1a800ad26350a22d163c07c8a19df3e89502cc",
+    "raster": {
+      "format": "png",
+      "width": 640,
+      "height": 400,
+      "sha256": "1d805e013fef56695e7dc4d1eb32f027e3e3a3735462a1101892b4a22ed76a23",
+      "renderer": "sharp@0.35.4"
+    },
+    "prompt": "Describe only the visible geometry and colors in this image. Return exactly one line for each ID, in the form FACT <ID>: <one factual statement>. Do not add other shapes or colors. Use these IDs: I-RED-CIRCLE, I-BLUE-SQUARE, I-POSITION.",
+    "rejectForeignMatches": true,
+    "facts": [
+      { "id": "I-RED-CIRCLE", "pattern": "\\b(?:red|scarlet)\\s+(?:circle|disk|disc)\\b|\\b(?:circle|disk|disc)\\s+(?:is|looks|appears|colored)\\s+(?:red|scarlet)\\b", "negatedBy": ["\\b(?:no|not a|never a)\\s+(?:red|scarlet)\\s+(?:circle|disk|disc)\\b", "\\b(?:circle|disk|disc)\\s+(?:is|looks|appears)\\s+not\\s+(?:red|scarlet)\\b"] },
+      { "id": "I-BLUE-SQUARE", "pattern": "\\bblue\\s+(?:square|rectangle)\\b|\\b(?:square|rectangle)\\s+(?:is|looks|appears|colored)\\s+blue\\b", "negatedBy": ["\\b(?:no|not a|never a)\\s+blue\\s+(?:square|rectangle)\\b", "\\b(?:square|rectangle)\\s+(?:is|looks|appears)\\s+not\\s+blue\\b"] },
+      { "id": "I-POSITION", "pattern": "\\b(?:circle|disk|disc)\\b[^.!?;]{0,60}\\bleft\\b[^.!?;]{0,60}\\b(?:square|rectangle)\\b|\\b(?:square|rectangle)\\b[^.!?;]{0,60}\\bright\\b[^.!?;]{0,60}\\b(?:circle|disk|disc)\\b", "negatedBy": ["\\b(?:circle|disk|disc)\\b[^.!?;]{0,48}\\bnot\\b(?:\\s+\\S+){0,5}\\s+left\\b", "\\b(?:square|rectangle)\\b[^.!?;]{0,48}\\bnot\\b(?:\\s+\\S+){0,5}\\s+right\\b"] }
+    ],
+    "contradictions": [
+      { "id": "I-RED-CIRCLE", "pattern": "\\b(?:pink|pinkish|purple|blue)\\s+(?:circle|disk|disc)\\b|\\b(?:circle|disk|disc)\\s+(?:is|looks|appears|colored)\\s+(?:pink|pinkish|purple|blue)\\b" },
+      { "id": "I-BLUE-SQUARE", "pattern": "\\b(?:red|pink|green)\\s+(?:square|rectangle)\\b|\\b(?:square|rectangle)\\s+(?:is|looks|appears|colored)\\s+(?:red|pink|green)\\b" },
+      { "id": "I-POSITION", "pattern": "\\b(?:square|rectangle)\\b[^.!?;]{0,60}\\bleft\\b[^.!?;]{0,60}\\b(?:circle|disk|disc)\\b|\\b(?:circle|disk|disc)\\b[^.!?;]{0,60}\\bright\\b[^.!?;]{0,60}\\b(?:square|rectangle)\\b" }
+    ],
+    "unsupported": [
+      { "id": "unsupported-shape", "pattern": "\\b(?:triangle|star|hexagon)\\b" },
+      { "id": "unsupported-color", "pattern": "\\b(?:green|yellow|orange)\\b" }
+    ]
+  },
+  "hierarchy": {
+    "id": "catalog-hierarchy-300-v1",
+    "sourcePath": "scripts/quality/fixtures/hierarchy.txt",
+    "contextWindowTokens": 1536,
+    "maxNewTokens": 512,
+    "paragraphCount": 300,
+    "recordPattern": "^Observation (?<code>H\\d{3}): station S\\d{3} at (?<site>\\w+) plot measured (?<field>soil moisture|river temperature|wind speed|rainfall) (?<value>\\d+) (?<unit>percent|degrees Celsius|kilometers per hour|millimeters) on (?<date>\\d{4}-\\d{2}-\\d{2})\\.$",
+    "fieldAliases": {
+      "soil moisture": "\\b(?:soil moisture|soil-water content)\\b",
+      "river temperature": "\\b(?:river temperature|water temperature)\\b",
+      "wind speed": "\\bwind speed\\b",
+      "rainfall": "\\b(?:rainfall|precipitation)\\b"
+    },
+    "unitAliases": {
+      "percent": "\\bpercent\\b|%",
+      "degrees Celsius": "\\b(?:degrees? Celsius|°C)\\b",
+      "kilometers per hour": "\\b(?:kilometers per hour|kilometres per hour|km/h)\\b",
+      "millimeters": "\\b(?:millimeters?|millimetres?|mm)\\b"
+    },
+    "description": "300 dated field observations, one per source paragraph. Each oracle unit is a record ID, site, measurement kind, value, and unit mapped to its extracted paragraph ID p1 through p300."
+  }
+}
