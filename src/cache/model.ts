@@ -2,6 +2,7 @@ import { env } from '@huggingface/transformers';
 import { MODEL_BASE_URL, ALL_MODEL_FILES, MODEL_ID, MODEL_REVISION, modelFileUrl, getModelProfile, type ModelProfileId } from './manifest.js';
 import type { ModelFileName } from './manifest.js';
 import { NekoError } from '../errors.js';
+import { authorizeNetwork, type ResourcePolicy } from '../web/policy.js';
 import type * as NodeFs from 'node:fs/promises';
 import type * as NodePath from 'node:path';
 import type { constants as NodeFileConstants, Stats } from 'node:fs';
@@ -11,6 +12,25 @@ import type * as NodeStream from 'node:stream';
 const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
 
 export class ModelIntegrityError extends Error { override name = 'ModelIntegrityError'; }
+export interface ModelSource {
+  /** Absolute HTTP(S) directory containing only the selected profile's pinned model files. */
+  baseUrl: string;
+}
+/** Own the URL without losing prototype/private-field getters during worker serialization. */
+export function captureModelSource(source?: ModelSource): ModelSource | undefined {
+  if (source === undefined) return undefined;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    throw new TypeError('modelSource must be an object with a string baseUrl');
+  }
+  const baseUrl = source.baseUrl;
+  if (typeof baseUrl !== 'string') throw new TypeError('modelSource must be an object with a string baseUrl');
+  const base = new URL(baseUrl);
+  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) {
+    throw new TypeError('modelSource.baseUrl must be an absolute HTTP(S) directory without credentials, query, or fragment');
+  }
+  if (!base.pathname.endsWith('/')) base.pathname += '/';
+  return Object.freeze({ baseUrl: base.href });
+}
 export interface CacheProgress { file: ModelFileName; loaded: number; total: number; phase: 'download' | 'verify'; }
 export interface VerifiedCacheOptions {
   /** Transformers.js native filesystem cache directory; browsers use its native Cache API cache. */
@@ -18,6 +38,8 @@ export interface VerifiedCacheOptions {
   localFilesOnly?: boolean;
   onProgress?: (event: CacheProgress) => void;
   profile?: ModelProfileId;
+  policy?: ResourcePolicy;
+  modelSource?: ModelSource;
 }
 export interface ModelCacheStatus { downloaded: boolean; verified: boolean; bytes: number; totalBytes: number; path: string; files: { name: ModelFileName; present: boolean; verified: boolean; bytes: number }[]; }
 export interface VerifiedCacheInstallation {
@@ -269,6 +291,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   if (installed) throw new NekoError('Only one Neko runtime owner may be active; await its disposal before creating another', 'create', 'RUNTIME_BUSY');
   if (env.version !== '4.2.0') throw new Error('The verified model cache requires Transformers.js 4.2.0');
   const selectedFiles = getModelProfile(options.profile).files;
+  const modelSource = captureModelSource(options.modelSource);
   installed = true;
   let backing: NativeCache;
   try { backing = await nativeCache(options); } catch (error) { installed = false; throw error; }
@@ -280,19 +303,20 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   };
   let activeSignal: AbortSignal | undefined;
   const verifiedCache = {
-    async match(request: string): Promise<Response | string | undefined> {
-      activeSignal?.throwIfAborted();
+    async match(request: string, signal = activeSignal): Promise<Response | string | undefined> {
+      signal?.throwIfAborted();
       const name = fileName(request, selectedFiles);
       if (!name && !isRuntimeAsset(request)) return undefined;
+      if (!name) await authorizeNetwork(options.policy, new URL(request), 'runtime', !!options.localFilesOnly, undefined, signal);
       let response: CachedResponse | undefined;
       try {
         response = await backing.match(nativeKey(request, name));
         if (!response || !name) return response as Response | undefined;
         if (isNode && name.startsWith('onnx/') && response.filePath) {
-          await hashCachedFile(response, name, options, activeSignal);
+          await hashCachedFile(response, name, options, signal);
           return response.filePath;
         }
-        return await readVerified(response, name, options, 'verify', activeSignal);
+        return await readVerified(response, name, options, 'verify', signal);
       } catch (error) {
         if (error instanceof ModelIntegrityError) {
           await response?.body?.cancel(error).catch(() => undefined);
@@ -304,6 +328,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     async put(request: string, response: Response): Promise<void> {
       const name = fileName(request, selectedFiles);
       if (!name && !isRuntimeAsset(request)) throw new ModelIntegrityError(`Unpinned cache resource: ${request}`);
+      if (!name) await authorizeNetwork(options.policy, new URL(request), 'runtime', !!options.localFilesOnly, undefined, activeSignal);
       // Validate before the native writer opens a temporary file: 4.2.0 cannot reliably clean up an early stream error.
       const verified = name && (verifiedResponses.get(response) !== name || response.bodyUsed) ? await readVerified(response, name, options, 'verify', activeSignal) : response;
       await backing.put(nativeKey(request, name), verified);
@@ -315,11 +340,23 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     const name = fileName(request, selectedFiles);
     if (!name && !isRuntimeAsset(request)) throw new ModelIntegrityError(`Unpinned resource URL: ${request}`);
     const method = init?.method?.toUpperCase() ?? 'GET';
-    const oneByteRange = method === 'GET' && new Headers(init?.headers).get('range') === 'bytes=0-0';
+    const requestSignal = activeSignal && init?.signal && activeSignal !== init.signal
+      ? AbortSignal.any([activeSignal, init.signal]) : init?.signal ?? activeSignal;
+    if (!name && (method === 'GET' || method === 'HEAD')) {
+      init?.signal?.throwIfAborted();
+      const cached = await verifiedCache.match(request, requestSignal);
+      if (cached instanceof Response) {
+        init?.signal?.throwIfAborted();
+        if (method === 'HEAD') { await cached.body?.cancel(); return new Response(null, { status: cached.status, headers: cached.headers }); }
+        return cached;
+      }
+    }
+    const headers = init?.headers === undefined ? undefined : new Headers(init.headers);
+    const oneByteRange = method === 'GET' && headers?.get('range') === 'bytes=0-0';
     const metadata = name !== undefined && (method === 'HEAD' || oneByteRange);
     if (metadata) {
       init?.signal?.throwIfAborted();
-      const cached = await verifiedCache.match(request);
+      const cached = await verifiedCache.match(request, requestSignal);
       if (cached !== undefined) {
         // A corrupt cache match is an errored Response, not a cache miss; never turn it into successful metadata.
         if (typeof cached !== 'string' && verifiedResponses.get(cached) !== name) {
@@ -360,8 +397,32 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     }
     if (options.localFilesOnly) throw new Error(`Offline cache miss: ${request}`);
     const timeout = AbortSignal.timeout(15 * 60_000);
-    const signal = AbortSignal.any([timeout, ...(init?.signal ? [init.signal] : []), ...(activeSignal ? [activeSignal] : [])]);
-    const response = await previous.fetch(input, { ...init, signal });
+    const signal = requestSignal ? AbortSignal.any([timeout, requestSignal]) : timeout;
+    const modelMirror = name && modelSource ? new URL(name, modelSource.baseUrl) : undefined;
+    const canonical = new URL(request);
+    let destination = modelMirror ?? canonical;
+    let previousOrigin = canonical.origin;
+    let response: Response;
+    for (let redirects = 0; ; redirects++) {
+      await authorizeNetwork(options.policy, destination, name ? 'model' : 'runtime', !!options.localFilesOnly, name ? { modelFiles: selectedFiles, modelSource: new URL(modelFileUrl(name)), modelMirror } : undefined, signal);
+      if (headers && destination.origin !== previousOrigin) {
+        headers.delete('authorization');
+        headers.delete('cookie');
+        headers.delete('proxy-authorization');
+      }
+      previousOrigin = destination.origin;
+      response = await previous.fetch(destination.href, { ...init, headers, signal, redirect: 'manual' });
+      if (response.type === 'opaqueredirect' || response.status === 0) {
+        await response.body?.cancel();
+        throw new NekoError('Browser concealed a model redirect destination; use an explicitly configured modelSource mirror or verified offline cache. Automatic redirect following is denied.', 'cache', 'POLICY_DENIED');
+      }
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get('location');
+      await response.body?.cancel();
+      if (!location || redirects >= 10) throw new ModelIntegrityError('Model redirect limit or missing destination');
+      destination = new URL(location, destination);
+      if (!['http:', 'https:'].includes(destination.protocol) || destination.username || destination.password) throw new ModelIntegrityError('Unsafe model redirect');
+    }
     if (!name || !response.ok) return response;
     // Metadata requests have no full body to hash. Remote metadata is not a verified cache entry.
     if (metadata) {

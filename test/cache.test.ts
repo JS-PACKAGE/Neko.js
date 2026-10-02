@@ -7,6 +7,7 @@ import { AutoConfig, env } from '@huggingface/transformers';
 import { installVerifiedCache, ModelIntegrityError } from '../src/cache/model.js';
 import { MODEL_FILES, MODEL_ID, MODEL_REVISION, modelFileUrl } from '../src/cache/manifest.js';
 import { EngineCache } from '../src/cache/engine.js';
+import { NekoError } from '../src/errors.js';
 
 test('corrupt native cache content cannot reach the Transformers config loader or trigger a replacement download', async () => {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-onnx-integrity-'));
@@ -93,6 +94,100 @@ test('metadata ranges and HEAD require verified cached bytes without promoting p
     await rm(entry);
     await assert.rejects(env.fetch(request, { headers: { Range: 'bytes=0-0' } }), Error);
     assert.equal(networkRequests, 0);
+  } finally { installation.restore(); env.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
+});
+
+test('opaque browser redirects fail closed with a typed policy error and never promote a cache entry', async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-opaque-redirect-'));
+  const originalFetch = env.fetch;
+  let requests = 0;
+  env.fetch = async () => {
+    requests++;
+    return { type: 'opaqueredirect', status: 0, body: null } as Response;
+  };
+  const installation = await installVerifiedCache({ cacheDir: directory });
+  try {
+    await assert.rejects(env.fetch(modelFileUrl('onnx/embed_tokens_q4.onnx')), (error: unknown) => {
+      assert.ok(error instanceof NekoError);
+      assert.equal(error.code, 'POLICY_DENIED');
+      assert.equal(error.stage, 'cache');
+      return true;
+    });
+    assert.equal(requests, 1);
+    assert.deepEqual(await readdir(directory), []);
+  } finally { installation.restore(); env.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
+});
+
+test('invalid explicitly provided model sources reject instead of falling back to remote model downloads', async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-model-source-input-'));
+  try {
+    for (const source of [false, null, [], {}, { baseUrl: 42 }, { baseUrl: '/models/' }, { baseUrl: 'https://example.com/models/?token=secret' }, { baseUrl: 'https://user:password@example.com/models/' }]) {
+      await assert.rejects(installVerifiedCache({ cacheDir: directory, modelSource: source } as Parameters<typeof installVerifiedCache>[0]), TypeError);
+    }
+    const installation = await installVerifiedCache({ cacheDir: directory, localFilesOnly: true });
+    installation.restore();
+    assert.deepEqual(await readdir(directory), []);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('an explicit model mirror preserves pinned integrity and canonical cache keys without trusting sibling assets or redirect hops', async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-model-mirror-'));
+  const originalFetch = env.fetch;
+  const file = 'generation_config.json';
+  const canonical = modelFileUrl(file);
+  const mirror = 'http://127.0.0.1:8787/models/pinned/';
+  const fixture = JSON.stringify({
+    bos_token_id: 248044, do_sample: true, eos_token_id: [248046, 248044], pad_token_id: 248044,
+    temperature: 0.6, top_k: 20, top_p: 0.95, transformers_version: '5.3.0.dev0', trust_remote_code: false,
+  }, null, 2) + '\n';
+  let mode: 'verified' | 'corrupt' | 'redirect' = 'verified';
+  const requests: string[] = [];
+  env.fetch = async (url) => {
+    requests.push(String(url));
+    if (mode === 'redirect') return new Response(null, { status: 302, headers: { location: `${mirror}unregistered.bin` } });
+    return new Response(mode === 'corrupt' ? 'x'.repeat(MODEL_FILES[file].size) : fixture);
+  };
+  const installation = await installVerifiedCache({ cacheDir: directory, modelSource: { baseUrl: mirror }, profile: 'all-q4' });
+  try {
+    const downloaded = await env.fetch(canonical) as Response;
+    await env.customCache!.put(canonical, downloaded);
+    assert.equal(await readFile(join(directory, MODEL_ID, MODEL_REVISION, file), 'utf8'), fixture);
+    assert.equal(await (await env.customCache!.match(canonical) as Response).text(), fixture);
+    mode = 'corrupt';
+    await assert.rejects(env.fetch(canonical), ModelIntegrityError);
+    mode = 'redirect';
+    await assert.rejects(env.fetch(canonical), (error: unknown) => {
+      assert.ok(error instanceof Error && 'code' in error);
+      assert.equal(error.code, 'POLICY_DENIED');
+      return true;
+    });
+    await assert.rejects(env.fetch(modelFileUrl('onnx/vision_encoder_fp16.onnx')), ModelIntegrityError);
+    assert.deepEqual(requests, [`${mirror}${file}`, `${mirror}${file}`, `${mirror}${file}`]);
+    assert.equal(await readFile(join(directory, MODEL_ID, MODEL_REVISION, file), 'utf8'), fixture);
+  } finally { installation.restore(); env.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a never-settling model network approval is bounded by the active operation signal before fetching', async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-model-approval-'));
+  const originalFetch = env.fetch;
+  let fetched = false;
+  let beginApproval: () => void = () => {};
+  const started = new Promise<void>((resolve) => { beginApproval = resolve; });
+  env.fetch = async () => { fetched = true; throw new Error('unexpected network'); };
+  const installation = await installVerifiedCache({
+    cacheDir: directory,
+    policy: { network: async () => { beginApproval(); await new Promise<void>(() => {}); } },
+  });
+  const controller = new AbortController();
+  const reason = new NekoError('Duration budget expired', 'generate', 'BUDGET_EXCEEDED');
+  try {
+    const pending = installation.withSignal(controller.signal, async () => {
+      await env.fetch(modelFileUrl('onnx/embed_tokens_q4.onnx'));
+    });
+    await started;
+    controller.abort(reason);
+    await assert.rejects(pending, (error: unknown) => error === reason);
+    assert.equal(fetched, false);
   } finally { installation.restore(); env.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });
 

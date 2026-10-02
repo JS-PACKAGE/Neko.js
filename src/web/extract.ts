@@ -1,5 +1,8 @@
 import { parse } from 'parse5';
 import type { ImageDiscovery, Page, PageImage, Paragraph } from '../types.js';
+import { policyDestination } from './policy.js';
+import type { ResourcePolicy } from './policy.js';
+import { awaitUser } from '../errors.js';
 
 export interface ExtractOptions {
   baseUrl?: string;
@@ -11,6 +14,9 @@ export interface ExtractOptions {
   timeoutMs?: number;
   /** Called before each HTTP(S) request, including redirects; applications must enforce their own network policy. */
   validateDestination?: (url: URL) => void | Promise<void>;
+  /** Instance-owned restrictions; SDK methods overwrite these fields. */
+  _policy?: ResourcePolicy;
+  _offline?: boolean;
 }
 
 interface HtmlNode {
@@ -288,7 +294,7 @@ export async function fetchLimited(url: string, maxBytes: number, timeoutMs: num
   for (let redirects = 0; redirects <= 10; redirects++) {
     abort.throwIfAborted();
     if (current.protocol !== 'http:' && current.protocol !== 'https:') throw new TypeError('Only http and https URLs are supported');
-    await validateDestination?.(current);
+    if (validateDestination) await awaitUser(() => validateDestination(current), abort, 'extract');
     abort.throwIfAborted();
     response = await fetch(current, { signal: abort, redirect: validateDestination ? 'manual' : 'follow' });
     if (![301, 302, 303, 307, 308].includes(response.status)) break;
@@ -327,7 +333,8 @@ export async function extractPage(input: string, options: ExtractOptions = {}): 
   if (/^[a-z][a-z\d+.-]*:\/\//i.test(input.trim())) {
     const source = new URL(input);
     if (source.protocol !== 'http:' && source.protocol !== 'https:') throw new TypeError('Only http and https URLs are supported');
-    const result = await fetchLimited(source.href, maxHtmlBytes, timeoutMs, options.signal, options.validateDestination);
+    const destination = options._policy ? policyDestination(options._policy, 'page', options._offline, options.validateDestination, options.signal) : options.validateDestination;
+    const result = await fetchLimited(source.href, maxHtmlBytes, timeoutMs, options.signal, destination);
     if (!['text/html', 'application/xhtml+xml'].includes(result.contentType)) throw new TypeError(`Expected an HTML response, got ${result.contentType || 'unknown content type'}`);
     pageUrl = result.url;
     html = new TextDecoder().decode(result.bytes);

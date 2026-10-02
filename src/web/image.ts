@@ -4,10 +4,12 @@ import type * as NodeUrl from 'node:url';
 import type sharp from 'sharp';
 import type { PageImage } from '../types.js';
 import { boundedBytes, fetchLimited, type ExtractOptions } from './extract.js';
+import { authorizeLocalFile, policyDestination } from './policy.js';
+import type { ResourcePolicy } from './policy.js';
 
 export interface DecodedImage { data: Uint8Array | Uint8ClampedArray; width: number; height: number; channels: 1 | 2 | 3 | 4; }
 export type ImageInput = string | URL | Blob | DecodedImage;
-export type ImageOptions = Pick<ExtractOptions, 'signal' | 'maxImageBytes' | 'timeoutMs' | 'validateDestination'>;
+export type ImageOptions = Pick<ExtractOptions, 'signal' | 'maxImageBytes' | 'timeoutMs' | 'validateDestination' | '_policy' | '_offline'>;
 const maxPixels = 40_000_000;
 const maxDimension = 1280;
 const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
@@ -53,12 +55,15 @@ function dataBytes(url: string, maxBytes: number): { bytes: Uint8Array<ArrayBuff
   return { bytes, type: match[1]!.toLowerCase() };
 }
 
-async function localBytes(path: string | URL, maxBytes: number, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
+async function localBytes(path: string | URL, maxBytes: number, signal: AbortSignal, policy?: ResourcePolicy): Promise<Uint8Array<ArrayBuffer>> {
   // Node filesystem modules are absent from browser runtimes.
   const protocol = 'node:';
   const fs: typeof NodeFs = await import(`${protocol}fs/promises`);
   const url: typeof NodeUrl = await import(`${protocol}url`);
-  const handle = await fs.open(path instanceof URL ? url.fileURLToPath(path) : path, 'r');
+  const canonical = await fs.realpath(path instanceof URL ? url.fileURLToPath(path) : path);
+  if (policy) await authorizeLocalFile(policy, canonical, signal);
+  signal.throwIfAborted();
+  const handle = await fs.open(canonical, 'r');
   try {
     const info = await handle.stat();
     if (!info.isFile()) throw new TypeError('Image path must point to a regular file');
@@ -111,10 +116,10 @@ export async function readImage(source: ImageInput, options: ImageOptions = {}):
   } else if (/^data:/i.test(String(source))) {
     const result = dataBytes(String(source), maxBytes); bytes = result.bytes; declared = result.type;
   } else if (isNode && (source instanceof URL ? source.protocol === 'file:' : !/^[a-z][a-z\d+.-]*:/i.test(source))) {
-    bytes = await localBytes(source, maxBytes, signal);
+    bytes = await localBytes(source, maxBytes, signal, options._policy);
   } else {
     const url = new URL(source, typeof location === 'object' ? location.href : undefined);
-    if (isNode && url.protocol === 'file:') bytes = await localBytes(url, maxBytes, signal);
+    if (isNode && url.protocol === 'file:') bytes = await localBytes(url, maxBytes, signal, options._policy);
     else if (url.protocol === 'blob:') {
       const response = await fetch(url, { signal });
       if (!response.ok) { await response.body?.cancel(); throw new Error(`Local image fetch failed with status ${response.status}`); }
@@ -122,7 +127,8 @@ export async function readImage(source: ImageInput, options: ImageOptions = {}):
       bytes = await boundedBytes(response, maxBytes, signal);
     }
     else {
-      const result = await fetchLimited(url.href, maxBytes, timeoutMs, signal, options.validateDestination);
+      const destination = options._policy ? policyDestination(options._policy, 'image', options._offline, options.validateDestination, signal) : options.validateDestination;
+      const result = await fetchLimited(url.href, maxBytes, timeoutMs, signal, destination);
       bytes = result.bytes; declared = result.contentType;
     }
   }

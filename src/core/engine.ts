@@ -3,6 +3,7 @@ import { MODEL_ID, MODEL_REVISION, modelFileUrl, getModelProfile, type ModelFile
 import type { BackendInfo } from '../backend/index.js';
 import { readImage, type ImageInput, type ImageOptions } from '../web/image.js';
 import { atStage, NekoError } from '../errors.js';
+import type { ResourcePolicy } from '../web/policy.js';
 
 export interface InferOptions extends ImageOptions {
   image?: ImageInput;
@@ -33,8 +34,8 @@ async function pinnedResource(name: ModelFileName): Promise<Response> {
 export class VisionEngine {
   readonly memory = null;
   private disposePromise?: Promise<void>;
-  private constructor(private readonly model: PreTrainedModel, private readonly processor: Processor, readonly backend: BackendInfo, private readonly loadMs: number, private readonly profiling: boolean, readonly modelContextTokens: number, readonly identity: ModelIdentity) {}
-  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now(), config: { profile?: ModelProfileId } = {}): Promise<VisionEngine> {
+  private constructor(private readonly model: PreTrainedModel, private readonly processor: Processor, readonly backend: BackendInfo, private readonly loadMs: number, private readonly profiling: boolean, readonly modelContextTokens: number, readonly identity: ModelIdentity, private readonly policy: ResourcePolicy | undefined, private readonly offline: boolean) {}
+  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now(), config: { profile?: ModelProfileId; policy?: ResourcePolicy } = {}): Promise<VisionEngine> {
     return atStage('load', signal, async () => {
       const selected = getModelProfile(config.profile);
       const options = { revision: MODEL_REVISION, local_files_only: localFilesOnly, ...(progressCallback ? { progress_callback: progressCallback } : {}) };
@@ -57,7 +58,7 @@ export class VisionEngine {
       try {
         signal?.throwIfAborted();
         if (!processor.tokenizer) throw new Error('Loaded processor has no tokenizer');
-        return new VisionEngine(model, processor, backend, performance.now() - started, !!profilePrefix && backend.runtime === 'node', context, { id: selected.id, revision: selected.revision, profile: selected.profile, dtype: selected.dtype });
+        return new VisionEngine(model, processor, backend, performance.now() - started, !!profilePrefix && backend.runtime === 'node', context, { id: selected.id, revision: selected.revision, profile: selected.profile, dtype: selected.dtype }, config.policy, localFilesOnly);
       } catch (error) { await model.dispose(); throw error; }
     }, (engine) => engine.dispose());
   }
@@ -107,7 +108,7 @@ export class VisionEngine {
       const maxNewTokens = options.maxNewTokens ?? 128;
       if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1 || maxNewTokens > 2048) throw new RangeError('maxNewTokens must be between 1 and 2048');
       const contextLimit = this.contextLimit(options.contextWindowTokens);
-      const decoded = options.image === undefined ? undefined : await atStage('image', signal, () => readImage(options.image!, options));
+      const decoded = options.image === undefined ? undefined : await atStage('image', signal, () => readImage(options.image!, { ...options, ...(this.policy ? { _policy: this.policy } : {}), _offline: this.offline }));
       const image = decoded ? new RawImage(decoded.data, decoded.width, decoded.height, decoded.channels) : undefined;
       const text = this.chat(options.prompt, image !== undefined);
       const inputs: Record<string, unknown> = image ? await this.processor(text, [image]) : await this.processor(text);
