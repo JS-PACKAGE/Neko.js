@@ -9,6 +9,8 @@ export interface ExtractOptions {
   maxImages?: number;
   maxImageBytes?: number;
   timeoutMs?: number;
+  /** Called before each HTTP(S) request, including redirects; applications must enforce their own network policy. */
+  validateDestination?: (url: URL) => void | Promise<void>;
 }
 
 interface HtmlNode {
@@ -29,10 +31,7 @@ const textBlockTags: Record<string, true> = {
 const flowContainerTags: Record<string, true> = { div: true, section: true, article: true, main: true, header: true, footer: true, aside: true, nav: true };
 const defaultHtmlLimit = 2 * 1024 * 1024;
 const defaultImageCount = 20;
-const defaultImageLimit = 10 * 1024 * 1024;
 const defaultTimeout = 10_000;
-const maxPixels = 40_000_000;
-const maxDimension = 1280;
 
 function attr(node: HtmlNode, name: string): string | undefined {
   return node.attrs?.find((item) => item.name === name)?.value;
@@ -244,7 +243,7 @@ function timeoutSignal(signal: AbortSignal | undefined, timeoutMs: number): Abor
   return signal ? AbortSignal.any([signal, timed]) : timed;
 }
 
-async function boundedBytes(response: Response, maxBytes: number, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
+export async function boundedBytes(response: Response, maxBytes: number, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > maxBytes) {
     await response.body?.cancel();
@@ -252,6 +251,8 @@ async function boundedBytes(response: Response, maxBytes: number, signal: AbortS
   }
   if (!response.body) throw new TypeError('Response has no body');
   const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel(signal.reason).catch(() => undefined); };
+  signal.addEventListener('abort', cancel, { once: true });
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
@@ -267,9 +268,11 @@ async function boundedBytes(response: Response, maxBytes: number, signal: AbortS
       chunks.push(value);
     }
   } finally {
+    signal.removeEventListener('abort', cancel);
     reader.releaseLock();
   }
   const result = new Uint8Array(size);
+  signal.throwIfAborted();
   let offset = 0;
   for (const chunk of chunks) {
     result.set(chunk, offset);
@@ -278,12 +281,24 @@ async function boundedBytes(response: Response, maxBytes: number, signal: AbortS
   return result;
 }
 
-async function fetchLimited(url: string, maxBytes: number, timeoutMs: number, signal?: AbortSignal): Promise<{ url: string; contentType: string; bytes: Uint8Array }> {
-  const current = new URL(url);
-  if (current.protocol !== 'http:' && current.protocol !== 'https:') throw new TypeError('Only http and https URLs are supported');
+export async function fetchLimited(url: string, maxBytes: number, timeoutMs: number, signal?: AbortSignal, validateDestination?: ExtractOptions['validateDestination']): Promise<{ url: string; contentType: string; bytes: Uint8Array<ArrayBuffer> }> {
+  let current = new URL(url);
   const abort = timeoutSignal(signal, timeoutMs);
-  abort.throwIfAborted();
-  const response = await fetch(current, { signal: abort });
+  let response: Response | undefined;
+  for (let redirects = 0; redirects <= 10; redirects++) {
+    abort.throwIfAborted();
+    if (current.protocol !== 'http:' && current.protocol !== 'https:') throw new TypeError('Only http and https URLs are supported');
+    await validateDestination?.(current);
+    abort.throwIfAborted();
+    response = await fetch(current, { signal: abort, redirect: validateDestination ? 'manual' : 'follow' });
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    const destination = response.headers.get('location');
+    await response.body?.cancel();
+    if (!destination) throw new TypeError('Redirect response has no location');
+    if (redirects === 10) throw new RangeError('HTTP redirect limit exceeded');
+    current = new URL(destination, current);
+  }
+  if (!response) throw new Error('No HTTP response');
   if (!response.ok) {
     await response.body?.cancel();
     throw new Error(`HTTP request failed with status ${response.status}`);
@@ -312,7 +327,7 @@ export async function extractPage(input: string, options: ExtractOptions = {}): 
   if (/^[a-z][a-z\d+.-]*:\/\//i.test(input.trim())) {
     const source = new URL(input);
     if (source.protocol !== 'http:' && source.protocol !== 'https:') throw new TypeError('Only http and https URLs are supported');
-    const result = await fetchLimited(source.href, maxHtmlBytes, timeoutMs, options.signal);
+    const result = await fetchLimited(source.href, maxHtmlBytes, timeoutMs, options.signal, options.validateDestination);
     if (!['text/html', 'application/xhtml+xml'].includes(result.contentType)) throw new TypeError(`Expected an HTML response, got ${result.contentType || 'unknown content type'}`);
     pageUrl = result.url;
     html = new TextDecoder().decode(result.bytes);
@@ -344,102 +359,3 @@ function findFirst(node: HtmlNode, tag: string): HtmlNode | undefined {
   return undefined;
 }
 
-function decodeDataImagePayload(payload: string, base64: boolean, maxBytes: number): Uint8Array<ArrayBuffer> {
-  if (base64) {
-    const compact = payload.replace(/\s/g, '');
-    const decodedSize = Math.floor(compact.length * 3 / 4) - (compact.endsWith('==') ? 2 : compact.endsWith('=') ? 1 : 0);
-    if (decodedSize > maxBytes) throw new RangeError(`Image exceeds byte limit (${maxBytes})`);
-    const binary = atob(compact);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-    return bytes;
-  }
-  let byteLength = 0;
-  for (let index = 0; index < payload.length; index++) {
-    if (payload[index] === '%') {
-      if (!/^[\da-f]{2}$/i.test(payload.slice(index + 1, index + 3))) throw new TypeError('Invalid percent-encoded image data URL');
-      byteLength++;
-      index += 2;
-    } else {
-      if (payload.charCodeAt(index) > 0x7f) throw new TypeError('Non-ASCII data URL bytes must be percent-encoded');
-      byteLength++;
-    }
-    if (byteLength > maxBytes) throw new RangeError(`Image exceeds byte limit (${maxBytes})`);
-  }
-  const bytes = new Uint8Array(byteLength);
-  let offset = 0;
-  for (let index = 0; index < payload.length; index++) {
-    if (payload[index] === '%') {
-      bytes[offset++] = Number.parseInt(payload.slice(index + 1, index + 3), 16);
-      index += 2;
-    } else {
-      bytes[offset++] = payload.charCodeAt(index);
-    }
-  }
-  return bytes;
-}
-
-function sniffRasterType(bytes: Uint8Array): string | undefined {
-  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png';
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
-  if (bytes.length >= 12 && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP') return 'image/webp';
-  if (bytes.length >= 6 && /^GIF8[79]a$/.test(String.fromCharCode(...bytes.subarray(0, 6)))) return 'image/gif';
-  if (bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return 'image/bmp';
-  if (bytes.length >= 4 && ((bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2a && bytes[3] === 0) || (bytes[0] === 0x4d && bytes[1] === 0x4d && bytes[2] === 0 && bytes[3] === 0x2a))) return 'image/tiff';
-  if (bytes.length >= 12 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp' && ['avif', 'avis'].includes(String.fromCharCode(...bytes.subarray(8, 12)))) return 'image/avif';
-  return undefined;
-}
-
-async function canvasPng(bitmap: ImageBitmap): Promise<Blob> {
-  const scale = Math.min(1, maxDimension / bitmap.width, maxDimension / bitmap.height);
-  const width = Math.max(1, Math.floor(bitmap.width * scale));
-  const height = Math.max(1, Math.floor(bitmap.height * scale));
-  let canvas: OffscreenCanvas | HTMLCanvasElement;
-  if (typeof OffscreenCanvas !== 'undefined') {
-    canvas = new OffscreenCanvas(width, height);
-  } else if (typeof document !== 'undefined') {
-    canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-  } else {
-    throw new Error('Image preprocessing requires OffscreenCanvas or a document canvas');
-  }
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('Could not create a 2D canvas context');
-  context.drawImage(bitmap, 0, 0, width, height);
-  if ('convertToBlob' in canvas) return canvas.convertToBlob({ type: 'image/png' });
-  if (!('toBlob' in canvas)) throw new Error('Canvas PNG encoding is unavailable');
-  return new Promise<Blob>((resolve, reject) => {
-    (canvas as HTMLCanvasElement).toBlob((blob: Blob | null) => blob ? resolve(blob) : reject(new Error('Canvas PNG encoding failed')), 'image/png');
-  });
-}
-
-export async function loadImage(image: PageImage, options: Pick<ExtractOptions, 'signal' | 'maxImageBytes' | 'timeoutMs'> = {}): Promise<{ imageId: string; data: Uint8Array; mimeType: 'image/png' }> {
-  const maxBytes = options.maxImageBytes ?? defaultImageLimit;
-  const timeoutMs = options.timeoutMs ?? defaultTimeout;
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError('maxImageBytes must be a positive safe integer');
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new RangeError('timeoutMs must be between 1 and 2147483647');
-  options.signal?.throwIfAborted();
-  let input: Blob;
-  if (/^data:/i.test(image.url)) {
-    const match = /^data:(image\/(?:png|jpeg|webp|gif|avif|tiff|bmp));(base64|[^,]*),(.*)$/is.exec(image.url);
-    if (!match) throw new TypeError('Only raster image data URLs are supported');
-    const bytes = decodeDataImagePayload(match[3]!, match[2] === 'base64', maxBytes);
-    if (sniffRasterType(bytes) !== match[1]!.toLowerCase()) throw new TypeError('Image data does not match its declared raster format');
-    input = new Blob([bytes as Uint8Array<ArrayBuffer>], { type: match[1]!.toLowerCase() });
-  } else {
-    const result = await fetchLimited(image.url, maxBytes, timeoutMs, options.signal);
-    const bytes = result.bytes;
-    if (sniffRasterType(bytes) !== result.contentType) throw new TypeError('Image bytes do not match the declared raster content type');
-    input = new Blob([bytes as Uint8Array<ArrayBuffer>], { type: result.contentType });
-  }
-  options.signal?.throwIfAborted();
-  const bitmap = await createImageBitmap(input, { imageOrientation: 'from-image' });
-  try {
-    if (bitmap.width <= 0 || bitmap.height <= 0 || bitmap.width * bitmap.height > maxPixels) throw new RangeError(`Decoded image exceeds pixel limit (${maxPixels})`);
-    const output = await canvasPng(bitmap);
-    return { imageId: image.id, data: new Uint8Array(await output.arrayBuffer()), mimeType: 'image/png' };
-  } finally {
-    bitmap.close();
-  }
-}

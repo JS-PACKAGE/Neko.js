@@ -79,3 +79,27 @@ test('fetches only the HTML document and enforces response bounds, status, and M
   await assert.rejects(extractPage(`${origin}/wrong-type`), /Expected an HTML response/);
   await assert.rejects(extractPage(`${origin}/missing`), /status 404/);
 });
+
+test('destination policy sees redirects before any denied destination is requested', async (t) => {
+  let deniedRequests = 0;
+  const server = createServer((request, response) => {
+    if (request.url === '/redirect') response.writeHead(302, { location: '/private' }).end();
+    else { deniedRequests++; response.writeHead(200, { 'content-type': 'text/html' }).end('<p>private</p>'); }
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const observed: string[] = [];
+  await assert.rejects(extractPage(`http://127.0.0.1:${address.port}/redirect`, { validateDestination(url) { observed.push(url.pathname); if (url.pathname === '/private') throw new Error('Destination denied'); } }), /Destination denied/);
+  assert.deepEqual(observed, ['/redirect', '/private']); assert.equal(deniedRequests, 0);
+});
+
+test('cancellation stops a pending streamed HTML response', async (t) => {
+  let began: () => void = () => {};
+  const started = new Promise<void>((resolve) => { began = resolve; });
+  const server = createServer((_request, response) => { response.writeHead(200, { 'content-type': 'text/html' }); response.write('<p>'); began(); });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => { server.closeAllConnections(); server.close(); });
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const controller = new AbortController();
+  const extraction = extractPage(`http://127.0.0.1:${address.port}/stream`, { signal: controller.signal });
+  await started; controller.abort(); await assert.rejects(extraction, { name: 'AbortError' });
+});
