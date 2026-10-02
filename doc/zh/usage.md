@@ -99,7 +99,7 @@ const prepared = await loadImage(page.images[0]);
 
 模型 manifest 固定 Hugging Face revision、必要檔案大小與 SHA-256。快取命中時仍會驗證完整性；檢查失敗會報錯，不會當成快取未命中而靜默略過。建立的 prototype 提供 `prefetch(signal?)`，可明確確保固定模型檔案已在快取。瀏覽器快取由瀏覽器管理，可能因使用者操作或瀏覽器淘汰策略而被清除。
 
-`device: 'cpu'` 和 `device: 'webgpu'` 是明確選擇。瀏覽器 WebGPU 需要可用 adapter 且支援 FP16 vision encoder 所需的 `shader-f16`。瀏覽器 CPU 設定使用 ONNX Runtime WebAssembly，但固定模型的 CPU 端對端推理尚未驗證。Node.js provider 是否可用，取決於安裝的原生 ONNX Runtime 建置。沒有自動後端回退，也不保證跨平台結果或效能一致。
+`device: 'cpu'` 和 `device: 'webgpu'` 是明確選擇。瀏覽器 WebGPU 需要可用 adapter 且支援 FP16 vision encoder 所需的 `shader-f16`。瀏覽器 CPU/WASM 無法載入此固定模型，因 ONNX Runtime Web 不支援 `GatherBlockQuantized(1)`。Node.js CPU 推理路徑仍未測試。沒有自動後端回退，也不保證跨平台結果或效能一致。
 
 ## 安全與隱私
 

@@ -99,7 +99,7 @@ const prepared = await loadImage(page.images[0]);
 
 The model manifest fixes the Hugging Face revision and SHA-256/size of required files. On cache hits, integrity is checked before model use; a mismatch is an error, not a silent cache miss. The `prefetch(signal?)` method is exposed on a created prototype for explicitly ensuring pinned model files are present. Browser cache storage is managed by the browser and may be cleared by its user or eviction policy.
 
-`device: 'cpu'` and `device: 'webgpu'` are explicit requests. Browser WebGPU requires an available adapter with `shader-f16` support for the FP16 vision encoder. Browser CPU is configured to use ONNX Runtime WebAssembly, but that path is not yet verified end to end with the pinned model. Node provider availability depends on the installed native ONNX Runtime build. There is no automatic provider fallback or cross-platform parity guarantee.
+`device: 'cpu'` and `device: 'webgpu'` are explicit requests. Browser WebGPU requires an available adapter with `shader-f16` support for the FP16 vision encoder. Browser CPU/WASM cannot load the pinned model because ONNX Runtime Web lacks an implementation for `GatherBlockQuantized(1)`. The Node CPU inference path remains untested. There is no automatic provider fallback or cross-platform parity guarantee.
 
 ## Security and privacy
 
