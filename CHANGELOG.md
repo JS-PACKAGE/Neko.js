@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Upgrade the pinned Node image-processing dependency to `sharp@0.35.4` to include upstream libheif and libvips security fixes; retain an exact-version install-script approval.
+- Add source-aware Page selection, full content snapshots, versioned citations and claim-evidence auditing; add aggregate report token/time budgets, resumable checkpoints, events, and deadline-bound async selector/resource/event/checkpoint hooks.
 - Add typed conversations, joint multi-image inference, bounded generation/sampling/stop controls, and Draft-07 structured-output runtime validation; this does not claim constrained decoding.
 - Register the pinned all-q4 profile with native/browser execution evidence without implying output-quality guarantees.
 

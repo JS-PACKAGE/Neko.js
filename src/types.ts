@@ -1,4 +1,5 @@
 import type { ErrorStage, ErrorCode } from './errors.js';
+import type { ModelIdentity, LoadedBackend } from './core/engine.js';
 
 export type ImageDiscovery = 'img' | 'picture' | 'background' | 'og:image';
 
@@ -44,6 +45,17 @@ export interface PageSnapshot {
   /** These identify metadata, not visual contents; observations have separate pixel digests. */
   images: { id: string; metadataVersionId: string }[];
 }
+export type Citation =
+  | { kind: 'quote'; snapshotId: string; paragraphId: string; versionId: string; startOffset: number; endOffset: number; quote: string }
+  | { kind: 'image-observation'; snapshotId: string; imageId: string; versionId: string };
+export interface ReportClaim {
+  id: string;
+  target: string;
+  startOffset: number;
+  endOffset: number;
+  citations: Citation[];
+  verification: 'references-validated';
+}
 export interface ExecutionInfo {
   mode: 'inline' | 'worker';
   runtime: 'node' | 'browser';
@@ -64,7 +76,7 @@ export interface ReportImageSource {
   alt?: string;
 }
 export type ReportImage = ReportImageSource & (
-  | { status: 'described'; description: string }
+  | { status: 'described'; description: string; observation: { versionId: string; width: number; height: number; verification: 'model-observation' } }
   | { status: 'failed'; error: { stage: ErrorStage; code: ErrorCode; message: string } }
 );
 
@@ -75,4 +87,16 @@ export interface StructuredReport {
   sections: ReportSection[];
   images: ReportImage[];
   conclusion: string;
+  snapshot: PageSnapshot;
+  claims: ReportClaim[];
+  metadata: {
+    model: ModelIdentity;
+    backend: LoadedBackend;
+    usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+    timings: { loadMs: number; preprocessMs: number; generationMs: number; totalMs: number; queueWaitMs: number };
+    memory: { jsHeapBytes: null; gpuBytes: null };
+    execution: ExecutionInfo;
+    resumedStages: number;
+    evidence: 'references-validated-not-fact-checked';
+  };
 }

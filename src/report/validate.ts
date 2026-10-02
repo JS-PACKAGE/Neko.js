@@ -1,6 +1,9 @@
 import type { Page, StructuredReport } from '../types.js';
 import { ERROR_CODES, ERROR_STAGES } from '../errors.js';
 import { validateGeneratedLanguage } from './language.js';
+import { snapshotPage, validatePage } from '../web/source.js';
+import { getModelProfile } from '../cache/manifest.js';
+import type { PageSnapshot } from '../types.js';
 
 function object(value: unknown, name: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new TypeError(`${name} must be an object`);
@@ -13,13 +16,13 @@ function texts(value: unknown, name: string, allowEmpty = false): asserts value 
   for (const item of value) text(item, name);
 }
 
-export function validateStructuredReport(report: unknown, page: Page): asserts report is StructuredReport {
+function validateReportBody(report: unknown, page: Page): asserts report is StructuredReport {
   object(report, 'Report');
   text(report.language, 'Report language');
   try { Intl.getCanonicalLocales(report.language); } catch { throw new TypeError('Report language must be a valid BCP 47 language tag'); }
   if (report.imageFailurePolicy !== 'error' && report.imageFailurePolicy !== 'omit') throw new TypeError('Report imageFailurePolicy is invalid');
   object(report.page, 'Report page');
-  text(report.page.url, 'Report URL');
+  if (typeof report.page.url !== 'string') throw new TypeError('Report URL must be a string');
   text(report.page.summary, 'Report summary');
   text(report.conclusion, 'Report conclusion');
   validateGeneratedLanguage(report.page.summary, report.language, 'Summary');
@@ -66,4 +69,107 @@ export function validateStructuredReport(report: unknown, page: Page): asserts r
     } else throw new TypeError('Report image status conflicts with its failure policy');
     seen.add(image.imageId);
   }
+}
+
+function digest(value: unknown, name: string): asserts value is string {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new TypeError(`${name} must be a SHA256 digest`);
+}
+function sourceEqual(actual: Page, expected: Page): boolean {
+  if (actual.url !== expected.url || actual.title !== expected.title || actual.paragraphs.length !== expected.paragraphs.length || actual.images.length !== expected.images.length) return false;
+  for (const [index, paragraph] of actual.paragraphs.entries()) {
+    const source = expected.paragraphs[index]!;
+    if (paragraph.id !== source.id || paragraph.text !== source.text || paragraph.heading !== source.heading || paragraph.source.kind !== source.source.kind || paragraph.source.startOffset !== source.source.startOffset || paragraph.source.endOffset !== source.source.endOffset) return false;
+  }
+  for (const [index, image] of actual.images.entries()) {
+    const source = expected.images[index]!;
+    if (image.id !== source.id || image.url !== source.url || image.alt !== source.alt || image.caption !== source.caption || image.sourceElement !== source.sourceElement || image.discoveredBy.length !== source.discoveredBy.length || image.discoveredBy.some((kind, offset) => kind !== source.discoveredBy[offset])) return false;
+  }
+  return true;
+}
+function validateEvidence(report: StructuredReport, expected: PageSnapshot): void {
+  object(report.snapshot, 'Report snapshot'); validatePage(report.snapshot.source);
+  if (report.snapshot.id !== expected.id || report.snapshot.algorithm !== 'sha256' || !sourceEqual(report.snapshot.source, expected.source)) throw new TypeError('Report snapshot does not match its persisted source');
+  for (const kind of ['paragraphs', 'images'] as const) {
+    const entries = report.snapshot[kind]; const sources = expected[kind];
+    if (!Array.isArray(entries) || entries.length !== sources.length) throw new TypeError(`Snapshot ${kind} coverage is invalid`);
+    for (const [index, entry] of entries.entries()) {
+      object(entry, 'Snapshot source version'); const version = sources[index]!;
+      if (entry.id !== version.id || ('versionId' in version ? !('versionId' in entry) || entry.versionId !== version.versionId : !('metadataVersionId' in entry) || entry.metadataVersionId !== version.metadataVersionId)) throw new TypeError('Snapshot source version does not match persisted content');
+    }
+  }
+  const paragraphs = new Map(expected.source.paragraphs.map((paragraph) => [paragraph.id, paragraph]));
+  const versions = new Map(expected.paragraphs.map((paragraph) => [paragraph.id, paragraph.versionId]));
+  const images = new Map(report.images.map((image) => [image.imageId, image]));
+  const targets = new Map<string, string>([['page.summary', report.page.summary], ['conclusion', report.conclusion]]);
+  for (const [index, section] of report.sections.entries()) for (const [point, value] of section.keyPoints.entries()) targets.set(`sections[${index}].keyPoints[${point}]`, value);
+  for (const [index, image] of report.images.entries()) if (image.status === 'described') {
+    object(image.observation, 'Image observation'); digest(image.observation.versionId, 'Image version');
+    if (image.observation.verification !== 'model-observation' || !Number.isSafeInteger(image.observation.width) || image.observation.width < 1 || !Number.isSafeInteger(image.observation.height) || image.observation.height < 1) throw new TypeError('Image observation is invalid');
+    targets.set(`images[${index}].description`, image.description);
+  }
+  if (!Array.isArray(report.claims) || !report.claims.length) throw new TypeError('Report must contain atomic cited claims');
+  const ids = new Set<string>(); const spans = new Map<string, { start: number; end: number }[]>();
+  for (const claim of report.claims) {
+    object(claim, 'Report claim'); text(claim.id, 'Claim ID'); text(claim.target, 'Claim target');
+    const target = targets.get(claim.target);
+    if (ids.has(claim.id) || claim.verification !== 'references-validated' || target === undefined || !Number.isSafeInteger(claim.startOffset) || !Number.isSafeInteger(claim.endOffset) || claim.startOffset < 0 || claim.endOffset <= claim.startOffset || claim.endOffset > target.length || !target.slice(claim.startOffset, claim.endOffset).trim()) throw new TypeError('Atomic claim target or span is invalid');
+    ids.add(claim.id);
+    const ranges = spans.get(claim.target) ?? []; ranges.push({ start: claim.startOffset, end: claim.endOffset }); spans.set(claim.target, ranges);
+    if (!Array.isArray(claim.citations) || !claim.citations.length || claim.citations.length > 8) throw new TypeError('Atomic claim needs explicit citations');
+    const references = new Set<string>();
+    for (const citation of claim.citations) {
+      object(citation, 'Claim citation');
+      if (citation.snapshotId !== expected.id) throw new TypeError('Citation references a different source snapshot');
+      let reference: string;
+      if (citation.kind === 'quote') {
+        const paragraph = paragraphs.get(citation.paragraphId);
+        if (!paragraph || citation.versionId !== versions.get(citation.paragraphId) || !Number.isSafeInteger(citation.startOffset) || !Number.isSafeInteger(citation.endOffset) || citation.startOffset < 0 || citation.endOffset <= citation.startOffset || citation.endOffset > paragraph.text.length || citation.quote !== paragraph.text.slice(citation.startOffset, citation.endOffset)) throw new TypeError('Citation quote, offsets, or paragraph version is invalid');
+        reference = `${citation.paragraphId}:${citation.startOffset}:${citation.endOffset}`;
+      } else if (citation.kind === 'image-observation') {
+        const image = images.get(citation.imageId);
+        if (!image || image.status !== 'described' || citation.versionId !== image.observation.versionId) throw new TypeError('Citation references an unavailable or different image observation');
+        reference = `image:${citation.imageId}`;
+      } else throw new TypeError('Unsupported citation kind');
+      if (references.has(reference)) throw new TypeError('Claim has duplicate citations'); references.add(reference);
+    }
+  }
+  for (const [target, text] of targets) {
+    const ranges = spans.get(target); if (!ranges) throw new TypeError(`Generated text has no atomic claim coverage (${target})`);
+    ranges.sort((a, b) => a.start - b.start); let end = 0;
+    for (const range of ranges) { if (range.start < end || text.slice(end, range.start).trim()) throw new TypeError('Atomic claim ranges overlap or leave unsupported generated text'); end = range.end; }
+    if (text.slice(end).trim()) throw new TypeError('Generated text is not fully covered by cited claims');
+  }
+  object(report.metadata, 'Report metadata'); object(report.metadata.model, 'Report model');
+  const profile = getModelProfile(report.metadata.model.profile);
+  if (report.metadata.model.id !== profile.id || report.metadata.model.revision !== profile.revision) throw new TypeError('Report model identity is not a registered pinned profile');
+  object(report.metadata.model.dtype, 'Model dtype');
+  for (const key of ['embed_tokens', 'decoder_model_merged', 'vision_encoder'] as const) if (report.metadata.model.dtype[key] !== profile.dtype[key]) throw new TypeError('Report model dtype does not match its profile');
+  object(report.metadata.usage, 'Report usage');
+  const usage = report.metadata.usage;
+  if (!Number.isSafeInteger(usage.inputTokens) || !Number.isSafeInteger(usage.outputTokens) || !Number.isSafeInteger(usage.totalTokens) || usage.inputTokens < 0 || usage.outputTokens < 0 || usage.totalTokens !== usage.inputTokens + usage.outputTokens) throw new TypeError('Report token accounting is invalid');
+  object(report.metadata.timings, 'Report timings');
+  for (const key of ['loadMs', 'preprocessMs', 'generationMs', 'totalMs', 'queueWaitMs'] as const) if (typeof report.metadata.timings[key] !== 'number' || !Number.isFinite(report.metadata.timings[key]) || report.metadata.timings[key] < 0) throw new TypeError('Report timing is invalid');
+  object(report.metadata.memory, 'Report memory');
+  if (report.metadata.memory.jsHeapBytes !== null || report.metadata.memory.gpuBytes !== null) throw new TypeError('Report memory must mark unmeasured values as unknown');
+  object(report.metadata.backend, 'Report backend');
+  if (!['node', 'browser'].includes(report.metadata.backend.runtime) || !['cpu', 'webgpu'].includes(report.metadata.backend.device) || report.metadata.backend.providerEvidence !== 'loaded-session-configuration' || !Array.isArray(report.metadata.backend.sessions) || !report.metadata.backend.sessions.length) throw new TypeError('Report backend evidence is invalid');
+  const sessions = new Set<string>();
+  for (const session of report.metadata.backend.sessions) {
+    object(session, 'Loaded session');
+    const name = session.name;
+    if (typeof name !== 'string' || !Object.hasOwn(profile.dtype, name) || sessions.has(name) || session.device !== report.metadata.backend.device || session.dtype !== profile.dtype[name as keyof typeof profile.dtype]) throw new TypeError('Loaded session configuration does not match the pinned model');
+    sessions.add(name);
+  }
+  if (sessions.size !== Object.keys(profile.dtype).length) throw new TypeError('Loaded session configuration is incomplete');
+  object(report.metadata.execution, 'Report execution');
+  if (!['inline', 'worker'].includes(report.metadata.execution.mode) || report.metadata.execution.runtime !== report.metadata.backend.runtime || report.metadata.execution.mode === 'worker' && typeof report.metadata.execution.workerId !== 'string' || !Number.isSafeInteger(report.metadata.resumedStages) || report.metadata.resumedStages < 0 || report.metadata.evidence !== 'references-validated-not-fact-checked') throw new TypeError('Report execution or evidence metadata is invalid');
+}
+
+/** Audits persisted source hashes and exact references, not factual entailment or image pixels. */
+export async function validateStructuredReport(report: unknown, page?: Page): Promise<StructuredReport> {
+  object(report, 'Report'); object(report.snapshot, 'Report snapshot'); validatePage(report.snapshot.source);
+  const [expected, external] = await Promise.all([snapshotPage(report.snapshot.source), page === undefined || page === report.snapshot.source ? undefined : snapshotPage(page)]);
+  if (external && external.id !== expected.id) throw new TypeError('Report source differs from the supplied selected Page');
+  validateReportBody(report, expected.source); validateEvidence(report, expected);
+  return report;
 }
