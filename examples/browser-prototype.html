@@ -101,7 +101,7 @@
         if (mode === 'report') {
           const report = await instance.describe(document.querySelector('#html').value, { language: document.querySelector('#language').value, maxNewTokens, signal: controller.signal });
           output.textContent = JSON.stringify(report, null, 2);
-          details.textContent = JSON.stringify({ backend: instance.backend.current(), cache: instance.cache.engine.status(), report }, null, 2);
+          details.textContent = JSON.stringify({ backend: await instance.backend.current(), cache: await instance.cache.engine.status(), report }, null, 2);
         } else {
           const result = await instance.infer({ ...(mode === 'image' ? { image } : {}), prompt, maxNewTokens, signal: controller.signal, onToken(text) { output.textContent += text; } });
           output.textContent = result.text;

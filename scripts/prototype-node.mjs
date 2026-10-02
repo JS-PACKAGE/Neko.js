@@ -106,7 +106,7 @@ async function main() {
   const model = await createNeko({ device: values.device, localFilesOnly: values.offline, progressCallback, ...(values['cache-dir'] ? { cacheDir: resolve(values['cache-dir']) } : {}), ...(profilePrefix ? { profilePrefix } : {}) });
   const outerLoadMs = performance.now() - loadStarted;
   try {
-    console.log(JSON.stringify({ phase: 'created', outerLoadMs, networkRequests, downloadedBytes: [...downloads.values()].reduce((sum, bytes) => sum + bytes, 0), downloadedFiles: Object.fromEntries(downloads), modelCache: await model.cache.model.status(), engine: model.cache.engine.status(), processMemory: process.memoryUsage() }));
+    console.log(JSON.stringify({ phase: 'created', outerLoadMs, networkRequests, downloadedBytes: [...downloads.values()].reduce((sum, bytes) => sum + bytes, 0), downloadedFiles: Object.fromEntries(downloads), modelCache: await model.cache.model.status(), engine: await model.cache.engine.status(), processMemory: process.memoryUsage() }));
     const result = await model.infer({ image, prompt });
     if (values.offline && attemptedNetworkRequests !== 0) throw new Error('Offline inference attempted network access');
     console.log(JSON.stringify({ phase: 'inference', ...result, processMemory: process.memoryUsage() }));

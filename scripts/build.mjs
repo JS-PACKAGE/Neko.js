@@ -7,6 +7,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const dist = join(root, 'dist');
 const browserEntries = [
   ['src/index.ts', 'neko.js'],
+  ['src/runtime/worker.ts', 'worker.js'],
   ['src/web/index.ts', 'web.js'],
   ['src/report/index.ts', 'report.js'],
   ['src/backend/index.ts', 'backend.js'],
@@ -14,6 +15,7 @@ const browserEntries = [
 ];
 const nodeEntries = {
   index: 'src/index.ts',
+  worker: 'src/runtime/worker.ts',
   types: 'src/types.ts',
   web: 'src/web/index.ts',
   report: 'src/report/index.ts',
@@ -32,6 +34,11 @@ for (const [entryPoint, outfile] of browserEntries) {
     target: ['es2022'],
     conditions: ['browser', 'import', 'default'],
     mainFields: ['browser', 'module', 'main'],
+    // Blob module workers retain the approved package asset base, not their opaque blob URL.
+    ...(entryPoint === 'src/runtime/worker.ts' ? {
+      define: { 'import.meta.url': '__nekoWorkerModuleUrl', 'self.location': '__nekoWorkerLocation', location: '__nekoWorkerLocation' },
+      banner: { js: 'const __nekoWorkerModuleUrl = self.name; const __nekoWorkerLocation = new URL(__nekoWorkerModuleUrl);' },
+    } : {}),
     sourcemap: true,
     legalComments: 'external',
   });

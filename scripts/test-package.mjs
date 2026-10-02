@@ -61,7 +61,7 @@ try {
     import * as report from 'neko.js/report';
     import * as backend from 'neko.js/backend';
     import * as ort from 'onnxruntime-node';
-    if (typeof neko.createNeko !== 'function' || typeof neko.Neko !== 'function' || typeof neko.NekoError !== 'function') throw new Error('Main SDK exports are unavailable');
+    if (typeof neko.createNeko !== 'function' || typeof neko.Neko?.create !== 'function' || typeof neko.NekoError !== 'function') throw new Error('Main SDK exports are unavailable');
     if (!types || !web || !report || !backend || !ort.InferenceSession) throw new Error('A packed public entry could not be imported');
     const versions = ort.env.versions;
     if (versions?.common !== '1.30.0') throw new Error('Consumer resolved an unexpected native ONNX Runtime: ' + JSON.stringify(versions));

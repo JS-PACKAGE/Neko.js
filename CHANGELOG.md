@@ -4,6 +4,8 @@
 
 - Upgrade the pinned Node image-processing dependency to `sharp@0.35.4` to include upstream libheif and libvips security fixes; retain an exact-version install-script approval.
 - Add source-aware Page selection, full content snapshots, versioned citations and claim-evidence auditing; add aggregate report token/time budgets, resumable checkpoints, events, and deadline-bound async selector/resource/event/checkpoint hooks.
+- Add bounded FIFO request admission, real Node/browser workers, cancellation and streaming, queue status, and actual load/warmup/runtime readiness APIs.
+- Apply instance-scoped fail-closed policy to network and local inputs; preserve bound class policy hooks without freezing caller objects, capture model-source getters once before worker serialization, strip sensitive headers on cross-origin hops without restoring them, and align trusted worker URLs across source and bundled runtime layouts. Fail closed on opaque browser redirects; support pinned model mirrors and a verified loopback cache-mirror helper.
 - Add typed conversations, joint multi-image inference, bounded generation/sampling/stop controls, and Draft-07 structured-output runtime validation; this does not claim constrained decoding.
 - Register the pinned all-q4 profile with native/browser execution evidence without implying output-quality guarantees.
 
