@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 — 2026-10-02
 
 - Pin the Node native ONNX Runtime to 1.30.0 and use matching browser ONNX Runtime Web GPU/WASM assets.
 - Verify the pinned Qwen model with real Node inference, including cold-cache download and fresh-process offline-cache runs; exact measurements are in the usage guides.
