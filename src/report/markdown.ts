@@ -1,9 +1,8 @@
 import type { StructuredReport } from '../types.js';
 
-const LABELS: Record<string, { summary: string; sections: string; images: string; conclusion: string; source: string }> = {
-  en: { summary: 'Summary', sections: 'Key points', images: 'Image descriptions', conclusion: 'Conclusion', source: 'Source' },
-  'zh-TW': { summary: '頁面摘要', sections: '分段重點', images: '圖片描述', conclusion: '整體結論', source: '來源' },
-  zh: { summary: '頁面摘要', sections: '分段重點', images: '圖片描述', conclusion: '整體結論', source: '來源' },
+const LABELS: Record<string, { summary: string; sections: string; images: string; conclusion: string; source: string; failed: string }> = {
+  en: { summary: 'Summary', sections: 'Key points', images: 'Image descriptions', conclusion: 'Conclusion', source: 'Source', failed: 'Image description unavailable' },
+  zh: { summary: '頁面摘要', sections: '分段重點', images: '圖片描述', conclusion: '整體結論', source: '來源', failed: '無法產生圖片描述' },
 };
 
 function markdownText(value: string): string {
@@ -43,11 +42,12 @@ export function renderMarkdown(report: StructuredReport): string {
   if (report.images.length) {
     lines.push(`## ${labels.images}`, '');
     for (const image of report.images) {
-      if (!image.description.trim()) throw new TypeError(`Image ${image.imageId} is missing its generated description`);
+      if (image.status === 'described' && !image.description.trim()) throw new TypeError(`Image ${image.imageId} is missing its generated description`);
       if (image.source.imageId !== image.imageId) throw new TypeError(`Image ${image.imageId} has inconsistent provenance`);
       const source = markdownUrl(image.url);
       const origin = source ? `[${markdownText(image.imageId)}](${source})` : markdownText(image.url);
-      lines.push(`### ${markdownText(image.imageId)}${image.alt ? ` — ${markdownText(image.alt)}` : ''}`, '', markdownText(image.description), '', `_${labels.source}: ${origin}_`, '');
+      const description = image.status === 'described' ? image.description : `${labels.failed}: ${image.error.code} (${image.error.stage}) — ${image.error.message}`;
+      lines.push(`### ${markdownText(image.imageId)}${image.alt ? ` — ${markdownText(image.alt)}` : ''}`, '', markdownText(description), '', `_${labels.source}: ${origin}_`, '');
     }
   }
   lines.push(`## ${labels.conclusion}`, '', markdownText(report.conclusion));

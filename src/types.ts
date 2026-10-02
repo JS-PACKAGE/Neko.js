@@ -1,3 +1,5 @@
+import type { ErrorStage, ErrorCode } from './errors.js';
+
 export type ImageDiscovery = 'img' | 'picture' | 'background' | 'og:image';
 
 export interface Paragraph {
@@ -33,16 +35,20 @@ export interface ReportSection {
   paragraphIds: string[];
 }
 
-export interface ReportImage {
+export interface ReportImageSource {
   imageId: string;
   url: string;
-  description: string;
   source: { kind: 'image'; imageId: string };
   alt?: string;
 }
+export type ReportImage = ReportImageSource & (
+  | { status: 'described'; description: string }
+  | { status: 'failed'; error: { stage: ErrorStage; code: ErrorCode; message: string } }
+);
 
 export interface StructuredReport {
   language: string;
+  imageFailurePolicy: 'error' | 'omit';
   page: { url: string; title?: string; summary: string };
   sections: ReportSection[];
   images: ReportImage[];
