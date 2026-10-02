@@ -2,15 +2,15 @@
 
 ## Unreleased
 
-- Seed offline browser quality runs from the verified Node cache into the SDK CacheStorage contract, then enforce `localFilesOnly` and block external network requests; report seed and zero-HF-request evidence.
-- Correct quality claim scoring so supported cross-ID context does not invalidate a matching fact, and accept both equivalent circle-left-square / square-right-circle relations while rejecting opposite or negated positions.
-
 - Upgrade the pinned Node image-processing dependency to `sharp@0.35.4` to include upstream libheif and libvips security fixes; retain an exact-version install-script approval.
 - Add source-aware Page selection, full content snapshots, versioned citations and claim-evidence auditing; add aggregate report token/time budgets, resumable checkpoints, events, and deadline-bound async selector/resource/event/checkpoint hooks.
 - Add bounded FIFO request admission, real Node/browser workers, cancellation and streaming, queue status, and actual load/warmup/runtime readiness APIs.
 - Apply instance-scoped fail-closed policy to network and local inputs; preserve bound class policy hooks without freezing caller objects, capture model-source getters once before worker serialization, strip sensitive headers on cross-origin hops without restoring them, and align trusted worker URLs across source and bundled runtime layouts. Fail closed on opaque browser redirects; support pinned model mirrors and a verified loopback cache-mirror helper.
 - Add typed conversations, joint multi-image inference, bounded generation/sampling/stop controls, and Draft-07 structured-output runtime validation; this does not claim constrained decoding.
 - Register the pinned all-q4 profile with native/browser execution evidence without implying output-quality guarantees.
+- Seed offline browser quality runs from the verified Node cache into the SDK CacheStorage contract, then enforce `localFilesOnly` and block external network requests; report seed and zero-HF-request evidence.
+- Seed headed browser UI smokes from the verified Node-cache mirror into browser Cache Storage, then require local-only inference and block model-host requests.
+- Correct quality claim scoring so supported cross-ID context does not invalidate a matching fact, and accept both equivalent circle-left-square / square-right-circle relations while rejecting opposite or negated positions.
 
 ## 1.1.0 — 2026-10-02
 

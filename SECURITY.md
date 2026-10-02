@@ -23,7 +23,6 @@ The SDK contains no application telemetry or model-output upload feature. Initia
 
 ## Dependency and model integrity policy
 
-The pinned `sharp` dependency is kept current with security advisories for its bundled native image codecs; version changes must retain a compatible, exact-version install-script approval and be verified against supported Node platforms.
-
 Direct dependencies are version-pinned in `package.json`, and transitive versions are recorded in `package-lock.json`. Changes to the Transformers.js version, ONNX Runtime, model revision, pinned file sizes/digests, provider configuration, or cache implementation require review and targeted tests. Never weaken integrity failures into silent cache misses or use an unpinned model fallback.
+The pinned `sharp` dependency is kept current with security advisories for its bundled native image codecs; version changes must retain a compatible, exact-version install-script approval and be verified against supported Node platforms.
 The npm `allowScripts` list is intentionally limited to the pinned `esbuild`, `onnxruntime-node`, and `sharp` packages: their install hooks select or provide platform-specific build/runtime artifacts. Do not replace this with a blanket script approval; review any proposed change to the allowlist and the exact package version first.

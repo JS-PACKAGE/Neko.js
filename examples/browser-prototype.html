@@ -13,6 +13,7 @@
     button { margin-top: 1rem; cursor: pointer; }
     button:disabled { cursor: progress; }
     pre { overflow: auto; padding: 1rem; background: color-mix(in srgb, CanvasText 8%, Canvas); white-space: pre-wrap; overflow-wrap: anywhere; }
+    label input[type="checkbox"] { width: auto; }
     #status { min-height: 1.5em; }
   </style>
 </head>
@@ -23,8 +24,11 @@
   <select id="mode"><option value="image">Image + prompt</option><option value="text">Text only</option><option value="report">Website report</option></select>
   <label for="language">Report language</label>
   <select id="language"><option value="en">English</option><option value="zh-TW">繁體中文</option></select>
-  <label for="html">Report HTML or URL (remote resources require CORS)</label>
+  <label for="model-profile">Model profile</label>
+  <select id="model-profile"><option value="default">Default</option><option value="all-q4">All Q4</option></select>
+  <label for="html">Report HTML or remote URL</label>
   <textarea id="html"><title>Example</title><p>The exhibit displays a red square on a blue background.</p></textarea>
+  <label><input id="approve-remote-page" type="checkbox"> I approve fetching this URL and page images from its origin. This demo policy is not SSRF-safe for production.</label>
   <label for="image">Image</label>
   <input id="image" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,image/tiff,image/bmp">
   <label for="prompt">Prompt</label>
@@ -34,9 +38,9 @@
   <label for="device">Execution device</label>
   <select id="device">
     <option value="webgpu">WebGPU (explicit)</option>
-    <option value="cpu">CPU/WASM — unsupported by this pinned model</option>
+    <option value="cpu" disabled>CPU/WASM — unsupported by this pinned model</option>
   </select>
-  <label><input id="local-only" type="checkbox"> Use only models already available in the local cache</label>
+  <label><input id="local-only" type="checkbox"> Use only cached models; remote page and image URLs remain blocked</label>
   <button id="run" type="button">Load model and run inference</button>
   <button id="cancel" type="button">Cancel current operation</button>
   <p id="status" role="status" aria-live="polite">Ready.</p>
@@ -51,14 +55,20 @@
     const promptInput = document.querySelector('#prompt');
     const maxNewTokensInput = document.querySelector('#max-new-tokens');
     const deviceInput = document.querySelector('#device');
+    const modelProfileInput = document.querySelector('#model-profile');
     const localOnlyInput = document.querySelector('#local-only');
+    const reportInput = document.querySelector('#html');
+    const remoteApprovalInput = document.querySelector('#approve-remote-page');
     const runButton = document.querySelector('#run');
     const status = document.querySelector('#status');
     const output = document.querySelector('#output');
     const details = document.querySelector('#details');
+    const runtimeAssets = new Set(['ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.asyncify.wasm', 'ort-wasm-simd-threaded.asyncify.mjs'].map((name) => new URL('../dist/browser/assets/' + name, import.meta.url).href));
+    const workerAsset = new URL('../dist/browser/worker.js', import.meta.url).href;
     let instance;
     let instanceKey;
     let controller;
+    reportInput.addEventListener('input', () => { remoteApprovalInput.checked = false; });
     document.querySelector('#cancel').addEventListener('click', () => controller?.abort());
 
 
@@ -68,8 +78,25 @@
       const mode = document.querySelector('#mode').value;
       if (mode === 'image' && !image) { status.textContent = 'Choose an image first.'; return; }
       if (mode !== 'report' && !prompt.trim()) { status.textContent = 'Enter a prompt first.'; return; }
+      if (deviceInput.value !== 'webgpu') { status.textContent = 'Browser execution requires WebGPU; CPU/WASM is unsupported by this pinned model.'; return; }
       const maxNewTokens = Number(maxNewTokensInput.value);
       if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1 || maxNewTokens > 2048) { status.textContent = 'Maximum generated tokens must be an integer from 1 to 2048.'; return; }
+      const localFilesOnly = localOnlyInput.checked;
+      let remotePageUrl;
+      let approvedRemoteOrigin;
+      if (mode === 'report') {
+        const source = reportInput.value.trim();
+        try {
+          const candidate = new URL(source);
+          if (candidate.protocol === 'http:' || candidate.protocol === 'https:') remotePageUrl = candidate;
+        } catch {}
+        if (remotePageUrl) {
+          if (remotePageUrl.username || remotePageUrl.password) { status.textContent = 'Remote page URLs must not contain credentials.'; return; }
+          if (localFilesOnly) { status.textContent = 'Local-only mode cannot fetch a remote page URL.'; return; }
+          if (!remoteApprovalInput.checked) { status.textContent = 'Review the trust warning and explicitly approve fetching this URL origin.'; return; }
+          approvedRemoteOrigin = remotePageUrl.origin;
+        }
+      }
       runButton.disabled = true;
       controller = new AbortController();
       status.dataset.state = 'running';
@@ -77,16 +104,26 @@
       details.textContent = '';
       try {
         const device = deviceInput.value;
-        const localFilesOnly = localOnlyInput.checked;
-        const nextKey = `${device}:${localFilesOnly}`;
+        const modelProfile = modelProfileInput.value;
+        const nextKey = `${device}:${modelProfile}:${localFilesOnly}:${approvedRemoteOrigin ?? ''}`;
         if (instance && instanceKey !== nextKey) {
           await instance.dispose();
           instance = undefined;
         }
         if (!instance) {
-          status.textContent = 'Loading the pinned model and runtime assets…';
+          status.textContent = 'Loading the selected pinned model profile and runtime assets…';
+          const policy = {
+            network(url, kind) {
+              if (kind === 'model') return true;
+              if (kind === 'runtime') return runtimeAssets.has(url.href);
+              if (kind === 'worker') return url.href === workerAsset;
+              return (kind === 'page' || kind === 'image') && approvedRemoteOrigin !== undefined && url.origin === approvedRemoteOrigin;
+            },
+          };
           instance = await createNeko({
             device,
+            modelProfile,
+            policy,
             localFilesOnly,
             signal: controller.signal,
             progressCallback(event) {
@@ -99,13 +136,31 @@
         }
         status.textContent = `Running ${mode} inference…`;
         if (mode === 'report') {
-          const report = await instance.describe(document.querySelector('#html').value, { language: document.querySelector('#language').value, maxNewTokens, signal: controller.signal });
+          const reportOptions = {
+            language: document.querySelector('#language').value,
+            maxNewTokens,
+            signal: controller.signal,
+            ...(approvedRemoteOrigin ? { validateDestination(url) {
+              if (url.origin !== approvedRemoteOrigin) throw new Error('Remote page redirects and images must stay on the explicitly approved origin.');
+            } } : {}),
+          };
+          const report = await instance.describe(remotePageUrl?.href ?? reportInput.value, reportOptions);
           output.textContent = JSON.stringify(report, null, 2);
-          details.textContent = JSON.stringify({ backend: await instance.backend.current(), cache: await instance.cache.engine.status(), report }, null, 2);
+          const [backend, modelCache, engineCache] = await Promise.all([
+            instance.backend.current(),
+            instance.cache.model.status(),
+            instance.cache.engine.status(),
+          ]);
+          details.textContent = JSON.stringify({ model: report.metadata.model, backend: report.metadata.backend, status: { backend, modelCache, engineCache }, report }, null, 2);
         } else {
           const result = await instance.infer({ ...(mode === 'image' ? { image } : {}), prompt, maxNewTokens, signal: controller.signal, onToken(text) { output.textContent += text; } });
           output.textContent = result.text;
-          details.textContent = JSON.stringify({ model: result.model, backend: result.backend, timings: result.timings, memory: result.memory, usage: result.usage, finishReason: result.finishReason }, null, 2);
+          const [backend, modelCache, engineCache] = await Promise.all([
+            instance.backend.current(),
+            instance.cache.model.status(),
+            instance.cache.engine.status(),
+          ]);
+          details.textContent = JSON.stringify({ model: result.model, backend: result.backend, status: { backend, modelCache, engineCache }, execution: result.execution, timings: result.timings, memory: result.memory, usage: result.usage, finishReason: result.finishReason }, null, 2);
         }
         status.dataset.state = 'complete';
         status.textContent = 'Inference complete.';

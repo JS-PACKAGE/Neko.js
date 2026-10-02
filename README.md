@@ -17,12 +17,14 @@ npm ci
 npm run build
 ```
 
-使用方也可在本機 clone 並建置目前工作樹後執行 `npm pack`，產生含預建 `dist/` 的 tarball，再安裝該檔案。tarball 的 `1.1.0` 套件版本反映工作樹的 `package.json`；本專案不發佈至 npm。因 npm 11 對 Git 相依套件的 `prepare` 有腳本核准限制，不要假設直接安裝 Git URL 會完成建置；clone、`npm ci`、`npm run build` 的本機流程仍支援。Node bundle 已包含 Transformers.js；執行依賴為 pinned `onnxruntime-node@1.30.0`、`sharp@0.35.4`、`parse5@8.0.1`。若 npm 11 封鎖原生安裝腳本，僅核准這兩個有原生程式碼的精確版本，不要核准所有套件腳本。
+- 使用方也可在本機 clone 並建置目前工作樹後執行 `npm pack`，產生含預建 `dist/` 的 tarball，再安裝該檔案。tarball 的 `1.1.0` 套件版本反映工作樹的 `package.json`；本專案不發佈至 npm。因 npm 11 對 Git 相依套件的 `prepare` 有腳本核准限制，不要假設直接安裝 Git URL 會完成建置；clone、`npm ci`、`npm run build` 的本機流程仍支援。Node bundle 已包含 Transformers.js；執行依賴為 pinned `onnxruntime-node@1.30.0`、`sharp@0.35.4`、`parse5@8.0.1`。若 npm 11 封鎖原生安裝腳本，僅核准這兩個有原生程式碼的精確版本，不要核准所有套件腳本。
 
 ```js
 import { createNeko } from 'neko.js';
+import { realpath } from 'node:fs/promises';
 
-const neko = await createNeko({ device: 'webgpu' });
+const photo = await realpath('./photo.png');
+const neko = await createNeko({ device: 'cpu', policy: { localFiles: (path) => path === photo } });
 try {
   const answer = await neko.infer({
     image: './photo.png', // 可省略以進行純文字推理
@@ -31,7 +33,7 @@ try {
   });
   console.log(answer.text, answer.usage);
 
-  const report = await neko.describe('https://example.test/article', {
+  const report = await neko.describe('<p>The sky is blue.</p>', {
     language: 'zh-TW',
     format: 'json',
     imageFailurePolicy: 'omit',
@@ -47,6 +49,8 @@ try {
 ### 瀏覽器
 
 建置後從安全的 HTTP(S) 來源提供 `examples/browser-prototype.html`。Browser bundle 位於 `dist/browser/`，ONNX WASM 資產隨 bundle 一起輸出。瀏覽器 CPU/WASM 不支援此模型：ONNX Runtime Web 缺少 `GatherBlockQuantized(1)`，Neko 會回報錯誤，不會自動 fallback。瀏覽器 URL 圖片仍受 CORS 限制。
+
+首次線上模型下載請使用經驗證的 `modelSource: { baseUrl }` mirror／broker；瀏覽器隱藏 Hugging Face 跨來源 redirect 時會 fail closed，不會繞過逐 hop 核准。設定及 loopback helper 見[使用說明](doc/zh/usage.md#瀏覽器模型來源)。
 
 ### 驗證與安全
 
@@ -91,8 +95,10 @@ Consumers may clone and build the current working tree locally, then run `npm pa
 
 ```js
 import { createNeko } from 'neko.js';
+import { realpath } from 'node:fs/promises';
 
-const neko = await createNeko({ device: 'webgpu' });
+const photo = await realpath('./photo.png');
+const neko = await createNeko({ device: 'cpu', policy: { localFiles: (path) => path === photo } });
 try {
   const answer = await neko.infer({
     image: './photo.png', // omit for text-only inference
@@ -101,7 +107,7 @@ try {
   });
   console.log(answer.text, answer.usage);
 
-  const report = await neko.describe('https://example.test/article', {
+  const report = await neko.describe('<p>The sky is blue.</p>', {
     language: 'en',
     format: 'json',
     imageFailurePolicy: 'omit',
@@ -117,6 +123,8 @@ Model loading is lazy. The default Node cache is macOS `~/Library/Caches/neko.js
 ### Browser
 
 After building, serve `examples/browser-prototype.html` from a secure HTTP(S) origin. Browser bundles and their ONNX WASM assets are emitted under `dist/browser/`. Browser CPU/WASM is unsupported for this model because ONNX Runtime Web lacks `GatherBlockQuantized(1)`; Neko reports an error and does not automatically fall back. Browser image URLs remain subject to CORS.
+
+For first-online model downloads use a verified `modelSource: { baseUrl }` mirror/broker. Concealed Hugging Face cross-origin redirects fail closed rather than bypassing per-hop approval. See the [usage guide and loopback helper](doc/en/usage.md#browser-model-sources).
 
 ### Verification and security
 

@@ -31,8 +31,10 @@ Measurements used Node.js 22.23.3, Transformers.js 4.2.0, native ONNX Runtime 1.
 
 ```js
 import { createNeko } from 'neko.js';
+import { realpath } from 'node:fs/promises';
 
-const neko = await createNeko({ device: 'webgpu' });
+const photo = await realpath('./photo.png');
+const neko = await createNeko({ device: 'cpu', policy: { localFiles: (path) => path === photo } });
 try {
   // Image input is optional: without it, this is text-only inference.
   const answer = await neko.infer({
@@ -43,32 +45,38 @@ try {
   });
   console.log(answer.usage, answer.finishReason);
 
-  const report = await neko.describe('https://example.test/article', {
+  const report = await neko.describe('<p>The sky is blue.</p>', {
     language: 'en',
     format: 'json',
     imageFailurePolicy: 'omit',
     maxNewTokens: 256,
   });
   console.log(report.page.summary, report.images);
-  console.log(await neko.cache.model.status(), neko.cache.engine.status());
+  console.log(await neko.cache.model.status(), await neko.cache.engine.status());
 } finally {
   await neko.dispose();
 }
 ```
 
-`createNeko(options?)` sets up the selected backend and verified cache, then returns without loading the model. `cache.model.prefetch()` downloads and verifies model files but does not load the inference engine; the first `infer()` or `describe()` loads it lazily. The default device is `webgpu`; there is no automatic fallback. `cacheDir` overrides the Node cache location. Otherwise Node uses `~/Library/Caches/neko.js` on macOS, `%LOCALAPPDATA%/neko.js` on Windows, or `$XDG_CACHE_HOME/neko.js` / `~/.cache/neko.js` on Linux. Browsers use Cache Storage. `localFilesOnly: true` forbids network downloads and fails if a required verified asset is absent.
+`createNeko(options?)` configures the backend and verified cache without loading the model. `modelProfile: 'default'` loads q4 embeddings/decoder and fp16 vision; `'all-q4'` selects the separately pinned q4 vision assets. Loaded session metadata records the actual configuration, not just the requested profile. `cache.model.prefetch()` verifies files without creating sessions; inference loads lazily. `load()` loads sessions, `warmup()` also exercises text and vision, and `runtimeStatus()` reports their readiness. The default device is `webgpu`, with no automatic fallback. Node `cacheDir` defaults to macOS `~/Library/Caches/neko.js`, Windows `%LOCALAPPDATA%/neko.js`, or Linux `$XDG_CACHE_HOME/neko.js` / `~/.cache/neko.js`; browsers use Cache Storage. `localFilesOnly: true` forbids uncached model downloads and remote page/image requests; trusted package-local worker/runtime bootstrap remains permitted.
 
-`infer({ prompt, image?, maxNewTokens?, contextWindowTokens?, signal?, onToken? })` accepts a Node path/file URL, an HTTP(S) image URL, a browser `Blob`/`File` or local `blob:` object URL, a supported raster data URL, or a structurally decoded image. In Node, supply `validateDestination`/network controls for remote images; browser remote images remain subject to CORS. A non-empty prompt is required; `maxNewTokens` defaults to 128. The result includes decoded text, `finishReason`, token usage, pinned model identity, observed backend/session configuration, timings, and memory values (unavailable memory is `null`). `firstTokenMs` is measured from the first model-token callback, not the first decoded text chunk. `onToken` receives decoded text chunks; callback failures fail the inference.
+`infer({ prompt?, messages?, image?, generation?, maxNewTokens?, contextWindowTokens?, signal?, onToken? })` supports a nonempty text prompt or ordered `system`/`user`/`assistant` messages with text and image content. Multiple images are processed jointly in one generation, preserving their individual dimensions and content hashes. Inputs include Node paths/file URLs, HTTP(S) image URLs, browser `Blob`/`File` and local `blob:` URLs, supported raster data URLs, or structurally decoded images. Instance policy approval is required for local files and remote page/image URLs; browser CORS still applies. `maxNewTokens` defaults to 128. Results contain text, finish reason, usage, model/profile, observed sessions, execution, timings, and memory (`null` when unavailable). `onToken` receives decoded chunks; `firstTokenMs` measures the first model-token callback.
 
-`describe(urlOrHtml, options?)` extracts page text and images, performs actual image inference, and generates a structured report by default. `maxNewTokens` defaults to 256 per generation phase. `format: 'markdown'` returns Markdown; `format: 'json'` (the default) returns the typed report object. Markdown section labels are English by default and Traditional Chinese for `zh-*` tags. `language` is a BCP 47 language tag. `imageFailurePolicy: 'error'` is the default and rejects on an image failure; `'omit'` preserves a typed failed-image entry with its error instead. The report retains source image IDs/provenance, requires every extracted paragraph and image to be accounted for, and validates all generated summary, section, and image-description fields against the requested language. Obvious English and Traditional Chinese script mismatches are rejected; this heuristic does not guarantee fluency or accurate content, and other languages are best-effort. `onToken(text, phase)` reports chunks from `image`, `section`, `summary`, or `conclusion` generation. Cancellation rejects the operation without returning a partial report; streamed chunks already delivered to `onToken` remain available to the caller. Truncated generations fail with `NekoError` code `INCOMPLETE_GENERATION`, and detected language mismatches use `LANGUAGE_MISMATCH`; neither is automatically retried.
+`generation` supports `sampling`, `temperature`, `topK`, `topP`, `repetitionPenalty`, `noRepeatNgramSize`, `stop`, and `stopTokenIds`. Temperature/top-K/top-P require `sampling: true`; greedy decoding remains the default. String stops work across decoded chunk boundaries without leaking the stop text. `inferStructured({ ...inferenceOptions, schema })` includes the validated JSON Schema in prompt/context planning and returns parsed `value` alongside inference metadata. Invalid/unsupported schemas fail with `SCHEMA_INVALID` before model loading; invalid model JSON fails with `STRUCTURED_OUTPUT`. This is validated output, not a guarantee that the model will obey the schema; no repair or retry is performed.
+
+`describe(urlOrHtmlOrPage, options?)` accepts an HTTP(S) URL, inert HTML, or an owned copy of a validated `Page`. `sources` selects paragraph/image IDs and optionally asynchronous `paragraph`/`image` predicates; IDs must be known and unique, and predicates receive readonly owned source records. Selection and extraction happen before model loading. Every selected source must be accounted for; deliberately excluded sources are not required. Image preprocessing is reused for its staged inference. Each report stage produces evidence-linked claims, then summaries/conclusions are reduced hierarchically as needed. `maxNewTokens` defaults to 256 per generation. `format: 'json'` returns the typed report; `'markdown'` returns escaped Markdown. `language` is BCP 47; English and Traditional Chinese script checks are heuristic, not fluency/factual guarantees. `onToken(text, phase)` identifies `image`, `section`, `summary`, or `conclusion`. `imageFailurePolicy: 'error'` rejects image failures; `'omit'` records a typed failed image but never suppresses policy violations, callback exceptions (including `throw undefined`), cancellation, or budget errors. Invalid/truncated generated output and language mismatches fail without automatic retries.
 
 `contextWindowTokens` is checked against the pinned model configuration; the default is a conservative 4096-token working window, not a claim about practical maximum context. Input and output budgets must fit together. Reports split paragraph text using the actual tokenizer and Unicode-preserving boundaries, then hierarchically reduce intermediate evidence when it cannot fit the summary budget. Schema validation retains every paragraph/image source ID, but neither those references nor successful reduction guarantees faithful meaning: summaries can omit facts and conclusions can contradict their source.
 
-The `omit` policy is limited to image-inference failures. Exceptions thrown by the caller's `onToken` callback (even `throw undefined`) and `AbortSignal` cancellation still reject the report.
+`budget: { maxTotalTokens, maxDurationMs }` bounds aggregate input/output usage and elapsed request time, including queue wait, load, extraction, preprocessing, generation, and supported asynchronous source predicates, resource approvals, `onEvent`, and `onCheckpoint`. A deadline cancels pending user awaits; it does not terminate caller-owned side effects or forcibly preempt a native ORT/OS call. `onEvent` reports stage transitions; `onCheckpoint` receives cloneable saved state. `resume: checkpoint` reuses only compatible completed stages, preserves spent budget, and verifies source/model/settings/checksum and image content versions. After a report checkpoint exists, failures expose its final accounting through `ReportError.checkpoint`; earlier extraction/selection/load failures may be plain `NekoError`. Checkpoints contain selected source text/metadata, not image pixels; treat persisted data as potentially sensitive.
 
-`neko.cache.model.prefetch/status/clear` respectively download, inspect, or remove only this pinned model's files; each returns a promise, so await the status call. `neko.cache.engine.status/release` reports or releases the reusable live engine. The default `cache: { engine: true, engineTtlMs: 1_800_000 }` reuses it until 30 minutes idle; disable with `cache: { engine: false }` or configure the TTL. `neko.backend.current()` reports the selected backend; `neko.backend.detect(device?)` checks model/runtime compatibility and, for browser WebGPU, adapter availability. Its `supported` flag does not prove that a native provider/driver is installed or a session works. Only one `Neko` instance may own the process-global Transformers runtime hooks at a time (`RUNTIME_BUSY`). Calls are serialized per instance; `dispose()` aborts queued work, waits for current work, releases the engine, and restores those shared hooks. Failures are `NekoError` values with `stage`, `code`, and `cause` when available.
+All cache/backend/status methods return promises. `cache.model.prefetch/status/clear` affect only the selected pinned profile; `cache.engine.status/release` inspect or release the live engine. `cache: { engine: true, engineTtlMs: 1_800_000 }` reuses it until 30 minutes idle. `backend.detect()` checks compatibility, not successful native driver/session creation. `execution: 'inline'` is the default and permits one process-global runtime owner; `'worker'` creates a real Node thread or browser module worker with independent ownership. Calls are bounded FIFO per instance (`queue: { maxPending: 8 }`), report queue wait, and reject excess admission with `QUEUE_FULL`; `queueStatus()` exposes current state. Worker callbacks retain ordering and typed errors/checkpoints. `dispose()` cancels queued work, awaits safe active-work cleanup, releases resources, and restores hooks.
 
-`npm run smoke:browser` drives the static demo through image, text-only, and page-report inference. `--offline-reload` repeats the selected path using the persistent browser cache while blocking model-network requests. For cache reuse, `NEKO_MODEL_CACHE` must be the SDK cache **root** for `test:package`, but the specific **revision directory** for `smoke:browser` (directly containing `tokenizer.json` and `onnx/`). These long real-model runs are explicit rather than part of default CI. Using the macOS default cache:
+`policy.network(url, kind)` approves normally (`undefined` or `true`) or denies by throwing/returning `false`; `kind` is `model`, `runtime`, `worker`, `page`, or `image`. `policy.localFiles(canonicalPath)` explicitly approves Node input-file access. Defaults allow only exact pinned model transfers and package bootstrap assets; arbitrary page/image destinations and local files are denied. Checks happen before each visible redirect hop, and per-call `validateDestination` adds restrictions without replacing instance policy. The SDK cannot identify deployment-specific private/SSRF-safe destinations; application approval must enforce those boundaries.
+
+The factory captures known policy hook references, including class prototype methods, and binds their original receiver. Defined nonfunction hooks and invalid policy records fail preflight. The owned hook record is frozen, not the caller's policy object.
+
+`npm run smoke:browser` drives the static demo through image, text-only, and page-report inference. `--offline-reload` repeats the selected path using the persistent browser cache while blocking model-network requests. With `NEKO_MODEL_CACHE`, the smoke runner verifies the selected pinned profile through the local mirror and seeds browser Cache Storage before running the UI in local-only mode. For cache reuse, `NEKO_MODEL_CACHE` must be the SDK cache **root** for `test:package`, but the specific **revision directory** for `smoke:browser` (directly containing `tokenizer.json` and `onnx/`). These long real-model runs are explicit rather than part of default CI. Using the macOS default cache:
 
 ```sh
 NEKO_MODEL_CACHE="$HOME/Library/Caches/neko.js" npm run test:package
@@ -98,11 +106,39 @@ Remote URL fetching creates SSRF risk when callers accept untrusted URLs. Supply
 
 `loadImage(image, options?)` decodes an extracted image using the Node native decoder or browser bitmap/canvas path. It checks raster bytes/MIME, caps input and decoded dimensions, applies orientation, scales to at most 1280×1280 without enlarging, and emits PNG bytes. SVG and mismatched/invalid content are rejected. It preprocesses only; `Neko.describe()` performs the model inference. Browser remote image requests remain subject to CORS.
 
-`renderMarkdown(report)` renders a `StructuredReport`, escapes untrusted text, and only creates provenance links for HTTP(S) URLs. `validateStructuredReport(report, page)` validates field types, requested-language checks, complete paragraph coverage, image count/identity/status, failure policy, and provenance. `Neko.describe()` connects extraction, image inference, summaries, and validation into the end-to-end report workflow.
+`renderMarkdown(report)` escapes untrusted text and links only HTTP(S) provenance. `await validateStructuredReport(report, selectedPage?)` audits the persisted selected source snapshot and SHA-256 versions, exact quoted offsets/content, claim spans and evidence references, complete selected-source coverage, image status/provenance, language, loaded model/session identity, and aggregate metadata. An optional matching selected `Page` adds an external-source comparison; no fetch is needed to audit saved JSON. It detects inconsistent references/accounting, not whether a model claim is entailed by its source or image pixels. Hashes are not source authentication.
 
 ## Cache and backend notes
 
 The model manifest fixes the Hugging Face revision and SHA-256/size of required files. Every cache hit is verified before use; mismatches fail instead of silently becoming misses. `neko.cache.model.prefetch/status/clear` operate on only these pinned files. Browser Cache Storage remains subject to browser user actions and eviction.
+
+### Browser model sources
+
+Browsers conceal cross-origin redirect destinations (`opaqueredirect`); a Hugging Face redirect therefore fails closed with `POLICY_DENIED`, rather than silently following an unapproved hop. For first-online downloads use an explicit `modelSource: { baseUrl }` mirror/broker serving the selected profile's exact pinned relative paths. Every body retains manifest size/SHA-256 verification and the original canonical Hugging Face Cache Storage key. The base must be absolute HTTP(S), without credentials/query/fragment. Visible redirects still require authorization; CORS and secure-context requirements remain.
+
+The factory captures and freezes a plain normalized `baseUrl` record, including values from class getters, before worker serialization. Cross-origin mirror remapping and visible redirect hops strip `Authorization`, `Cookie`, and `Proxy-Authorization`; stripped credentials never return on a later same-origin hop. Nonsensitive headers and same-origin requests are preserved.
+
+From a built checkout with an existing verified Node cache, the loopback-only helper serves no arbitrary filesystem paths:
+
+```sh
+npm run build
+node scripts/serve-model-mirror.mjs --cache-dir="$HOME/Library/Caches/neko.js" --model-profile=default --port=8787 --allow-origin=http://127.0.0.1:4173
+```
+
+In a browser served from that exact approved origin:
+
+```js
+const neko = await createNeko({
+  device: 'webgpu',
+  modelProfile: 'default',
+  modelSource: { baseUrl: 'http://127.0.0.1:8787/models/onnx-community/Qwen3.5-0.8B-ONNX-OPT/fafab72d87a9e6be3925b38caf48286d2838f2d0/' },
+});
+await neko.cache.model.prefetch();
+```
+
+Alternatively reverse-proxy that directory under the application origin. Match `--model-profile=all-q4` with the same factory profile when using all-q4. The helper verifies the selected cache at startup and each requested asset before serving; it never fetches Hugging Face or follows browser redirects. After caching, a new `localFilesOnly: true` instance reuses verified files without model-network access.
+
+### Backend compatibility
 
 `device: 'cpu'` and `device: 'webgpu'` are explicit choices; there is no automatic provider fallback or cross-platform parity guarantee. A packed-consumer run verified Node native CPU text, path-image, and HTML-report inference. In observed pinned model/runtime runs, saturated red/blue regions were described as pink or pinkish-red. Do not treat generated image descriptions as reliable ground truth; this observation does not isolate the model itself or establish Ollama parity. `backend.detect()` reports model/runtime compatibility; browser WebGPU also probes for an adapter with `shader-f16`, but Node does not probe native provider/driver availability until actual inference. Browser CPU/WASM is unsupported because ONNX Runtime Web lacks `GatherBlockQuantized(1)`; Neko reports this rather than silently falling back. Session provider/configuration data does not prove that every operator ran on a GPU.
 
