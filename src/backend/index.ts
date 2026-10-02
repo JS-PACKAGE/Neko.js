@@ -1,3 +1,5 @@
+import { NekoError } from '../errors.js';
+
 export type BackendDevice = 'webgpu' | 'cpu';
 export interface AdapterInfo {
   vendor?: string;
@@ -13,6 +15,10 @@ export interface BackendInfo {
   executionProviders: string[];
   gpuMemoryBytes: null;
   adapterEvidence: 'availability-probe' | null;
+  /** Pinned model/runtime compatibility, not installed provider or driver availability. */
+  supported: boolean;
+  capabilityEvidence: 'model-runtime-compatibility';
+  limitation?: string;
 }
 
 /** Describes configured providers, not whether every model operator executes on GPU. */
@@ -22,16 +28,19 @@ export async function inspectBackend(device: BackendDevice): Promise<BackendInfo
   const runtime = candidate.process?.release?.name === 'node' ? 'node' : 'browser';
   const result: BackendInfo = {
     runtime, device, executionProviders: [device === 'cpu' && runtime === 'browser' ? 'wasm' : device], gpuMemoryBytes: null, adapterEvidence: null,
+    supported: !(runtime === 'browser' && device === 'cpu'),
+    capabilityEvidence: 'model-runtime-compatibility',
+    ...(runtime === 'browser' && device === 'cpu' ? { limitation: 'The pinned model requires GatherBlockQuantized(1), unavailable in this WASM runtime' } : {}),
   };
   // Node uses the native ONNX Runtime provider and does not require navigator.gpu.
   if (runtime === 'node' || device === 'cpu') return result;
   const navigator = globalThis.navigator as unknown as { gpu?: {
     requestAdapter(): Promise<{ info?: AdapterInfo; features: { has(feature: string): boolean } } | null>;
   } } | undefined;
-  if (!navigator?.gpu) throw new Error('WebGPU API is not present; select CPU explicitly to use WASM');
+  if (!navigator?.gpu) throw new NekoError('WebGPU API is not present. CPU/WASM does not support this pinned model; use a WebGPU-capable secure browser or supported Node runtime.', 'backend', 'UNSUPPORTED_BACKEND');
   const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) throw new Error('WebGPU adapter is unavailable; select CPU explicitly to use WASM');
-  if (!adapter.features.has('shader-f16')) throw new Error('WebGPU adapter does not support shader-f16 required by the fp16 vision encoder');
+  if (!adapter) throw new NekoError('WebGPU adapter is unavailable. CPU/WASM does not support this pinned model.', 'backend', 'UNSUPPORTED_BACKEND');
+  if (!adapter.features.has('shader-f16')) throw new NekoError('WebGPU adapter does not support shader-f16 required by the fp16 vision encoder', 'backend', 'UNSUPPORTED_BACKEND');
   result.adapterEvidence = 'availability-probe';
   if (adapter.info) {
     const { vendor, architecture, device, description, isFallbackAdapter } = adapter.info;
