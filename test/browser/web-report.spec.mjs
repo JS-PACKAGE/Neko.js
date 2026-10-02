@@ -11,9 +11,9 @@ let backendSource;
 const requests = [];
 test.beforeAll(async () => {
 
-  webSource = await readFile(new URL('../../dist/web.js', import.meta.url), 'utf8');
-  reportSource = await readFile(new URL('../../dist/report.js', import.meta.url), 'utf8');
-  backendSource = await readFile(new URL('../../dist/backend.js', import.meta.url), 'utf8');
+  webSource = await readFile(new URL('../../dist/browser/web.js', import.meta.url), 'utf8');
+  reportSource = await readFile(new URL('../../dist/browser/report.js', import.meta.url), 'utf8');
+  backendSource = await readFile(new URL('../../dist/browser/backend.js', import.meta.url), 'utf8');
   server = createServer(async (request, response) => {
     requests.push(request.url);
     if (request.url === '/web.js') {
@@ -125,9 +125,10 @@ test('renders untrusted model text as inert Markdown and only links HTTP(S) prov
     const { renderMarkdown } = await import('/report.js');
     return renderMarkdown({
       language: 'en',
+      imageFailurePolicy: 'error',
       page: { url: 'https://example.test', summary: '<img src=x onerror=alert(1)> [click](javascript:alert(1))' },
       sections: [{ heading: 'Heading', keyPoints: ['**bold** <svg/onload=alert(1)>'], paragraphIds: ['p1'] }],
-      images: [{ imageId: 'i1', url: 'data:image/png;base64,AAAA', description: '![attack](javascript:alert(1)) <script>bad</script>', source: { kind: 'image', imageId: 'i1' }, alt: '<img>' }],
+      images: [{ imageId: 'i1', url: 'data:image/png;base64,AAAA', status: 'described', description: '![attack](javascript:alert(1)) <script>bad</script>', source: { kind: 'image', imageId: 'i1' }, alt: '<img>' }],
       conclusion: '[open](https://evil.test) & <b>unsafe</b>',
     });
   });

@@ -8,12 +8,12 @@ import { join } from 'node:path';
 
 
 const device = process.argv[2] ?? 'webgpu';
-const maxNewTokens = Number(process.argv[3] ?? '8');
+const maxNewTokens = Number(process.argv[3] ?? '48');
 const launchArgs = process.argv.slice(4);
 if (!['cpu', 'webgpu'].includes(device)) throw new TypeError('Usage: node scripts/smoke-browser.mjs [cpu|webgpu] [maxNewTokens] [--enable-unsafe-webgpu] [--preflight-only] [--headed] [--offline-reload]');
 if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1 || maxNewTokens > 2048) throw new RangeError('maxNewTokens must be from 1 through 2048');
 if (launchArgs.some((argument) => !['--enable-unsafe-webgpu', '--preflight-only', '--headed', '--offline-reload'].includes(argument))) throw new TypeError('Only --enable-unsafe-webgpu, --preflight-only, --headed, and --offline-reload are supported as optional arguments');
-if (device === 'cpu') console.warn('CPU/WASM is unsupported by this pinned model; this explicit smoke will fail at GatherBlockQuantized(1), not fall back.');
+if (device === 'cpu') console.warn('CPU/WASM is unsupported by this pinned model; creation rejects with UNSUPPORTED_BACKEND, without fallback.');
 const modelCacheDir = process.env.NEKO_MODEL_CACHE;
 const modelFiles = new Map();
 async function indexModelCache(directory, prefix = '') {
@@ -28,15 +28,15 @@ const cachedModelRequests = [];
 const root = new URL('../', import.meta.url);
 const files = new Map([
   ['/examples/browser-prototype.html', { url: new URL('examples/browser-prototype.html', root), type: 'text/html' }],
-  ['/dist/neko.js', { url: new URL('dist/neko.js', root), type: 'text/javascript' }],
+  ['/dist/browser/neko.js', { url: new URL('dist/browser/neko.js', root), type: 'text/javascript' }],
 ]);
 
 const server = createServer(async (request, response) => {
   try {
     const pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
-    const asset = pathname.match(/^\/dist\/assets\/(ort-wasm-simd-threaded(?:\.jsep|\.asyncify)?\.(?:mjs|wasm))$/);
+    const asset = pathname.match(/^\/dist\/browser\/assets\/(ort-wasm-simd-threaded(?:\.jsep|\.asyncify)?\.(?:mjs|wasm))$/);
     const resource = files.get(pathname) ?? (asset ? {
-      url: new URL(`dist/assets/${asset[1]}`, root),
+      url: new URL(`dist/browser/assets/${asset[1]}`, root),
       type: asset[1].endsWith('.wasm') ? 'application/wasm' : 'text/javascript',
     } : undefined);
     const modelName = pathname.startsWith('/model-cache/') ? decodeURIComponent(pathname.slice('/model-cache/'.length)) : undefined;
@@ -179,54 +179,97 @@ try {
       canvas.width = 224;
       canvas.height = 224;
       const context = canvas.getContext('2d');
-      context.fillStyle = '#1547a3';
+      context.fillStyle = '#0000ff';
       context.fillRect(0, 0, 224, 224);
-      context.fillStyle = '#ed2323';
+      context.fillStyle = '#ff0000';
       context.fillRect(72, 72, 80, 80);
       return canvas.toDataURL('image/png').split(',')[1];
     });
     const imageBuffer = Buffer.from(imageBase64, 'base64');
-    const prompt = '  What color is the centered square? Reply with one color word.  ';
+    const dataUrl = `data:image/png;base64,${imageBase64}`;
+    const cases = [
+      { mode: 'image', prompt: 'Name the main geometric shape in this image in one word.', maxNewTokens },
+      { mode: 'text', prompt: 'What is 2 + 2? Reply with a single digit.', maxNewTokens: 16 },
+      { mode: 'report', prompt: '', maxNewTokens: 256 },
+    ];
+    const reportHtml = `<html><head><title>Color exhibit</title></head><body><h1>Color exhibit</h1><p>The exhibit has a red square against a blue background.</p><img src="${dataUrl}" alt="red square on blue background"></body></html>`;
     const runInference = async (phase) => {
-      await page.locator('#image').setInputFiles({ name: 'red-square.png', mimeType: 'image/png', buffer: imageBuffer });
-      await page.locator('#device').selectOption(device);
-      await page.locator('#max-new-tokens').fill(String(maxNewTokens));
-      await page.locator('#prompt').fill(prompt);
-      await page.locator('#run').click();
-      await page.waitForFunction(
-        () => ['complete', 'error'].includes(document.querySelector('#status')?.dataset.state ?? ''),
-        null,
-        { timeout: 3_500_000 },
-      );
-      const observed = await page.evaluate(async () => ({
-        prompt: document.querySelector('#prompt').value,
-        state: document.querySelector('#status').dataset.state,
-        status: document.querySelector('#status').textContent,
-        output: document.querySelector('#output').textContent,
-        details: document.querySelector('#details').textContent,
-        cachePutErrors: globalThis.__cachePutErrors,
-        offlineModelRequests: globalThis.__offlineModelRequests,
-        webgpuComputeEvidence: globalThis.__webgpuComputeEvidence,
-        storageAfter: navigator.storage?.estimate ? await navigator.storage.estimate() : null,
-      }));
-      console.log(JSON.stringify({ fixture: 'synthetic blue canvas with red square', phase, device, maxNewTokens, cachedModelFilesServed: [...cachedModelRequests], offlineNetworkRequests, ...observed, pageErrors }, null, 2));
-      if (observed.prompt !== prompt) throw new Error('Browser UI changed the exact caller-provided prompt');
-      if (observed.state === 'error') {
-        if (device === 'webgpu' && !/WebGPU API is not present|WebGPU adapter is unavailable|shader-f16/i.test(observed.status)) {
-          throw new Error(`Browser UI failed outside the expected WebGPU availability checks: ${observed.status}`);
+      for (const testCase of cases) {
+        await page.locator('#mode').selectOption(testCase.mode);
+        await page.locator('#device').selectOption(device);
+        await page.locator('#max-new-tokens').fill(String(testCase.maxNewTokens));
+        await page.locator('#prompt').fill(testCase.prompt);
+        if (testCase.mode === 'report') {
+          await page.locator('#language').selectOption('en');
+          await page.locator('#html').fill(reportHtml);
+        } else if (testCase.mode === 'image') {
+          await page.locator('#image').setInputFiles({ name: 'red-square.png', mimeType: 'image/png', buffer: imageBuffer });
         }
-        console.log(`${phase} inference failed before producing model output: ${observed.status}`);
-        process.exitCode = 2;
-        return false;
+        await page.locator('#run').click();
+        await page.waitForFunction(
+          () => ['complete', 'error'].includes(document.querySelector('#status')?.dataset.state ?? ''),
+          null,
+          { timeout: 3_500_000 },
+        );
+        const observed = await page.evaluate(async () => ({
+          mode: document.querySelector('#mode').value,
+          language: document.querySelector('#language').value,
+          prompt: document.querySelector('#prompt').value,
+          html: document.querySelector('#html').value,
+          state: document.querySelector('#status').dataset.state,
+          status: document.querySelector('#status').textContent,
+          output: document.querySelector('#output').textContent,
+          details: document.querySelector('#details').textContent,
+          cachePutErrors: globalThis.__cachePutErrors,
+          offlineModelRequests: globalThis.__offlineModelRequests,
+          webgpuComputeEvidence: globalThis.__webgpuComputeEvidence,
+          storageAfter: navigator.storage?.estimate ? await navigator.storage.estimate() : null,
+        }));
+        console.log(JSON.stringify({ fixture: 'synthetic blue canvas with red square', phase, requestedDevice: device, expectedMode: testCase.mode, maxNewTokens: testCase.maxNewTokens, cachedModelFilesServed: [...cachedModelRequests], offlineNetworkRequests, ...observed, pageErrors }, null, 2));
+        if (observed.mode !== testCase.mode) throw new Error(`Browser UI did not select ${testCase.mode} mode`);
+        if (observed.state === 'error') {
+          if (device === 'webgpu' && !/WebGPU API is not present|WebGPU adapter is unavailable|shader-f16/i.test(observed.status)) {
+            throw new Error(`Browser UI failed outside the expected WebGPU availability checks: ${observed.status}`);
+          }
+          console.log(`${phase} ${testCase.mode} inference failed before producing model output: ${observed.status}`);
+          process.exitCode = 2;
+          return false;
+        }
+        if (observed.cachePutErrors.length) throw new Error(`Browser model cache writes failed: ${JSON.stringify(observed.cachePutErrors)}`);
+        if (device === 'webgpu' && !Object.values(observed.webgpuComputeEvidence).some((count) => count > 0)) {
+          throw new Error('Browser inference produced no observable WebGPU compute submission');
+        }
+        if (testCase.mode === 'report') {
+          if (observed.html !== reportHtml) throw new Error('Browser UI changed the report HTML fixture');
+          const report = JSON.parse(observed.output);
+          if (report.language !== 'en' || report.page.title !== 'Color exhibit') throw new Error('Browser report lost its requested language or source title');
+          if (report.images.length !== 1 || report.images[0].status !== 'described' || report.images[0].source.imageId !== report.images[0].imageId) {
+            throw new Error('Browser report did not describe the source image with matching provenance');
+          }
+          const facts = report.sections.flatMap((section) => section.keyPoints).join(' ');
+          if (!/red/i.test(facts) || !/blue/i.test(facts) || !/square/i.test(report.images[0].description)) {
+            throw new Error('Browser report did not retain the source page facts and describe the visible square');
+          }
+          const details = JSON.parse(observed.details);
+          if (details.backend.device !== device) throw new Error('Browser report used an unexpected selected device');
+          continue;
+        }
+        if (observed.prompt !== testCase.prompt) throw new Error('Browser UI changed the exact caller-provided prompt');
+        const result = JSON.parse(observed.details);
+        if (result.model.id !== 'onnx-community/Qwen3.5-0.8B-ONNX-OPT' || result.model.revision !== 'fafab72d87a9e6be3925b38caf48286d2838f2d0') {
+          throw new Error('Browser UI returned a result for an unexpected model revision');
+        }
+        if (result.backend.device !== device || result.backend.providerEvidence !== 'loaded-session-configuration') {
+          throw new Error(`Browser UI result does not show the explicitly selected ${device} session configuration`);
+        }
+        if (testCase.mode === 'image') {
+          if (!/square/i.test(observed.output)) throw new Error(`Browser image inference did not identify the visible square: ${observed.output}`);
+          if (result.finishReason !== 'stop') throw new Error(`Browser image inference was truncated (${result.finishReason}): ${observed.output}`);
+        }
+        if (testCase.mode === 'text' && !/\b4\b/.test(observed.output)) {
+          throw new Error('Browser text-only inference did not answer 2 + 2 correctly');
+        }
       }
-      const result = JSON.parse(observed.details);
-      if (result.model.id !== 'onnx-community/Qwen3.5-0.8B-ONNX-OPT' || result.model.revision !== 'fafab72d87a9e6be3925b38caf48286d2838f2d0') {
-        throw new Error('Browser UI returned a result for an unexpected model revision');
-      }
-      if (result.backend.device !== device || result.backend.providerEvidence !== 'loaded-session-configuration') {
-        throw new Error(`Browser UI result does not show the explicitly selected ${device} session configuration`);
-      }
-      if (!observed.output.trim()) throw new Error('Browser UI completed inference without generated text');
       return true;
     };
     const firstRunSucceeded = await runInference('initial');
@@ -234,6 +277,7 @@ try {
       await page.evaluate(() => sessionStorage.setItem('neko-browser-smoke-offline', 'true'));
       offlineMode = true;
       await page.reload();
+      await page.locator('#local-only').check();
       await runInference('offline-reload');
       const offlineModelRequests = await page.evaluate(() => globalThis.__offlineModelRequests);
       console.log(JSON.stringify({ offlineModelRequests, blockedHuggingFaceRequests: offlineNetworkRequests }));

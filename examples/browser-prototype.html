@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Neko.js browser vision prototype</title>
+  <title>Neko.js local website and vision SDK</title>
   <style>
     :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
     body { max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
@@ -17,10 +17,16 @@
   </style>
 </head>
 <body>
-  <h1>Neko.js browser vision prototype</h1>
+  <h1>Neko.js local website and vision SDK</h1>
   <p>Runs the pinned model in this browser. Model downloads can be large; WebGPU availability and inference performance vary by device. No automatic backend fallback is performed.</p>
+  <label for="mode">Task</label>
+  <select id="mode"><option value="image">Image + prompt</option><option value="text">Text only</option><option value="report">Website report</option></select>
+  <label for="language">Report language</label>
+  <select id="language"><option value="en">English</option><option value="zh-TW">繁體中文</option></select>
+  <label for="html">Report HTML or URL (remote resources require CORS)</label>
+  <textarea id="html"><title>Example</title><p>The exhibit displays a red square on a blue background.</p></textarea>
   <label for="image">Image</label>
-  <input id="image" type="file" accept="image/*" required>
+  <input id="image" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,image/tiff,image/bmp">
   <label for="prompt">Prompt</label>
   <textarea id="prompt">Describe the image.</textarea>
   <label for="max-new-tokens">Maximum generated tokens</label>
@@ -32,13 +38,14 @@
   </select>
   <label><input id="local-only" type="checkbox"> Use only models already available in the local cache</label>
   <button id="run" type="button">Load model and run inference</button>
+  <button id="cancel" type="button">Cancel current operation</button>
   <p id="status" role="status" aria-live="polite">Ready.</p>
   <h2>Model response</h2>
   <pre id="output"></pre>
   <h2>Observed backend and timings</h2>
   <pre id="details"></pre>
   <script type="module">
-    import { createPrototype } from '../dist/neko.js';
+    import { createNeko } from '../dist/browser/neko.js';
 
     const imageInput = document.querySelector('#image');
     const promptInput = document.querySelector('#prompt');
@@ -51,21 +58,20 @@
     const details = document.querySelector('#details');
     let instance;
     let instanceKey;
+    let controller;
+    document.querySelector('#cancel').addEventListener('click', () => controller?.abort());
 
-    const wasmAssets = (device) => {
-      const prefix = '../dist/assets/ort-wasm-simd-threaded';
-      const suffix = device === 'webgpu' ? '.asyncify' : '';
-      return { mjs: `${prefix}${suffix}.mjs`, wasm: `${prefix}${suffix}.wasm` };
-    };
 
     runButton.addEventListener('click', async () => {
       const image = imageInput.files?.[0];
       const prompt = promptInput.value;
-      if (!image) { status.textContent = 'Choose an image first.'; return; }
-      if (!prompt.trim()) { status.textContent = 'Enter a prompt first.'; return; }
+      const mode = document.querySelector('#mode').value;
+      if (mode === 'image' && !image) { status.textContent = 'Choose an image first.'; return; }
+      if (mode !== 'report' && !prompt.trim()) { status.textContent = 'Enter a prompt first.'; return; }
       const maxNewTokens = Number(maxNewTokensInput.value);
       if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1 || maxNewTokens > 2048) { status.textContent = 'Maximum generated tokens must be an integer from 1 to 2048.'; return; }
       runButton.disabled = true;
+      controller = new AbortController();
       status.dataset.state = 'running';
       output.textContent = '';
       details.textContent = '';
@@ -79,9 +85,10 @@
         }
         if (!instance) {
           status.textContent = 'Loading the pinned model and runtime assets…';
-          instance = await createPrototype({
+          instance = await createNeko({
             device,
             localFilesOnly,
+            signal: controller.signal,
             progressCallback(event) {
               if (status.dataset.state !== 'error' && status.dataset.state !== 'complete') {
                 status.textContent = typeof event === 'string' ? event : JSON.stringify(event);
@@ -90,10 +97,16 @@
           });
           instanceKey = nextKey;
         }
-        status.textContent = 'Running image inference…';
-        const result = await instance.infer({ image, prompt, maxNewTokens });
-        output.textContent = result.text;
-        details.textContent = JSON.stringify({ model: result.model, backend: result.backend, timings: result.timings, memory: result.memory }, null, 2);
+        status.textContent = `Running ${mode} inference…`;
+        if (mode === 'report') {
+          const report = await instance.describe(document.querySelector('#html').value, { language: document.querySelector('#language').value, maxNewTokens, signal: controller.signal });
+          output.textContent = JSON.stringify(report, null, 2);
+          details.textContent = JSON.stringify({ backend: instance.backend.current(), cache: instance.cache.engine.status(), report }, null, 2);
+        } else {
+          const result = await instance.infer({ ...(mode === 'image' ? { image } : {}), prompt, maxNewTokens, signal: controller.signal, onToken(text) { output.textContent += text; } });
+          output.textContent = result.text;
+          details.textContent = JSON.stringify({ model: result.model, backend: result.backend, timings: result.timings, memory: result.memory, usage: result.usage, finishReason: result.finishReason }, null, 2);
+        }
         status.dataset.state = 'complete';
         status.textContent = 'Inference complete.';
       } catch (error) {

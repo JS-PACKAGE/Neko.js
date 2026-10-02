@@ -55,7 +55,7 @@ async function probeNativeProvider(device, profilePrefix) {
 }
 
 async function main() {
-  if (Number(process.versions.node.split('.')[0]) !== 22) throw new Error('This prototype runner requires Node.js 22');
+  if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('This runner requires Node.js 22 or newer');
   if (!['cpu', 'webgpu'].includes(values.device)) throw new Error('--device must be cpu or webgpu');
   if (values.prompt !== undefined && values['prompt-file'] !== undefined) throw new Error('Provide only one of --prompt and --prompt-file');
   const profilePrefix = values['profile-prefix'] ? resolve(values['profile-prefix']) : undefined;
@@ -97,16 +97,16 @@ async function main() {
   } else if (values.offline) throw new Error('--offline requires a local image file');
   const prompt = values['prompt-file'] !== undefined ? await readFile(values['prompt-file'], 'utf8') : values.prompt;
   if (prompt === undefined || !prompt.trim()) throw new Error('Provide a nonempty --prompt or --prompt-file');
-  const { createPrototype } = await import('../dist/src/index.js');
+  const { createNeko } = await import('../dist/node/index.js');
   const downloads = new Map();
   const progressCallback = event => {
     if (event?.phase === 'download') downloads.set(event.file, Math.max(downloads.get(event.file) ?? 0, event.loaded));
   };
   const loadStarted = performance.now();
-  const model = await createPrototype({ device: values.device, localFilesOnly: values.offline, progressCallback, ...(values['cache-dir'] ? { cacheDir: resolve(values['cache-dir']) } : {}), ...(profilePrefix ? { profilePrefix } : {}) });
+  const model = await createNeko({ device: values.device, localFilesOnly: values.offline, progressCallback, ...(values['cache-dir'] ? { cacheDir: resolve(values['cache-dir']) } : {}), ...(profilePrefix ? { profilePrefix } : {}) });
   const outerLoadMs = performance.now() - loadStarted;
   try {
-    console.log(JSON.stringify({ phase: 'loaded', outerLoadMs, networkRequests, downloadedBytes: [...downloads.values()].reduce((sum, bytes) => sum + bytes, 0), downloadedFiles: Object.fromEntries(downloads), status: await model.status(), processMemory: process.memoryUsage() }));
+    console.log(JSON.stringify({ phase: 'created', outerLoadMs, networkRequests, downloadedBytes: [...downloads.values()].reduce((sum, bytes) => sum + bytes, 0), downloadedFiles: Object.fromEntries(downloads), modelCache: await model.cache.model.status(), engine: model.cache.engine.status(), processMemory: process.memoryUsage() }));
     const result = await model.infer({ image, prompt });
     if (values.offline && attemptedNetworkRequests !== 0) throw new Error('Offline inference attempted network access');
     console.log(JSON.stringify({ phase: 'inference', ...result, processMemory: process.memoryUsage() }));
