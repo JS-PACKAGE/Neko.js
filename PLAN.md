@@ -1,6 +1,6 @@
 # Neko.js 專案企劃書
 
-> **現行優先需求（2026-10-02，最新使用者決策）：一定要瀏覽器原生可以執行；第一階段先完成 Transformers.js 4.2.0 + Qwen3.5-0.8B ONNX 真實多模態原型。** 已明確授權依賴由 node-llama-cpp／wllama 改為 Transformers.js、GGUF／mmproj 改為 ONNX embedding／decoder／vision encoder＋processor／tokenizer。第 1–12 節保留原企劃歷史參考；Node-only、排除瀏覽器 bundle、GGUF 定案等衝突條文不再適用。Node 22 與瀏覽器能力分開驗證，不承諾相同後端或自動 CPU 回退；Node-first 原型與瀏覽器內推理皆不得假成功。
+> **現行產品契約與驗證狀態以第 17 節為準（2026-10-02）。** 第 1–3 節說明目前產品；第 4–16 節保留原始需求、架構決策與第一階段原型歷程，均不得當作目前公開 API 或驗收狀態。Neko.js 是提供文字／圖片推理及 URL／HTML 網頁報告的可打包本機多模態 SDK，支援 Node.js 與相容 WebGPU 瀏覽器。舊 `createPrototype`、Node CPU 未驗證與 full-report 待完成等狀態已由第 17 節取代。兩種執行環境須分別選擇與驗證後端，不自動 fallback。
 
 版本：v1.0　｜　日期：2026-10-02
 
@@ -12,9 +12,9 @@
 | --- | --- |
 | 專案名稱 | Neko.js |
 | 遠端倉庫 | https://github.com/YueyuHoshizora/Neko.js |
-| 專案類型 | TypeScript 函式庫（不發佈 npm，以 Git 倉庫形式使用） |
-| 執行環境 | Node.js ≥ 22（ESM） |
-| 核心模型 | Qwen3.5-0.8B-GGUF，量化版本 Q4_K_M |
+| 專案類型 | TypeScript 本機推理 SDK（Node.js／瀏覽器；來源為 Git 倉庫，不發佈 npm） |
+| 執行環境 | Node.js ≥ 22（ESM）及具備相容 WebGPU adapter 的安全瀏覽器 |
+| 核心模型 | Qwen3.5-0.8B-ONNX-OPT，固定 revision，Q4 embeddings／decoder、FP16 vision encoder |
 | 專案授權 | Apache License 2.0 |
 | 文件語言 | 繁體中文＋英文雙語 |
 | 倉庫現況 | 已初始化：LICENSE（Apache 2.0）、CNAME、.nojekyll（另有他用；`/doc` 不部署為 GitHub Pages） |
@@ -23,23 +23,22 @@
 
 ## 2. 專案目標
 
-Neko.js 是一個 Node.js 函式庫：以輕量多模態模型 Qwen3.5-0.8B-GGUF:Q4_K_M 在本機環境讀取並「看懂」網站內容（文字與圖片），輸出結構化文字報告。
+Neko.js 是供 Node.js 與支援 WebGPU 瀏覽器使用的本機多模態 SDK：以固定 Qwen3.5 ONNX 模型提供純文字／圖片推理，並能從 URL 或 HTML 產生具來源 provenance 的結構化網頁報告；它不會執行頁面腳本，也不是爬蟲。
 
 具體目標：
 
 1. 以單一 API 輸入網址或 HTML，產出涵蓋頁面文字與圖片內容的文字報告。
 2. 圖片理解是核心賣點：報告須對頁面中的圖片給出可讀的描述，而非只列檔名。
-3. 推理全程在本機執行，資料不出機器；模型與推理引擎皆可快取重用。
-4. WebGPU 可用時用於加速，不可用時自動回退並可由外部觀察與控制。
-5. 所有快取與回退機制皆以公開 API 暴露，不做黑盒魔術。
+3. 模型推理在本機執行並重用驗證快取；URL 擷取是明確的 outbound request，須由應用程式的網路政策控制。
+4. WebGPU 與 CPU 是明確指定的後端；不承諾自動 fallback、平台間 parity 或 GPU 全算子執行。
 
 ---
 
 ## 3. 範圍
 
-**納入**：函式庫本體、模型快取、推理引擎快取、WebGPU 偵測與回退、報告產生、文件（README／usage／AGENTS／CLAUDE／SECURITY）。
+**納入**：Node.js 原生 CPU 推理、Node／瀏覽器 WebGPU backend 選擇、瀏覽器 bundle、固定模型快取與引擎快取 API、文字／圖片推理、URL／HTML 網頁報告、資料完整性與語言驗證、雙語文件。
 
-**不納入**（首版）：TTS 應用範例（F12，移至後續版本）、npm 發佈、CLI 工具、HTTP 伺服器模式、瀏覽器端 bundle、模型訓練／微調、批次爬蟲佇列、GUI。
+**不納入**：TTS 應用、npm 發佈、具產品承諾的 CLI、HTTP 遠端推理服務、批次爬蟲佇列、GUI、模型訓練／微調。此 SDK 只提供單次頁面擷取與本機生成，不會執行頁面腳本。
 
 ---
 
@@ -308,9 +307,9 @@ await speak(report.text);
 - session/context 由頁面／worker 活體快取與序列化請求管理；DOMParser、fetch、瀏覽器 raster decode/Canvas 前處理保持無 Node 依賴。跨來源網址與圖片仍受瀏覽器 CORS 限制，不以伺服器繞過。
 - 待驗證：指定 Qwen3.5-0.8B Q4_K_M + mmproj-F16 真實圖片理解、CPU WASM、WebGPU 真實執行／回退、Chromium／Firefox／WebKit 表面、重複請求無頁面殘留、模型快取 reuse／清理、live session TTL／釋放。未通過前保留原驗收清單未勾選。
 
-## 16. 現行第一原型：Transformers.js 4.2.0／ONNX
+## 16. 歷史原型驗證紀錄（已由第 17 節的 SDK 契約取代）
 
-使用者提供 [Qwen3.5-0.8B WebGPU 範例](https://huggingface.co/spaces/webml-community/Qwen3.5-0.8B-WebGPU/blob/main/index.html) 與 [Transformers.js v4 官方說明](https://huggingface.co/blog/transformersjs-v4)，明確授權更換推理方式與縮小第一里程碑為可執行真實多模態原型；不是交付半成品 Neko 全功能 API。
+本節保留從原生 GGUF／wllama 設計轉向 Transformers.js／ONNX 的決策與第一階段原型證據；`createPrototype`、CPU 未驗證及 full-web-report 未完成等描述只記錄當時狀態。不可用作目前公開 API、功能範圍或驗證狀態。
 
 - 精確依賴 `@huggingface/transformers@4.2.0`；[npm 實際版本資料](https://registry.npmjs.org/@huggingface/transformers/4.2.0) 顯示 Node／瀏覽器條件匯出，依賴 `onnxruntime-node@1.24.3` 與 `onnxruntime-web@1.26.0-dev.20260416-b7804b056c`。不混淆 npm 最新版與使用者固定版本。
 - Node 原生 runtime 精確 override 為 `onnxruntime-node@1.30.0`（正式版，非 dev）；使用者已批准此最小相容性前提。實際 1.24.3 在 GPU 與 CPU 載入同一固定 decoder 均缺少 `com.microsoft:CausalConvWithState(-1)`，不能生成。Transformers.js 4.2.0、模型 revision／dtype 與 browser `onnxruntime-web@1.26.0-dev.20260416-b7804b056c` 保持不變；新 runtime 必須重新實測，不因升版即聲稱成功。
@@ -323,7 +322,7 @@ await speak(report.text);
 - 全資源固定 revision、大小與 SHA-256 核實；實際離線重載使用 `local_files_only:true`，沒有網路時必須讀到完整有效快取，缺少／損壞則明確失敗；browser runtime 的 WASM／JS 也須本地提供及快取，不能隱藏 CDN 依賴。
 - Ollama 使用的同一圖片與 prompt 尚未提供於目前對話／倉庫；runner 必須可接受它們，但不得聲稱已完成同 fixture 對比。可先用另一張實際圖片 smoke，必須標明此限制。
 
-Node 22 的實際圖片生成、hybrid GPU/provider trace、耗時／process memory、快取與無網路完整模型重載已有下節證據；瀏覽器頁面實際圖片推理與可用後端仍須分開實測。未提供的 Ollama 同 fixture 對比及原 F1–F12／整份網頁報告驗收保持待完成。
+下方各子節是截至相應日期的 prototype 測試紀錄；其中對 CPU、WebGPU 與網頁報告仍待完成的舊狀態，已由第 17 節最新 SDK／consumer 驗證取代。未提供同一 fixture 的 Ollama output，因此 parity 仍未知。
 
 ### 16.1 已執行的後端診斷（不等同 Qwen 圖片驗收）
 
@@ -361,4 +360,25 @@ Node **22.23.3**、darwin arm64 的實際 `onnxruntime-node@1.24.3` WebGPU sessi
 - 獨立 headed Chromium smoke 的 WebGPU 計數器 delta：`dispatchWorkgroups` **+2,656**、`dispatchWorkgroupsIndirect` **+0**、`queue.submit` **+1,104**；同次 offline reload model request attempts **0**，Cache.put errors **0**。這些計數器來自 smoke instrumentation，不與 managed Browser UI run 混稱。
 - 同一 demo UI 明確選 CPU 的試跑在建立 session 時失敗：`Could not find an implementation for GatherBlockQuantized(1) node with name '/model/embed_tokens/Gather_Quant'`，此固定模型的 browser CPU/WASM 路徑已確認不支援，沒有 CPU 推理輸出且不會 fallback。Node CPU 路徑與此分開，除非另有真實端對端證據，仍為未測。Headless adapter preflight 不替代上述模型推理證據。
 - 修改 demo 選單為 `CPU/WASM — unsupported by this pinned model`，`smoke:browser -- cpu` helper 也會先明確警告 GatherBlockQuantized(1) 失敗且不會 fallback。以本機 HTTP 實際載入修改後頁面、選取 CPU，確認選單值及畫面可見文字一致；managed Browser screenshot：`/var/folders/ds/95v_ts_d1sq_lrjt8_m7lpfc0000gn/T/omp-sshots-15966a8a6370830f.webp`（repo 外）。
-- 本節是 prototype 範圍內的 browser inference/cache 證據，**不等同使用者 fixture 的 Ollama parity 對比**；該項仍 blocked，待取得同 fixture 的 Ollama reference/output。full-web-report product checkboxes 仍 pending，需明確 prototype/product scope 後再處理。
+本節所記錄的是先前 prototype 的 browser inference/cache 證據，不等同 Ollama parity；目前 SDK 的 WebGPU demo smoke 與實際輸出限制見第 17 節。
+
+## 17. 現行工作樹 SDK 契約與驗證（非發佈紀錄）
+
+本節描述目前工作樹及 `Unreleased` 的 SDK 行為與實測；`package.json` 仍為 `1.0.0`，本機 `npm pack` 產生同名版本 tarball 不代表 GitHub 已發佈此更新版，也不更改版本、tag 或 release。
+
+### 17.1 現行範圍與 API
+
+- 公開入口 `createNeko()` 提供 Node.js 22+ 原生 CPU，以及明確選擇 WebGPU 的瀏覽器路徑；Node 與瀏覽器透過條件匯出及獨立 bundle／runtime 資產支援。瀏覽器 CPU/WASM 不支援固定模型且不會 fallback。
+- SDK 提供文字／圖片推理、URL／HTML 擷取與結構化報告、模型／後端狀態、顯式模型／引擎快取控制、逐階段 token callback、取消與 disposal。Node 端把 `onnxruntime-node@1.30.0`、`sharp@0.34.5`、`parse5@8.0.1` 列為固定直接執行依賴；Transformers.js 4.2.0 隨 bundle 打包。
+- 結構化報告保留所有段落／圖片來源 ID，驗證完整產生與生成欄位語言；已觀察的英文／繁中異常字元系統回報 `LANGUAGE_MISMATCH`，截斷回報 `INCOMPLETE_GENERATION`，不自動 retry。`imageFailurePolicy:'omit'` 僅處理圖片 inference failure，不吞掉呼叫方 callback 例外或 abort（包括 callback `throw undefined`），並保留正確的來源錯誤。
+- 這些語言檢查是啟發式，不保證任何語言的流暢度或事實正確性；報告圖片描述也不可當作顏色等視覺 ground truth。
+
+### 17.2 工作樹實際驗證
+
+- 最終工作樹 `npm run lint`、`npm run typecheck` 通過。`npm test` 在 Node **22.23.3**（亦於 Node 26.7.0 執行）會重建 bundle 並執行 **22/22** Node tests。
+- `npm run test:browser` 對 Chromium、Firefox、WebKit 跑過 **15/15** browser contract tests，覆蓋後端明確性、圖片前處理限制及不可信報告 Markdown 安全性。
+- `npm run test:package` 在 Node 22.23.3 與 26.7.0 將實際 `npm pack` tarball 安裝至隔離 consumer 並呼叫 Node native CPU inference 成功：文字答案 `4`、本機圖片幾何描述為 square，HTML report 保留頁面中的 red／blue source fact 及圖片 provenance。
+- Node 22.23.3／原生 CPU 的實際階層報告驗證通過：**300 段落、15,811 bytes、4,391 source tokens**，`contextWindowTokens:1536`／`maxNewTokens:512`。生成前最小來源 ID 證據已需 **1506 input tokens**；實際中間摘要 prompt 為 **1848 input tokens**，加上輸出預算均超過視窗，因此實際執行多階段縮減。報告產生 **8 sections**、摘要及結論，保留所有 **300 paragraph IDs**。較小的 1024／256 設定曾在 summary 以 `INCOMPLETE_GENERATION` 明確拒絕。
+- 上述階層案例的摘要遺漏部分 garden plot 範圍，結論更否定來源中實際存在的 oak／pond 資訊。這是分塊／縮減流程完成與來源 ID 完整性的證據，不是語意忠實、摘要完整性或模型單獨責任的證明。
+- Node packed report 圖片描述將飽和紅／藍影像錯述為淡紫／淡粉色。先前同一 headed 持久化 Chromium WebGPU demo 跑過 image、text、report 與同 profile 離線 reload；離線時模型及 Hugging Face 請求 0、Cache Storage 約 **895 MB**、Cache.put errors 0、WebGPU dispatch／queue submit 計數非零。觀察到的色彩差異描述只限這個固定模型／runtime／fixture；未隔離原因且沒有同 fixture Ollama 輸出，因此不宣稱是模型單獨責任或 Ollama parity。
+- `npm pack` archive 的 consumer 成功證據是從目前工作樹產生的本機 artifact，不代表發佈已完成。

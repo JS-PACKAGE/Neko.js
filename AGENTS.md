@@ -2,7 +2,7 @@
 
 ## Current product scope
 
-Neko.js is a TypeScript library and prototype for real local image-plus-prompt inference in Node.js and supported browsers. The model is pinned to `onnx-community/Qwen3.5-0.8B-ONNX-OPT` revision `fafab72d87a9e6be3925b38caf48286d2838f2d0`; Transformers.js 4.2.0 runs the Q4 embedding/decoder and FP16 vision encoder. The present prototype is not a complete website-to-structured-report workflow. Do not describe scaffolding, provider configuration, a successful model load, or mocked output as image inference.
+Neko.js is a TypeScript local multimodal inference SDK for Node.js 22+ and supported WebGPU browsers. It uses pinned `onnx-community/Qwen3.5-0.8B-ONNX-OPT` revision `fafab72d87a9e6be3925b38caf48286d2838f2d0`; Transformers.js 4.2.0 runs the Q4 embedding/decoder and FP16 vision encoder. Public APIs provide text/image inference and inert URL/HTML-to-structured-report generation. A packed consumer verified real Node native CPU text, path-image, and report inference; a saturated-color fixture was described as pink/pinkish-red rather than pure red, so output quality must not be overstated or attributed to the model alone. Browser CPU/WASM is unsupported for this model and never falls back. Do not describe scaffolding, provider configuration, a successful model load, or mocked output as image inference.
 
 ## Engineering practices
 
@@ -25,7 +25,7 @@ Read [SECURITY.md](SECURITY.md) before changing URL fetching, cache integrity, m
 
 ## 繁體中文重點
 
-- 目前交付範圍是固定模型的本機圖片＋提示推理原型，並非完整網頁摘要產品；只有實際執行推理才可宣稱視覺理解成功。
+- 目前交付範圍是 Node.js／受支援 WebGPU 瀏覽器可用的本機多模態 SDK，包括文字／圖片推理與 URL／HTML 結構化報告；實際 Node CPU packed consumer 通過，但飽和色測試結果曾偏粉紅，勿誇大輸出品質或單獨歸因模型。Browser CPU/WASM 不支援此模型且不會 fallback；只有實際執行推理才可宣稱理解成功。
 - 修改前先檢查實作、呼叫點和測試；保留使用者變更，不做破壞性 Git 操作。
 - 不得捏造後端回退、GPU 執行、記憶體數值或測試結果。Node 與瀏覽器須分開驗證。
 - HTML／模型輸出皆是不可信資料；Node 網址抓取須防 SSRF；不得削弱固定模型的大小與 SHA-256 驗證。
