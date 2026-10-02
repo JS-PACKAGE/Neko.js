@@ -29,6 +29,21 @@ export interface Page {
   images: PageImage[];
 }
 
+export interface SourceSelection {
+  paragraphIds?: string[];
+  imageIds?: string[];
+  paragraph?: (source: Omit<Readonly<Paragraph>, 'source'> & { readonly source: Readonly<Paragraph['source']> }) => boolean | Promise<boolean>;
+  image?: (source: Omit<Readonly<PageImage>, 'discoveredBy'> & { readonly discoveredBy: readonly ImageDiscovery[] }) => boolean | Promise<boolean>;
+}
+export interface PageSnapshot {
+  id: string;
+  algorithm: 'sha256';
+  /** Selected source text and metadata are persisted; visual bytes are not. */
+  source: Page;
+  paragraphs: { id: string; versionId: string }[];
+  /** These identify metadata, not visual contents; observations have separate pixel digests. */
+  images: { id: string; metadataVersionId: string }[];
+}
 export interface ReportSection {
   heading?: string;
   keyPoints: string[];

@@ -9,6 +9,21 @@ export class NekoError extends Error {
   constructor(message: string, readonly stage: ErrorStage, readonly code: ErrorCode, options?: ErrorOptions) { super(message, options); }
 }
 
+/** User promises may be abandoned on cancellation; native model work must still be awaited. */
+export async function awaitUser<T>(operation: () => T | PromiseLike<T>, signal?: AbortSignal, stage: ErrorStage = 'report'): Promise<T> {
+  if (!signal) return operation();
+  const aborted = () => signal.reason instanceof NekoError ? signal.reason : new NekoError('Operation was cancelled', stage, 'ABORTED', { cause: signal.reason });
+  if (signal.aborted) throw aborted();
+  let cancel!: () => void;
+  const cancellation = new Promise<never>((_, reject) => {
+    cancel = () => { reject(aborted()); };
+    signal.addEventListener('abort', cancel, { once: true });
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => { if (signal.aborted) throw aborted(); return operation(); }), cancellation]);
+  } finally { signal.removeEventListener('abort', cancel); }
+}
+
 export async function atStage<T>(stage: ErrorStage, signal: AbortSignal | undefined, operation: () => Promise<T>, disposeOnAbort?: (value: T) => Promise<void>): Promise<T> {
   try {
     signal?.throwIfAborted();
