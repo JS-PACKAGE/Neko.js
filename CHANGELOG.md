@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.2.0 — 2026-10-03
+
 - Upgrade the pinned Node image-processing dependency to `sharp@0.35.4` to include upstream libheif and libvips security fixes; retain an exact-version install-script approval.
 - Add source-aware Page selection, full content snapshots, versioned citations and claim-evidence auditing; add aggregate report token/time budgets, resumable checkpoints, events, and deadline-bound async selector/resource/event/checkpoint hooks.
 - Add bounded FIFO request admission, real Node/browser workers, cancellation and streaming, queue status, and actual load/warmup/runtime readiness APIs.
