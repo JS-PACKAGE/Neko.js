@@ -6,6 +6,7 @@ import { VisionEngine, type InferOptions, type InferenceResult } from './core/en
 import { generateReport, type DescribeOptions } from './report/generate.js';
 import type { StructuredReport } from './types.js';
 import { atStage, NekoError, type ErrorStage } from './errors.js';
+import { getModelProfile, type ModelProfileId } from './cache/manifest.js';
 
 export * from './types.js';
 export * from './web/index.js';
@@ -13,13 +14,14 @@ export * from './report/index.js';
 export * from './cache/manifest.js';
 export * from './backend/index.js';
 export * from './errors.js';
-export type { InferOptions, InferenceResult } from './core/engine.js';
+export type { InferOptions, InferenceResult, ModelIdentity } from './core/engine.js';
 export type { DescribeOptions } from './report/generate.js';
 export type { ModelCacheStatus, CacheProgress } from './cache/model.js';
 export type { EngineCacheStatus } from './cache/engine.js';
 
 export interface NekoOptions {
   device?: BackendDevice;
+  modelProfile?: ModelProfileId;
   cacheDir?: string;
   cache?: { engine?: boolean; engineTtlMs?: number };
   localFilesOnly?: boolean;
@@ -38,7 +40,7 @@ export class Neko {
   readonly cache;
   readonly backend;
 
-  private constructor(private readonly engines: EngineCache<VisionEngine>, private readonly installation: VerifiedCacheInstallation, private readonly restore: () => void, backend: BackendInfo) {
+  private constructor(private readonly engines: EngineCache<VisionEngine>, private readonly installation: VerifiedCacheInstallation, private readonly restore: () => void, backend: BackendInfo, private readonly options: NekoOptions) {
     this.cache = {
       model: {
         prefetch: (signal?: AbortSignal) => this.run('cache', signal, (abort) => installation.prefetch(abort)),
@@ -52,18 +54,19 @@ export class Neko {
     };
     this.backend = {
       current: () => backend,
-      detect: (device: BackendDevice = backend.device, signal?: AbortSignal) => this.run('backend', signal, () => inspectBackend(device)),
+      detect: (device: BackendDevice = backend.device, signal?: AbortSignal) => this.run('backend', signal, () => inspectBackend(device, options.modelProfile)),
     };
   }
 
   static async create(options: NekoOptions = {}): Promise<Neko> {
     return atStage('create', options.signal, async () => {
-      const backend = await atStage('backend', options.signal, () => inspectBackend(options.device ?? 'webgpu'));
+      getModelProfile(options.modelProfile);
+      const backend = await atStage('backend', options.signal, () => inspectBackend(options.device ?? 'webgpu', options.modelProfile));
       if (backend.runtime === 'browser' && backend.device === 'cpu') throw new NekoError('CPU/WASM cannot execute this pinned model: GatherBlockQuantized(1) is unavailable. Use a supported WebGPU browser; no automatic fallback is performed.', 'backend', 'UNSUPPORTED_BACKEND');
       let installation: VerifiedCacheInstallation | undefined;
       let restore: (() => void) | undefined;
       try {
-        installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), localFilesOnly: options.localFilesOnly ?? false, ...(options.progressCallback ? { onProgress: options.progressCallback } : {}) });
+        installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), localFilesOnly: options.localFilesOnly ?? false, ...(options.modelProfile === undefined ? {} : { profile: options.modelProfile }), ...(options.progressCallback ? { onProgress: options.progressCallback } : {}) });
         const cache = installation;
         const previousWasmCache = env.useWasmCache;
         const wasm = env.backends.onnx.wasm;
@@ -82,9 +85,9 @@ export class Neko {
         const engines = new EngineCache((signal) => cache.withSignal(signal, async () => {
           const started = performance.now();
           await atStage('load', signal, () => cache.prefetch(signal));
-          return VisionEngine.load(backend, options.localFilesOnly ?? false, signal, options.progressCallback, options.profilePrefix, started);
+          return VisionEngine.load(backend, options.localFilesOnly ?? false, signal, options.progressCallback, options.profilePrefix, started, { ...(options.modelProfile === undefined ? {} : { profile: options.modelProfile }) });
         }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000);
-        return new Neko(engines, cache, restore, backend);
+        return new Neko(engines, cache, restore, backend, options);
       } catch (error) { if (restore) restore(); else installation?.restore(); throw error; }
     }, (instance) => instance.dispose());
   }

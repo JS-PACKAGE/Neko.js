@@ -1,4 +1,5 @@
 import { NekoError } from '../errors.js';
+import { getModelProfile, type ModelProfileId } from '../cache/manifest.js';
 
 export type BackendDevice = 'webgpu' | 'cpu';
 export interface AdapterInfo {
@@ -22,8 +23,9 @@ export interface BackendInfo {
 }
 
 /** Describes configured providers, not whether every model operator executes on GPU. */
-export async function inspectBackend(device: BackendDevice): Promise<BackendInfo> {
+export async function inspectBackend(device: BackendDevice, profile: ModelProfileId = 'default'): Promise<BackendInfo> {
   if (device !== 'cpu' && device !== 'webgpu') throw new TypeError('Unknown backend device');
+  getModelProfile(profile);
   const candidate = globalThis as typeof globalThis & { process?: { release?: { name?: string } } };
   const runtime = candidate.process?.release?.name === 'node' ? 'node' : 'browser';
   const result: BackendInfo = {
@@ -40,7 +42,7 @@ export async function inspectBackend(device: BackendDevice): Promise<BackendInfo
   if (!navigator?.gpu) throw new NekoError('WebGPU API is not present. CPU/WASM does not support this pinned model; use a WebGPU-capable secure browser or supported Node runtime.', 'backend', 'UNSUPPORTED_BACKEND');
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new NekoError('WebGPU adapter is unavailable. CPU/WASM does not support this pinned model.', 'backend', 'UNSUPPORTED_BACKEND');
-  if (!adapter.features.has('shader-f16')) throw new NekoError('WebGPU adapter does not support shader-f16 required by the fp16 vision encoder', 'backend', 'UNSUPPORTED_BACKEND');
+  if (!adapter.features.has('shader-f16')) throw new NekoError('WebGPU adapter does not support shader-f16 required conservatively for the pinned model graphs', 'backend', 'UNSUPPORTED_BACKEND');
   result.adapterEvidence = 'availability-probe';
   if (adapter.info) {
     const { vendor, architecture, device, description, isFallbackAdapter } = adapter.info;

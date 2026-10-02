@@ -1,5 +1,5 @@
 import { AutoImageProcessor, Qwen3VLProcessor, TokenizersBackend, env, Qwen3_5ForConditionalGeneration, RawImage, TextStreamer, Tensor, InterruptableStoppingCriteria, type PreTrainedModel, type Processor } from '@huggingface/transformers';
-import { MODEL_ID, MODEL_REVISION, MODEL_DTYPE, modelFileUrl, type ModelFileName } from '../cache/manifest.js';
+import { MODEL_ID, MODEL_REVISION, modelFileUrl, getModelProfile, type ModelFileName, type ModelProfileId, type ModelDtype } from '../cache/manifest.js';
 import type { BackendInfo } from '../backend/index.js';
 import { readImage, type ImageInput, type ImageOptions } from '../web/image.js';
 import { atStage, NekoError } from '../errors.js';
@@ -13,11 +13,12 @@ export interface InferOptions extends ImageOptions {
   /** Receives decoded text chunks, not individual token IDs. */
   onToken?: (text: string) => void;
 }
+export interface ModelIdentity { id: string; revision: string; profile: ModelProfileId; dtype: ModelDtype; }
 export interface InferenceResult {
   text: string;
   finishReason: 'stop' | 'length';
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
-  model: { id: string; revision: string; dtype: typeof MODEL_DTYPE };
+  model: ModelIdentity;
   backend: BackendInfo & { sessions: { name: string; device: string; dtype: string }[]; providerEvidence: 'loaded-session-configuration'; };
   timings: { loadMs: number; preprocessMs: number; firstTokenMs: number | null; generationMs: number; totalMs: number; };
   memory: { jsHeapBytes: number | null; gpuBytes: null; };
@@ -32,9 +33,10 @@ async function pinnedResource(name: ModelFileName): Promise<Response> {
 export class VisionEngine {
   readonly memory = null;
   private disposePromise?: Promise<void>;
-  private constructor(private readonly model: PreTrainedModel, private readonly processor: Processor, readonly backend: BackendInfo, private readonly loadMs: number, private readonly profiling: boolean, readonly modelContextTokens: number) {}
-  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now()): Promise<VisionEngine> {
+  private constructor(private readonly model: PreTrainedModel, private readonly processor: Processor, readonly backend: BackendInfo, private readonly loadMs: number, private readonly profiling: boolean, readonly modelContextTokens: number, readonly identity: ModelIdentity) {}
+  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now(), config: { profile?: ModelProfileId } = {}): Promise<VisionEngine> {
     return atStage('load', signal, async () => {
+      const selected = getModelProfile(config.profile);
       const options = { revision: MODEL_REVISION, local_files_only: localFilesOnly, ...(progressCallback ? { progress_callback: progressCallback } : {}) };
       // 4.2.0 tokenizer discovery probes main even with revision; assemble public components from verified pins.
       const [tokenizerJSON, tokenizerConfig, imageProcessor, chatTemplate, configuration] = await Promise.all([
@@ -49,13 +51,13 @@ export class VisionEngine {
       if (typeof context !== 'number' || !Number.isSafeInteger(context) || context < 1) throw new Error('Pinned model has no valid text context limit');
       const processor = new Qwen3VLProcessor({}, { tokenizer: new TokenizersBackend(tokenizerJSON, tokenizerConfig), image_processor: imageProcessor }, chatTemplate);
       const model = await Qwen3_5ForConditionalGeneration.from_pretrained(MODEL_ID, {
-        ...options, dtype: MODEL_DTYPE, device: backend.device,
+        ...options, dtype: selected.dtype, device: backend.device,
         session_options: { executionProviders: backend.executionProviders, ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) },
       });
       try {
         signal?.throwIfAborted();
         if (!processor.tokenizer) throw new Error('Loaded processor has no tokenizer');
-        return new VisionEngine(model, processor, backend, performance.now() - started, !!profilePrefix && backend.runtime === 'node', context);
+        return new VisionEngine(model, processor, backend, performance.now() - started, !!profilePrefix && backend.runtime === 'node', context, { id: selected.id, revision: selected.revision, profile: selected.profile, dtype: selected.dtype });
       } catch (error) { await model.dispose(); throw error; }
     }, (engine) => engine.dispose());
   }
@@ -158,7 +160,7 @@ export class VisionEngine {
           return { name, device: config.device, dtype: config.dtype };
         });
         const now = performance.now();
-        return { text: response, finishReason: stopped ? 'stop' : 'length', usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens }, model: { id: MODEL_ID, revision: MODEL_REVISION, dtype: MODEL_DTYPE }, backend: { ...this.backend, sessions, providerEvidence: 'loaded-session-configuration' },
+        return { text: response, finishReason: stopped ? 'stop' : 'length', usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens }, model: this.identity, backend: { ...this.backend, sessions, providerEvidence: 'loaded-session-configuration' },
           timings: { loadMs: this.loadMs, preprocessMs: generationStarted - started, firstTokenMs, generationMs: now - generationStarted, totalMs: now - started }, memory: { jsHeapBytes: null, gpuBytes: null } };
       });
     } finally {

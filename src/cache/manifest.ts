@@ -19,6 +19,25 @@ export const MODEL_FILES = {
   'chat_template.jinja': { size: 7755, sha256: '273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80' },
 } as const;
 
-export type ModelFileName = keyof typeof MODEL_FILES;
+export const ALL_MODEL_FILES = {
+  ...MODEL_FILES,
+  'onnx/vision_encoder_q4.onnx': { size: 185278, sha256: '9b62022e77de4b22ca0bbc4453083c0cdeb8f967ccf13931d4c24c6e7c776177' },
+  'onnx/vision_encoder_q4.onnx_data': { size: 68267008, sha256: '98aebedf02fc5414fd1c7f06a6580b42e272600ace9ecd33bfbc479a0c541c64' },
+} as const;
+export type ModelProfileId = 'default' | 'all-q4';
+export type ModelDtype = { embed_tokens: 'q4'; decoder_model_merged: 'q4'; vision_encoder: 'fp16' | 'q4' };
+const q4Files = { ...ALL_MODEL_FILES } as Omit<typeof ALL_MODEL_FILES, 'onnx/vision_encoder_fp16.onnx' | 'onnx/vision_encoder_fp16.onnx_data'>;
+Reflect.deleteProperty(q4Files, 'onnx/vision_encoder_fp16.onnx');
+Reflect.deleteProperty(q4Files, 'onnx/vision_encoder_fp16.onnx_data');
+export const MODEL_PROFILES = {
+  default: { id: MODEL_ID, revision: MODEL_REVISION, profile: 'default', dtype: MODEL_DTYPE, files: MODEL_FILES },
+  'all-q4': { id: MODEL_ID, revision: MODEL_REVISION, profile: 'all-q4', dtype: { embed_tokens: 'q4', decoder_model_merged: 'q4', vision_encoder: 'q4' }, files: q4Files },
+} as const;
+export function getModelProfile(id: ModelProfileId = 'default') {
+  if (!Object.hasOwn(MODEL_PROFILES, id)) throw new TypeError('Unknown registered model profile');
+  return MODEL_PROFILES[id];
+}
+
+export type ModelFileName = keyof typeof ALL_MODEL_FILES;
 export const MODEL_BASE_URL = `https://huggingface.co/${MODEL_ID}/resolve/${MODEL_REVISION}/`;
 export function modelFileUrl(file: ModelFileName): string { return `${MODEL_BASE_URL}${file}`; }

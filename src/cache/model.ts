@@ -1,5 +1,5 @@
 import { env } from '@huggingface/transformers';
-import { MODEL_BASE_URL, MODEL_FILES, MODEL_ID, MODEL_REVISION, modelFileUrl } from './manifest.js';
+import { MODEL_BASE_URL, ALL_MODEL_FILES, MODEL_ID, MODEL_REVISION, modelFileUrl, getModelProfile, type ModelProfileId } from './manifest.js';
 import type { ModelFileName } from './manifest.js';
 import { NekoError } from '../errors.js';
 import type * as NodeFs from 'node:fs/promises';
@@ -17,6 +17,7 @@ export interface VerifiedCacheOptions {
   cacheDir?: string;
   localFilesOnly?: boolean;
   onProgress?: (event: CacheProgress) => void;
+  profile?: ModelProfileId;
 }
 export interface ModelCacheStatus { downloaded: boolean; verified: boolean; bytes: number; totalBytes: number; path: string; files: { name: ModelFileName; present: boolean; verified: boolean; bytes: number }[]; }
 export interface VerifiedCacheInstallation {
@@ -40,10 +41,10 @@ let nodeCrypto: Promise<{ createHash(algorithm: string): NodeHash }> | undefined
 let installed = false;
 const verifiedResponses = new WeakMap<Response, ModelFileName>();
 
-function fileName(request: string): ModelFileName | undefined {
+function fileName(request: string, files: Partial<Record<ModelFileName, ResourceSpec>>): ModelFileName | undefined {
   if (!request.startsWith(MODEL_BASE_URL)) return undefined;
   const name = request.slice(MODEL_BASE_URL.length);
-  if (!Object.hasOwn(MODEL_FILES, name)) throw new ModelIntegrityError(`Unpinned model resource: ${request}`);
+  if (!Object.hasOwn(files, name)) throw new ModelIntegrityError(`Unpinned model resource for selected profile: ${request}`);
   return name as ModelFileName;
 }
 function nativeKey(request: string, name?: ModelFileName): string {
@@ -82,7 +83,7 @@ function verifiedResponse(bytes: ArrayBuffer, response: CachedResponse, spec: Re
   return new Response(body, { status: response.status, headers });
 }
 async function readVerified(response: CachedResponse, name: ModelFileName, options: VerifiedCacheOptions, phase: CacheProgress['phase'], signal?: AbortSignal): Promise<Response> {
-  const spec = MODEL_FILES[name];
+  const spec = ALL_MODEL_FILES[name];
   checkLength(response, name, spec);
   signal?.throwIfAborted();
   const bytes = new Uint8Array(spec.size);
@@ -123,7 +124,7 @@ async function readVerified(response: CachedResponse, name: ModelFileName, optio
   } finally { signal?.removeEventListener('abort', cancel); reader.releaseLock(); }
 }
 async function hashCachedFile(response: CachedResponse, name: ModelFileName, options: VerifiedCacheOptions, signal?: AbortSignal): Promise<void> {
-  const spec = MODEL_FILES[name];
+  const spec = ALL_MODEL_FILES[name];
   checkLength(response, name, spec);
   const hash = await createNodeHash();
   const reader = response.body!.getReader();
@@ -192,7 +193,7 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
   }
   async function secureEntry(request: string, createParents: boolean): Promise<string | undefined> {
     const prefix = `${MODEL_ID}/${MODEL_REVISION}/`;
-    if (!request.startsWith(prefix) || !Object.hasOwn(MODEL_FILES, request.slice(prefix.length))) return undefined;
+    if (!request.startsWith(prefix) || !Object.hasOwn(ALL_MODEL_FILES, request.slice(prefix.length))) return undefined;
     await secureDirectory();
     const parts = request.split('/');
     let current = root;
@@ -267,6 +268,7 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
 export async function installVerifiedCache(options: VerifiedCacheOptions = {}): Promise<VerifiedCacheInstallation> {
   if (installed) throw new NekoError('Only one Neko runtime owner may be active; await its disposal before creating another', 'create', 'RUNTIME_BUSY');
   if (env.version !== '4.2.0') throw new Error('The verified model cache requires Transformers.js 4.2.0');
+  const selectedFiles = getModelProfile(options.profile).files;
   installed = true;
   let backing: NativeCache;
   try { backing = await nativeCache(options); } catch (error) { installed = false; throw error; }
@@ -280,7 +282,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   const verifiedCache = {
     async match(request: string): Promise<Response | string | undefined> {
       activeSignal?.throwIfAborted();
-      const name = fileName(request);
+      const name = fileName(request, selectedFiles);
       if (!name && !isRuntimeAsset(request)) return undefined;
       let response: CachedResponse | undefined;
       try {
@@ -300,7 +302,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       }
     },
     async put(request: string, response: Response): Promise<void> {
-      const name = fileName(request);
+      const name = fileName(request, selectedFiles);
       if (!name && !isRuntimeAsset(request)) throw new ModelIntegrityError(`Unpinned cache resource: ${request}`);
       // Validate before the native writer opens a temporary file: 4.2.0 cannot reliably clean up an early stream error.
       const verified = name && (verifiedResponses.get(response) !== name || response.bodyUsed) ? await readVerified(response, name, options, 'verify', activeSignal) : response;
@@ -310,7 +312,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   const fetchVerified = async (input: string | URL, init?: RequestInit): Promise<Response> => {
     activeSignal?.throwIfAborted();
     const request = String(input);
-    const name = fileName(request);
+    const name = fileName(request, selectedFiles);
     if (!name && !isRuntimeAsset(request)) throw new ModelIntegrityError(`Unpinned resource URL: ${request}`);
     const method = init?.method?.toUpperCase() ?? 'GET';
     const oneByteRange = method === 'GET' && new Headers(init?.headers).get('range') === 'bytes=0-0';
@@ -325,7 +327,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
           throw integrity(name, 'unverified metadata cache entry');
         }
         init?.signal?.throwIfAborted();
-        const spec = MODEL_FILES[name];
+        const spec = ALL_MODEL_FILES[name];
         const headers = typeof cached === 'string' ? new Headers({ 'content-type': 'application/octet-stream' }) : new Headers(cached.headers);
         if (method === 'HEAD') {
           if (typeof cached !== 'string') await cached.body?.cancel();
@@ -363,7 +365,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     if (!name || !response.ok) return response;
     // Metadata requests have no full body to hash. Remote metadata is not a verified cache entry.
     if (metadata) {
-      if (oneByteRange && response.status === 206 && response.headers.get('content-range') !== `bytes 0-0/${MODEL_FILES[name].size}`) {
+      if (oneByteRange && response.status === 206 && response.headers.get('content-range') !== `bytes 0-0/${ALL_MODEL_FILES[name].size}`) {
         await response.body?.cancel();
         throw integrity(name, 'metadata total size');
       }
@@ -399,21 +401,21 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       activeSignal = signal;
       try {
         const files: ModelCacheStatus['files'] = [];
-        for (const name of Object.keys(MODEL_FILES) as ModelFileName[]) {
+        for (const name of Object.keys(selectedFiles) as ModelFileName[]) {
           signal?.throwIfAborted();
           const response = await verifiedCache.match(modelFileUrl(name));
           if (response instanceof Response) {
             if (!response.headers.has('content-length')) await response.arrayBuffer();
             await response.body?.cancel();
           }
-          files.push({ name, present: response !== undefined, verified: response !== undefined, bytes: response === undefined ? 0 : MODEL_FILES[name].size });
+          files.push({ name, present: response !== undefined, verified: response !== undefined, bytes: response === undefined ? 0 : ALL_MODEL_FILES[name].size });
         }
-        return { downloaded: files.every((file) => file.present), verified: files.every((file) => file.verified), bytes: files.reduce((total, file) => total + file.bytes, 0), totalBytes: Object.values(MODEL_FILES).reduce((total, file) => total + file.size, 0), path: backing.path, files };
+        return { downloaded: files.every((file) => file.present), verified: files.every((file) => file.verified), bytes: files.reduce((total, file) => total + file.bytes, 0), totalBytes: Object.values(selectedFiles).reduce((total, file) => total + file.size, 0), path: backing.path, files };
       } finally { activeSignal = previousSignal; }
     },
     async clear(signal) {
       if (restored) throw new Error('Verified cache installation has been restored');
-      for (const name of Object.keys(MODEL_FILES) as ModelFileName[]) {
+      for (const name of Object.keys(ALL_MODEL_FILES) as ModelFileName[]) {
         signal?.throwIfAborted();
         await backing.delete(nativeKey(modelFileUrl(name), name));
       }
@@ -423,7 +425,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       const previousSignal = activeSignal;
       activeSignal = signal;
       try {
-        for (const name of Object.keys(MODEL_FILES) as ModelFileName[]) {
+        for (const name of Object.keys(selectedFiles) as ModelFileName[]) {
           signal?.throwIfAborted();
           const request = modelFileUrl(name);
           const cached = await verifiedCache.match(request);

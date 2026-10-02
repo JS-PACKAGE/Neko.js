@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Upgrade the pinned Node image-processing dependency to `sharp@0.35.4` to include upstream libheif and libvips security fixes; retain an exact-version install-script approval.
+- Register the pinned all-q4 profile with native/browser execution evidence without implying output-quality guarantees.
 
 ## 1.1.0 — 2026-10-02
 
