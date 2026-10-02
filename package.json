@@ -4,60 +4,66 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
-  "browser": "./dist/neko.js",
-  "main": "./dist/src/index.js",
+  "browser": "./dist/browser/neko.js",
+  "main": "./dist/node/index.js",
   "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
-      "browser": "./dist/neko.js",
-      "node": "./dist/src/index.js",
-      "default": "./dist/neko.js"
+      "browser": "./dist/browser/neko.js",
+      "node": "./dist/node/index.js",
+      "default": "./dist/browser/neko.js"
     },
     "./types": {
       "types": "./dist/src/types.d.ts",
-      "browser": "./dist/src/types.js",
-      "node": "./dist/src/types.js",
-      "default": "./dist/src/types.js"
+      "browser": "./dist/browser/types.js",
+      "node": "./dist/node/types.js",
+      "default": "./dist/browser/types.js"
     },
     "./web": {
       "types": "./dist/src/web/index.d.ts",
-      "browser": "./dist/web.js",
-      "node": "./dist/src/web/index.js",
-      "default": "./dist/web.js"
+      "browser": "./dist/browser/web.js",
+      "node": "./dist/node/web.js",
+      "default": "./dist/browser/web.js"
     },
     "./report": {
       "types": "./dist/src/report/index.d.ts",
-      "browser": "./dist/report.js",
-      "node": "./dist/src/report/index.js",
-      "default": "./dist/report.js"
+      "browser": "./dist/browser/report.js",
+      "node": "./dist/node/report.js",
+      "default": "./dist/browser/report.js"
     },
     "./backend": {
       "types": "./dist/src/backend/index.d.ts",
-      "browser": "./dist/backend.js",
-      "node": "./dist/src/backend/index.js",
-      "default": "./dist/backend.js"
+      "browser": "./dist/browser/backend.js",
+      "node": "./dist/node/backend.js",
+      "default": "./dist/browser/backend.js"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "node scripts/clean.mjs && tsc -p tsconfig.json && node scripts/build.mjs",
     "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "npm run build && node --test dist/test/*.test.js dist/test/*/*.test.js",
+    "test:package": "node scripts/test-package.mjs",
+    "test:package:artifact": "node scripts/test-package.mjs --artifact-only",
     "test:browser": "playwright test",
     "smoke:browser": "node scripts/smoke-browser.mjs"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.2.0",
-    "parse5": "8.0.1"
+    "onnxruntime-node": "1.30.0",
+    "parse5": "8.0.1",
+    "sharp": "0.34.5"
   },
   "overrides": {
     "onnxruntime-node": "1.30.0"
   },
   "devDependencies": {
+    "@huggingface/transformers": "4.2.0",
     "@playwright/test": "1.63.0",
-    "@types/node": "22.19.15",
     "esbuild": "0.25.12",
     "eslint": "9.39.1",
     "typescript": "5.9.3",
