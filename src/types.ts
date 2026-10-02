@@ -44,6 +44,13 @@ export interface PageSnapshot {
   /** These identify metadata, not visual contents; observations have separate pixel digests. */
   images: { id: string; metadataVersionId: string }[];
 }
+export interface ExecutionInfo {
+  mode: 'inline' | 'worker';
+  runtime: 'node' | 'browser';
+  workerId?: string;
+  threadId?: number;
+}
+
 export interface ReportSection {
   heading?: string;
   keyPoints: string[];

@@ -1,8 +1,8 @@
 export type ErrorStage = 'create' | 'backend' | 'cache' | 'load' | 'extract' | 'image' | 'preprocess' | 'generate' | 'report' | 'dispose';
-export type ErrorCode = 'ABORTED' | 'INVALID_INPUT' | 'UNSUPPORTED_BACKEND' | 'RUNTIME_BUSY' | 'DISPOSED' | 'CONTEXT_LIMIT' | 'MODEL_OUTPUT' | 'INCOMPLETE_GENERATION' | 'LANGUAGE_MISMATCH' | 'OPERATION_FAILED' | 'POLICY_DENIED' | 'BUDGET_EXCEEDED';
+export type ErrorCode = 'ABORTED' | 'INVALID_INPUT' | 'UNSUPPORTED_BACKEND' | 'RUNTIME_BUSY' | 'DISPOSED' | 'CONTEXT_LIMIT' | 'MODEL_OUTPUT' | 'INCOMPLETE_GENERATION' | 'LANGUAGE_MISMATCH' | 'OPERATION_FAILED' | 'POLICY_DENIED' | 'BUDGET_EXCEEDED' | 'SCHEMA_INVALID' | 'STRUCTURED_OUTPUT';
 
 export const ERROR_STAGES: Record<ErrorStage, true> = { create: true, backend: true, cache: true, load: true, extract: true, image: true, preprocess: true, generate: true, report: true, dispose: true };
-export const ERROR_CODES: Record<ErrorCode, true> = { ABORTED: true, INVALID_INPUT: true, UNSUPPORTED_BACKEND: true, RUNTIME_BUSY: true, DISPOSED: true, CONTEXT_LIMIT: true, MODEL_OUTPUT: true, INCOMPLETE_GENERATION: true, LANGUAGE_MISMATCH: true, OPERATION_FAILED: true, POLICY_DENIED: true, BUDGET_EXCEEDED: true };
+export const ERROR_CODES: Record<ErrorCode, true> = { ABORTED: true, INVALID_INPUT: true, UNSUPPORTED_BACKEND: true, RUNTIME_BUSY: true, DISPOSED: true, CONTEXT_LIMIT: true, MODEL_OUTPUT: true, INCOMPLETE_GENERATION: true, LANGUAGE_MISMATCH: true, OPERATION_FAILED: true, POLICY_DENIED: true, BUDGET_EXCEEDED: true, SCHEMA_INVALID: true, STRUCTURED_OUTPUT: true };
 
 export class NekoError extends Error {
   override name = 'NekoError';

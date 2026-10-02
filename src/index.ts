@@ -2,12 +2,13 @@ import { env } from '@huggingface/transformers';
 import { EngineCache } from './cache/engine.js';
 import { captureModelSource, installVerifiedCache, type VerifiedCacheInstallation, type ModelSource } from './cache/model.js';
 import { inspectBackend, type BackendInfo, type BackendDevice } from './backend/index.js';
-import { VisionEngine, type InferOptions, type InferenceResult } from './core/engine.js';
+import { VisionEngine, type InferOptions, type InferenceResult, type StructuredInferOptions, type StructuredInferenceResult, type RuntimeReadiness } from './core/engine.js';
 import { generateReport, type DescribeOptions } from './report/generate.js';
-import type { StructuredReport } from './types.js';
+import type { StructuredReport, ExecutionInfo } from './types.js';
 import { atStage, NekoError, type ErrorStage } from './errors.js';
 import { getModelProfile, type ModelProfileId } from './cache/manifest.js';
 import { authorizeNetwork, type ResourcePolicy } from './web/policy.js';
+import { compileStructuredSchema } from './core/structured.js';
 
 export * from './types.js';
 export * from './web/index.js';
@@ -15,7 +16,8 @@ export * from './report/index.js';
 export * from './cache/manifest.js';
 export * from './backend/index.js';
 export * from './errors.js';
-export type { InferOptions, InferenceResult, ModelIdentity } from './core/engine.js';
+export type { InferOptions, InferenceResult, StructuredInferOptions, StructuredInferenceResult, RuntimeReadiness, ChatContent, ChatMessage, ModelIdentity, ImageObservation } from './core/engine.js';
+export type { GenerationOptions } from './core/generation.js';
 export type { DescribeOptions } from './report/generate.js';
 export type { ModelCacheStatus, CacheProgress, ModelSource } from './cache/model.js';
 export type { EngineCacheStatus } from './cache/engine.js';
@@ -42,6 +44,7 @@ export class Neko {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly lifetime = new AbortController();
   private disposePromise?: Promise<void>;
+  private readiness: RuntimeReadiness | null = null;
   readonly cache;
   readonly backend;
 
@@ -50,11 +53,11 @@ export class Neko {
       model: {
         prefetch: (signal?: AbortSignal) => this.run('cache', signal, (abort) => installation.prefetch(abort)),
         status: (signal?: AbortSignal) => this.run('cache', signal, (abort) => installation.status(abort)),
-        clear: (signal?: AbortSignal) => this.run('cache', signal, async (abort) => { await engines.release(); abort.throwIfAborted(); await installation.clear(abort); }),
+        clear: (signal?: AbortSignal) => this.run('cache', signal, async (abort) => { await engines.release(); this.readiness = null; abort.throwIfAborted(); await installation.clear(abort); }),
       },
       engine: {
         status: () => engines.status(),
-        release: () => this.run('cache', undefined, async () => { await engines.release(); }),
+        release: () => this.run('cache', undefined, async () => { await engines.release(); this.readiness = null; }),
       },
     };
     this.backend = {
@@ -108,15 +111,26 @@ export class Neko {
     }, (instance) => instance.dispose());
   }
 
-  private run<T>(stage: ErrorStage, signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  private run<T>(stage: ErrorStage, signal: AbortSignal | undefined, operation: (signal: AbortSignal, queueWaitMs: number) => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new NekoError('Neko is disposed', stage, 'DISPOSED'));
     const abort = AbortSignal.any([this.lifetime.signal, ...(signal ? [signal] : [])]);
-    const work = this.queue.catch(() => undefined).then(() => atStage(stage, abort, () => this.installation.withSignal(abort, () => operation(abort))));
+    const started = performance.now();
+    const work = this.queue.catch(() => undefined).then(() => atStage(stage, abort, () => this.installation.withSignal(abort, () => operation(abort, performance.now() - started))));
     this.queue = work;
     return work;
   }
+  private async use<T>(signal: AbortSignal, operation: (engine: VisionEngine) => Promise<T>): Promise<T> {
+    return this.engines.use(async (engine) => { try { return await operation(engine); } finally { this.readiness = engine.readiness(); } }, signal);
+  }
+  private execution(): ExecutionInfo { return { mode: 'inline', runtime: typeof process !== 'undefined' && process.release?.name === 'node' ? 'node' : 'browser' }; }
   infer(options: InferOptions): Promise<InferenceResult> {
-    return this.run('generate', options.signal, (signal) => this.engines.use((engine) => engine.infer({ ...options, signal, _policy: this.options.policy, _offline: this.options.localFilesOnly }), signal));
+    return this.run('generate', options.signal, (signal, queueWaitMs) => this.use(signal, async (engine) => { const result = await engine.infer({ ...options, signal, _budget: undefined, _preparedImages: undefined, _policy: this.options.policy, _offline: this.options.localFilesOnly }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; }));
+  }
+  inferStructured(options: StructuredInferOptions): Promise<StructuredInferenceResult> {
+    return this.run('generate', options.signal, (signal, queueWaitMs) => {
+      const compiled = compileStructuredSchema(options.schema);
+      return this.use(signal, async (engine) => { const result = await engine.inferStructured({ ...options, signal, _structured: compiled, _budget: undefined, _preparedImages: undefined, _policy: this.options.policy, _offline: this.options.localFilesOnly }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; });
+    });
   }
   describe(input: string, options: DescribeOptions & { format: 'markdown' }): Promise<string>;
   describe(input: string, options?: DescribeOptions & { format?: 'json' }): Promise<StructuredReport>;
@@ -124,12 +138,15 @@ export class Neko {
   describe(input: string, options: DescribeOptions = {}): Promise<StructuredReport | string> {
     return this.run('report', options.signal, (signal) => this.engines.use((engine) => generateReport(engine, input, { ...options, signal, _policy: this.options.policy, _offline: this.options.localFilesOnly }), signal));
   }
+  load(signal?: AbortSignal): Promise<RuntimeReadiness> { return this.run('load', signal, (abort) => this.use(abort, async (engine) => engine.readiness())); }
+  warmup(signal?: AbortSignal): Promise<RuntimeReadiness> { return this.run('load', signal, (abort) => this.use(abort, (engine) => engine.warmup(abort))); }
+  async runtimeStatus(): Promise<RuntimeReadiness | null> { if (this.closed) throw new NekoError('Neko is disposed', 'load', 'DISPOSED'); return this.engines.status().loaded ? this.readiness : null; }
   dispose(): Promise<void> {
     if (!this.disposePromise) {
       this.closed = true;
       this.lifetime.abort(new Error('Neko disposed'));
       this.disposePromise = atStage('dispose', undefined, async () => {
-        try { await this.queue.catch(() => undefined); await this.engines.release(); }
+        try { await this.queue.catch(() => undefined); await this.engines.release(); this.readiness = null; }
         finally { this.restore(); }
       });
     }
