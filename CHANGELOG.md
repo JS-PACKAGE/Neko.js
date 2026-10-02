@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.0 — 2026-10-02
+
 - Deliver the `createNeko()` SDK: text/image inference, URL/HTML structured reports, model/backend inspection, explicit cache controls, cancellation and streaming.
 - Bundle conditionally for Node/browser and include browser WASM assets in prebuilt `npm pack` archives; pin Node native `onnxruntime-node@1.30.0`, `sharp@0.34.5`, and `parse5@8.0.1` as runtime dependencies.
 - Validate report structure, complete paragraph/image provenance, and generated-field languages. English and Traditional Chinese script mismatches are rejected with `LANGUAGE_MISMATCH`; incomplete generations return `INCOMPLETE_GENERATION` without automatic retry.

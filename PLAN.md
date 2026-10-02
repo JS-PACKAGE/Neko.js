@@ -364,7 +364,7 @@ Node **22.23.3**、darwin arm64 的實際 `onnxruntime-node@1.24.3` WebGPU sessi
 
 ## 17. 現行工作樹 SDK 契約與驗證（非發佈紀錄）
 
-本節描述目前工作樹及 `Unreleased` 的 SDK 行為與實測；`package.json` 仍為 `1.0.0`，本機 `npm pack` 產生同名版本 tarball 不代表 GitHub 已發佈此更新版，也不更改版本、tag 或 release。
+本節說明目前 SDK 契約與 `CHANGELOG.md` 的 1.1.0 項目及實測證據。Artifact verification 僅驗證本機打包 consumer，不是 GitHub release 執行紀錄；本專案不發佈至 npm。
 
 ### 17.1 現行範圍與 API
 
