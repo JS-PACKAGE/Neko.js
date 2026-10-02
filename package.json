@@ -1,0 +1,74 @@
+{
+  "name": "neko.js",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "browser": "./dist/neko.js",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "browser": "./dist/neko.js",
+      "node": "./dist/src/index.js",
+      "default": "./dist/neko.js"
+    },
+    "./types": {
+      "types": "./dist/src/types.d.ts",
+      "browser": "./dist/src/types.js",
+      "node": "./dist/src/types.js",
+      "default": "./dist/src/types.js"
+    },
+    "./web": {
+      "types": "./dist/src/web/index.d.ts",
+      "browser": "./dist/web.js",
+      "node": "./dist/src/web/index.js",
+      "default": "./dist/web.js"
+    },
+    "./report": {
+      "types": "./dist/src/report/index.d.ts",
+      "browser": "./dist/report.js",
+      "node": "./dist/src/report/index.js",
+      "default": "./dist/report.js"
+    },
+    "./backend": {
+      "types": "./dist/src/backend/index.d.ts",
+      "browser": "./dist/backend.js",
+      "node": "./dist/src/backend/index.js",
+      "default": "./dist/backend.js"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.json && node scripts/build.mjs",
+    "prepare": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "npm run build && node --test dist/test/*.test.js dist/test/*/*.test.js",
+    "test:browser": "playwright test",
+    "smoke:browser": "node scripts/smoke-browser.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "parse5": "8.0.1"
+  },
+  "overrides": {
+    "onnxruntime-node": "1.30.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "22.19.15",
+    "esbuild": "0.25.12",
+    "eslint": "9.39.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "onnxruntime-node@1.30.0": true,
+    "sharp@0.34.5": true
+  }
+}
