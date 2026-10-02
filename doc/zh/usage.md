@@ -10,7 +10,7 @@ Neko.js 是供 Node.js 與受支援 WebGPU 瀏覽器使用的本機多模態 SDK
 
 - 需要 Node.js 22 以上，套件使用 ESM，且不發佈至 npm。
 - Git 倉庫支援方式：clone 專案後執行 `npm ci` 和 `npm run build`。這種明確本機建置可配合 npm 11 的生命週期腳本核准機制；若 Git 相依套件的 `prepare` 尚未核准，請勿直接安裝尚未建置的 Git dependency。
-- 請從目前工作樹本機建置後執行 `npm pack`；即使 `dist/` 被 Git 忽略，它仍會包含於套件。其他專案可安裝此本機產生的檔案：`npm install /path/to/neko.js-1.1.0.tgz`。`1.1.0` 檔名／版本取自此 checkout 的 `package.json`；本專案不發佈至 npm。Node bundle 已包含 Transformers.js，僅將固定版本 `onnxruntime-node`、`sharp`、`parse5` 保留為直接執行依賴。npm 11 若封鎖原生 postinstall，僅核准 `onnxruntime-node@1.30.0` 和 `sharp@0.34.5`，勿對所有套件一律核准腳本。
+- 請從目前工作樹本機建置後執行 `npm pack`；即使 `dist/` 被 Git 忽略，它仍會包含於套件。其他專案可安裝此本機產生的檔案：`npm install /path/to/neko.js-1.1.0.tgz`。`1.1.0` 檔名／版本取自此 checkout 的 `package.json`；本專案不發佈至 npm。Node bundle 已包含 Transformers.js，僅將固定版本 `onnxruntime-node`、`sharp`、`parse5` 保留為直接執行依賴。npm 11 若封鎖原生 postinstall，僅核准 `onnxruntime-node@1.30.0` 和 `sharp@0.35.4`，勿對所有套件一律核准腳本。
 - `npm test`、`npm run typecheck`、`npm run lint` 分別執行 Node 測試、型別檢查和 ESLint。`npm run test:package:artifact` 會在隔離的 consumer 中實際安裝 packed artifact，檢查公開匯入與 TypeScript 宣告。`npm run test:package` 會額外以該 consumer 執行文字、圖片和報告推理；冷快取時可能下載約 871 MB。
 - `npm run test:browser` 執行瀏覽器契約測試。`npm run smoke:browser` 是明確執行的真實模型瀏覽器 UI smoke，可能下載約 871 MB；靜態 demo 請透過安全的 HTTP(S) 來源提供。
 

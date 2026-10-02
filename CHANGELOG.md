@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Upgrade the pinned Node image-processing dependency to `sharp@0.35.4` to include upstream libheif and libvips security fixes; retain an exact-version install-script approval.
+
 ## 1.1.0 — 2026-10-02
 
 - Deliver the `createNeko()` SDK: text/image inference, URL/HTML structured reports, model/backend inspection, explicit cache controls, cancellation and streaming.
