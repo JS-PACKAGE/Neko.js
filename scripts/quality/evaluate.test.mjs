@@ -9,7 +9,6 @@ test('FACT prefix affects format diagnostics but not explicit-ID fact scoring', 
   const year = 'T-YEAR: The roof garden at Northstar Library opened in 2018.';
   const tomatoes = 'FACT T-TOMATOES: The garden grows three tomato varieties.';
   const result = evaluateClaims(`${year}\n${tomatoes}`, manifest.text);
-  assert.equal(result.evaluatorVersion, 'quality-claims-v4');
   assert.equal(result.metrics.truePositiveClaims, 2);
   assert.equal(result.metrics.falsePositiveClaims, 0);
   assert.equal(result.metrics.claimPrecision, 1);

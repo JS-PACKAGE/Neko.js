@@ -72,7 +72,7 @@ export async function evaluateQualityArtifact(artifact, { requiredCases = QUALIT
     let evaluation;
     if (entry.id === 'hierarchy') {
       evaluation = evaluateHierarchy(entry.output, contract.hierarchyRecords);
-      if (!evaluation.reportVersionValid) add('REPORT_VERSION_MISMATCH', 'Hierarchy requires report schemaVersion 2.', { caseId: entry.id });
+      if (!evaluation.reportVersionValid) add('REPORT_VERSION_MISMATCH', 'Hierarchy requires report schemaVersion 3.', { caseId: entry.id });
       checkScore(entry.id, 'retained', evaluation.retained, QUALITY_POLICY.hierarchyRetained);
       checkScore(entry.id, 'generated', evaluation.generated, QUALITY_POLICY.hierarchyGenerated);
       checkScore(entry.id, 'overview', evaluation.overview, QUALITY_POLICY.hierarchyOverview);

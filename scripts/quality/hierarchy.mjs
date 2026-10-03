@@ -90,6 +90,6 @@ export function evaluateHierarchy(report, records) {
     generated,
     overview: scoreRecords(overviewTexts, records),
     generatedTextCount: generatedTexts.length,
-    reportVersionValid: report?.schemaVersion === 2,
+    reportVersionValid: report?.schemaVersion === 3,
   };
 }

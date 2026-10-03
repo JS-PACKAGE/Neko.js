@@ -1,6 +1,6 @@
 const claimLine = /^\s*(?:(FACT)\s+)?([A-Z0-9-]+)\s*:\s*(.*?)\s*$/iu;
 
-export const EVALUATOR_VERSION = 'quality-claims-v4';
+export const EVALUATOR_VERSION = 'quality-claims-v5';
 
 function matchAll(pattern, text) {
   return [...text.matchAll(new RegExp(pattern, 'giu'))];

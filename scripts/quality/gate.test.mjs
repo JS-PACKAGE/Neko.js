@@ -29,7 +29,7 @@ const backend = { runtime: 'node', device: 'cpu', executionProviders: ['cpu'] };
 
 function goodReport() {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     sourceFacts: contract.hierarchyRecords.map(({ sourceId, text }, index) => ({ id: `f${index + 1}`, citation: { kind: 'quote', quote: text, paragraphId: sourceId, snapshotId: 'snapshot', versionId: 'version', startOffset: 0, endOffset: text.length } })),
     page: { summary: 'Dated station measurements.' },
     sections: [{ paragraphIds: contract.hierarchyRecords.map(({ sourceId }) => sourceId), keyPoints: contract.hierarchyRecords.map(({ text }) => text) }],
