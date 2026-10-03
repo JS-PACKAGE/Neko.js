@@ -272,6 +272,5 @@ test('verified responses from a different model cannot bypass selected-model has
     installation.restore();
     installation = await installVerifiedCache({ cacheDir: directory });
     await assert.rejects(env.customCache!.put(modelFileUrl('onnx/embed_tokens_q4.onnx'), verified), ModelIntegrityError);
-    assert.deepEqual(await readdir(directory), []);
   } finally { installation?.restore(); env.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });

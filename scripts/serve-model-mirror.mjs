@@ -71,20 +71,26 @@ export async function createModelMirror({ cacheDir, profile = 'default', allowed
       const name = paths.get(request.url);
       if (!name) { response.writeHead(404, cors).end('Not a pinned model asset'); return; }
       const size = files[name].size;
-      if (request.headers.range && request.headers.range !== 'bytes=0-0') {
-        response.writeHead(416, { 'content-range': `bytes */${size}`, ...cors }).end(); return;
+      const etag = `"sha256-${files[name].sha256}"`;
+      let start = 0; let end = size - 1;
+      const range = typeof request.headers.range === 'string' && (!request.headers['if-range'] || request.headers['if-range'] === etag);
+      if (range) {
+        const match = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range);
+        start = match ? Number(match[1]) : NaN; end = match?.[2] ? Number(match[2]) : size - 1;
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= size || end < start || end >= size) {
+          response.writeHead(416, { 'content-range': `bytes */${size}`, ...cors }).end(); return;
+        }
       }
       handle = await verifiedHandle(name);
-      const range = request.headers.range === 'bytes=0-0';
       response.writeHead(range ? 206 : 200, {
         ...cors, 'content-type': name.endsWith('.json') ? 'application/json' : 'application/octet-stream',
-        'content-length': String(range ? 1 : size), 'accept-ranges': 'bytes',
+        'content-length': String(end - start + 1), 'accept-ranges': 'bytes', etag,
         'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
         'cross-origin-resource-policy': allowedOrigin ? 'cross-origin' : 'same-origin',
-        ...(range ? { 'content-range': `bytes 0-0/${size}` } : {}),
+        ...(range ? { 'content-range': `bytes ${start}-${end}/${size}` } : {}),
       });
       if (request.method === 'HEAD') { response.end(); return; }
-      await pipeline(handle.createReadStream({ start: 0, end: range ? 0 : size - 1, autoClose: false }), response);
+      await pipeline(handle.createReadStream({ start, end, autoClose: false }), response);
     } catch {
       if (!response.headersSent) response.writeHead(500).end('Model cache verification failed');
       else response.destroy();

@@ -10,6 +10,12 @@ import type * as NodePath from 'node:path';
 import type { constants as NodeFileConstants, Stats } from 'node:fs';
 import type * as NodeOs from 'node:os';
 import type * as NodeStream from 'node:stream';
+import { downloadResumable } from './download.js';
+import type { DownloadProgress, DownloadStage } from './download.js';
+import { nodeDownloadStage } from './node-download.js';
+import { browserDownloadStage } from './browser-download.js';
+import { withBrowserInstallLock, withNodeInstallLock } from './lock.js';
+import type { AsyncLocalStorage } from 'node:async_hooks';
 
 const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
 
@@ -33,7 +39,7 @@ export function captureModelSource(source?: ModelSource): ModelSource | undefine
   if (!base.pathname.endsWith('/')) base.pathname += '/';
   return Object.freeze({ baseUrl: base.href });
 }
-export interface CacheProgress { file: ModelFileName; loaded: number; total: number; phase: 'download' | 'verify'; }
+export interface CacheProgress extends DownloadProgress { file: ModelFileName; }
 export interface VerifiedCacheOptions {
   /** Transformers.js native filesystem cache directory; browsers use its native Cache API cache. */
   cacheDir?: string;
@@ -43,6 +49,10 @@ export interface VerifiedCacheOptions {
   model?: ModelId;
   policy?: ResourcePolicy;
   modelSource?: ModelSource;
+  /** Maximum simultaneous pinned-file downloads, from 1 through 16. Defaults to 3. */
+  downloadConcurrency?: number;
+  /** Preserve interrupted, validator-bound staging for the next explicit installation. Defaults to true. */
+  resumeDownloads?: boolean;
 }
 export interface ModelCacheStatus { downloaded: boolean; verified: boolean; bytes: number; totalBytes: number; path: string; files: { name: ModelFileName; present: boolean; verified: boolean; bytes: number }[]; }
 export interface ModelCacheDiagnostics {
@@ -71,6 +81,8 @@ type NativeCache = {
   match(request: string): Promise<CachedResponse | undefined>;
   put(request: string, response: Response): Promise<void>;
   delete(request: string): Promise<void>;
+  stage(request: string): Promise<DownloadStage>;
+  withLock<T>(request: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   path: string;
 };
 type NodeHash = { update(bytes: Uint8Array): NodeHash; digest(encoding: 'hex'): string };
@@ -196,7 +208,13 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
   if (!isNode) {
     if (typeof caches === 'undefined') throw new Error('Verified model caching requires the browser Cache API in a secure context');
     const cache = await caches.open(env.cacheKey);
-    return { path: `CacheStorage:${env.cacheKey}`, match: (request) => cache.match(request), put: (request, response) => cache.put(request, response), async delete(request) { await cache.delete(request); } };
+    const namespace = `CacheStorage:${env.cacheKey}`;
+    return {
+      path: namespace, match: (request) => cache.match(request), put: (request, response) => cache.put(request, response),
+      async delete(request) { await cache.delete(request); },
+      stage(request) { return browserDownloadStage(`${namespace}:${request}`, async (body) => { await cache.put(request, new Response(body)); }); },
+      withLock(request, operation, signal) { return withBrowserInstallLock(`${namespace}:${request}`, operation, signal); },
+    };
   }
   // Platform-only imports cannot be static: browsers have no Node filesystem or package source files.
   const protocol = 'node:';
@@ -220,7 +238,13 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
     for (const current of ancestors.reverse()) {
       let info;
       try { info = await fs.lstat(current); }
-      catch (error) { if (!missing(error)) throw error; await fs.mkdir(current, { mode: 0o700 }); info = await fs.lstat(current); }
+      catch (error) {
+        if (!missing(error)) throw error;
+        await fs.mkdir(current, { mode: 0o700 }).catch((failure: unknown) => {
+          if (!failure || typeof failure !== 'object' || !('code' in failure) || failure.code !== 'EEXIST') throw failure;
+        });
+        info = await fs.lstat(current);
+      }
       if (info.isSymbolicLink() || !info.isDirectory()) throw new ModelIntegrityError(`Unsafe cache directory: ${current}`);
       // A private cache root is still renameable through an untrusted or non-sticky writable ancestor.
       if (uid !== undefined && current !== root && (info.uid !== uid && info.uid !== 0 || (info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0)) {
@@ -245,7 +269,9 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
       catch (error) {
         if (!missing(error)) throw error;
         if (!createParents) return undefined;
-        await fs.mkdir(current, { mode: 0o700 });
+        await fs.mkdir(current, { mode: 0o700 }).catch((failure: unknown) => {
+          if (!failure || typeof failure !== 'object' || !('code' in failure) || failure.code !== 'EEXIST') throw failure;
+        });
         info = await fs.lstat(current);
       }
       if (info.isSymbolicLink() || !info.isDirectory() || !owned(info)) throw new ModelIntegrityError(`Unsafe model cache namespace: ${current}`);
@@ -259,9 +285,35 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
     } catch (error) { if (!missing(error)) throw error; if (!createParents) return undefined; }
     return entry;
   }
+  async function secureAuxiliary(entry: string): Promise<void> {
+    await secureDirectory();
+    try {
+      const info = await fs.lstat(entry);
+      if (info.isSymbolicLink() || !info.isFile() || !owned(info)) throw new ModelIntegrityError(`Unsafe model installation file: ${entry}`);
+      await fs.chmod(entry, 0o600);
+    } catch (error) { if (!missing(error)) throw error; }
+  }
+  const coordinationKey = async (request: string) => {
+    const hash = await createNodeHash();
+    hash.update(new TextEncoder().encode(request));
+    return hash.digest('hex');
+  };
   await secureDirectory();
   return {
     path: root,
+    async stage(request) {
+      return nodeDownloadStage({
+        directory: root, key: await coordinationKey(request), validate: secureDirectory, validateFile: secureAuxiliary,
+        async destination() {
+          const entry = await secureEntry(request, true);
+          if (!entry) throw new ModelIntegrityError(`Unpinned model staging destination: ${request}`);
+          return entry;
+        },
+      });
+    },
+    async withLock(request, operation, signal) {
+      return withNodeInstallLock({ directory: root, key: await coordinationKey(request), validate: secureDirectory, validateFile: secureAuxiliary }, operation, signal);
+    },
     async match(request) {
       const entry = await secureEntry(request, false);
       if (!entry) return undefined;
@@ -313,9 +365,21 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   const selectedFiles = model.files;
   const modelFileUrl = (name: ModelFileName) => `${model.baseUrl}${name}`;
   const modelSource = captureModelSource(options.modelSource);
+  const downloadConcurrency = options.downloadConcurrency ?? 3;
+  if (!Number.isSafeInteger(downloadConcurrency) || downloadConcurrency < 1 || downloadConcurrency > 16) throw new RangeError('downloadConcurrency must be an integer from 1 through 16');
+  if (options.resumeDownloads !== undefined && typeof options.resumeDownloads !== 'boolean') throw new TypeError('resumeDownloads must be a boolean');
   installed = true;
   let backing: NativeCache;
-  try { backing = await nativeCache(options); } catch (error) { installed = false; throw error; }
+  let signalContext: AsyncLocalStorage<{ signal: AbortSignal | undefined }> | undefined;
+  try {
+    backing = await nativeCache(options);
+    if (isNode) {
+      // Async context is Node-only; browser operations pass their signals explicitly.
+      const protocol = 'node:';
+      const { AsyncLocalStorage } = await import(`${protocol}async_hooks`);
+      signalContext = new AsyncLocalStorage();
+    }
+  } catch (error) { installed = false; throw error; }
   const previous = {
     fetch: env.fetch, customCache: env.customCache, useCustomCache: env.useCustomCache,
     useBrowserCache: env.useBrowserCache, useFSCache: env.useFSCache, useFS: env.useFS,
@@ -323,8 +387,10 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     remoteHost: env.remoteHost, remotePathTemplate: env.remotePathTemplate, cacheDir: env.cacheDir,
   };
   let activeSignal: AbortSignal | undefined;
+  let browserSignalDepth = 0;
+  const currentSignal = () => signalContext?.getStore()?.signal ?? activeSignal;
   const verifiedCache = {
-    async match(request: string, signal = activeSignal): Promise<Response | string | undefined> {
+    async match(request: string, signal = currentSignal()): Promise<Response | string | undefined> {
       signal?.throwIfAborted();
       const name = fileName(request, model);
       if (!name && !isRuntimeAsset(request)) return undefined;
@@ -346,23 +412,71 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
         throw error;
       }
     },
-    async put(request: string, response: Response): Promise<void> {
+    async put(request: string, response: Response, signal = currentSignal()): Promise<void> {
       const name = fileName(request, model);
       if (!name && !isRuntimeAsset(request)) throw new ModelIntegrityError(`Unpinned cache resource: ${request}`);
-      if (!name) await authorizeNetwork(options.policy, new URL(request), 'runtime', !!options.localFilesOnly, undefined, activeSignal);
+      if (!name) await authorizeNetwork(options.policy, new URL(request), 'runtime', !!options.localFilesOnly, undefined, signal);
       // Validate before the native writer opens a temporary file: 4.2.0 cannot reliably clean up an early stream error.
-      const verified = name && (verifiedResponses.get(response) !== model.allFiles[name] || response.bodyUsed) ? await readVerified(response, name, model.allFiles[name], options, 'verify', activeSignal) : response;
-      await backing.put(nativeKey(request, model, name), verified);
+      const verified = name && (verifiedResponses.get(response) !== model.allFiles[name] || response.bodyUsed) ? await readVerified(response, name, model.allFiles[name], options, 'verify', signal) : response;
+      const key = nativeKey(request, model, name);
+      if (name) await backing.withLock(key, () => backing.put(key, verified), signal);
+      else await backing.put(key, verified);
     },
   };
+  const fetchRemote = async (request: string, name: ModelFileName | undefined, init: RequestInit | undefined, headers: Headers | undefined, signal: AbortSignal): Promise<{ response: Response; destination: string }> => {
+    const modelMirror = name && modelSource ? new URL(name, modelSource.baseUrl) : undefined;
+    const canonical = new URL(request);
+    let destination = modelMirror ?? canonical;
+    let previousOrigin = canonical.origin;
+    let response: Response;
+    for (let redirects = 0; ; redirects++) {
+      await authorizeNetwork(options.policy, destination, name ? 'model' : 'runtime', !!options.localFilesOnly, name ? { modelFiles: selectedFiles, modelSource: new URL(modelFileUrl(name)), modelMirror } : undefined, signal);
+      if (headers && destination.origin !== previousOrigin) {
+        headers.delete('authorization');
+        headers.delete('cookie');
+        headers.delete('proxy-authorization');
+      }
+      previousOrigin = destination.origin;
+      response = await previous.fetch(destination.href, { ...init, headers, signal, redirect: 'manual' });
+      if (response.type === 'opaqueredirect' || response.status === 0) {
+        await response.body?.cancel();
+        throw new NekoError('Browser concealed a model redirect destination; use an explicitly configured modelSource mirror or verified offline cache. Automatic redirect following is denied.', 'cache', 'POLICY_DENIED');
+      }
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get('location');
+      await response.body?.cancel();
+      if (!location || redirects >= 10) throw new ModelIntegrityError('Model redirect limit or missing destination');
+      destination = new URL(location, destination);
+      if (!['http:', 'https:'].includes(destination.protocol) || destination.username || destination.password) throw new ModelIntegrityError('Unsafe model redirect');
+    }
+    return { response, destination: destination.href };
+  };
+  const downloadFile = async (name: ModelFileName, signal: AbortSignal, init?: RequestInit): Promise<void> => {
+    const request = modelFileUrl(name);
+    const key = nativeKey(request, model, name);
+    const spec = model.allFiles[name];
+    const stage = await backing.stage(key);
+    await downloadResumable({
+      source: modelSource ? new URL(name, modelSource.baseUrl).href : request,
+      size: spec.size, sha256: spec.sha256, stage, signal, resume: options.resumeDownloads ?? true,
+      async fetch(resumeHeaders) {
+        const headers = new Headers(init?.headers);
+        for (const [header, value] of resumeHeaders) headers.set(header, value);
+        return fetchRemote(request, name, { ...init, method: 'GET' }, headers, signal);
+      },
+      onProgress(event) { options.onProgress?.({ file: name, ...event }); },
+      integrityError(detail) { return integrity(name, detail); },
+    });
+  };
   const fetchVerified = async (input: string | URL, init?: RequestInit): Promise<Response> => {
-    activeSignal?.throwIfAborted();
+    const ambientSignal = currentSignal();
+    ambientSignal?.throwIfAborted();
     const request = String(input);
     const name = fileName(request, model);
     if (!name && !isRuntimeAsset(request)) throw new ModelIntegrityError(`Unpinned resource URL: ${request}`);
     const method = init?.method?.toUpperCase() ?? 'GET';
-    const requestSignal = activeSignal && init?.signal && activeSignal !== init.signal
-      ? AbortSignal.any([activeSignal, init.signal]) : init?.signal ?? activeSignal;
+    const requestSignal = ambientSignal && init?.signal && ambientSignal !== init.signal
+      ? AbortSignal.any([ambientSignal, init.signal]) : init?.signal ?? ambientSignal;
     if (!name && (method === 'GET' || method === 'HEAD')) {
       init?.signal?.throwIfAborted();
       const cached = await verifiedCache.match(request, requestSignal);
@@ -419,31 +533,20 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     if (options.localFilesOnly) throw new Error(`Offline cache miss: ${request}`);
     const timeout = AbortSignal.timeout(15 * 60_000);
     const signal = requestSignal ? AbortSignal.any([timeout, requestSignal]) : timeout;
-    const modelMirror = name && modelSource ? new URL(name, modelSource.baseUrl) : undefined;
-    const canonical = new URL(request);
-    let destination = modelMirror ?? canonical;
-    let previousOrigin = canonical.origin;
-    let response: Response;
-    for (let redirects = 0; ; redirects++) {
-      await authorizeNetwork(options.policy, destination, name ? 'model' : 'runtime', !!options.localFilesOnly, name ? { modelFiles: selectedFiles, modelSource: new URL(modelFileUrl(name)), modelMirror } : undefined, signal);
-      if (headers && destination.origin !== previousOrigin) {
-        headers.delete('authorization');
-        headers.delete('cookie');
-        headers.delete('proxy-authorization');
-      }
-      previousOrigin = destination.origin;
-      response = await previous.fetch(destination.href, { ...init, headers, signal, redirect: 'manual' });
-      if (response.type === 'opaqueredirect' || response.status === 0) {
-        await response.body?.cancel();
-        throw new NekoError('Browser concealed a model redirect destination; use an explicitly configured modelSource mirror or verified offline cache. Automatic redirect following is denied.', 'cache', 'POLICY_DENIED');
-      }
-      if (![301, 302, 303, 307, 308].includes(response.status)) break;
-      const location = response.headers.get('location');
-      await response.body?.cancel();
-      if (!location || redirects >= 10) throw new ModelIntegrityError('Model redirect limit or missing destination');
-      destination = new URL(location, destination);
-      if (!['http:', 'https:'].includes(destination.protocol) || destination.username || destination.password) throw new ModelIntegrityError('Unsafe model redirect');
+    if (name && method === 'GET' && !metadata) {
+      const key = nativeKey(request, model, name);
+      return backing.withLock(key, async () => {
+        await downloadFile(name, signal, init);
+        const cached = await backing.match(key);
+        if (!cached?.body) throw integrity(name, 'installed body unavailable');
+        const headers = new Headers(cached.headers);
+        headers.set('content-length', String(model.allFiles[name].size));
+        const verified = new Response(cached.body, { status: 200, headers });
+        verifiedResponses.set(verified, model.allFiles[name]);
+        return verified;
+      }, signal);
     }
+    const { response } = await fetchRemote(request, name, init, headers, signal);
     if (!name || !response.ok) return response;
     // Metadata requests have no full body to hash. Remote metadata is not a verified cache entry.
     if (metadata) {
@@ -472,9 +575,16 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     },
     async put(name, body) {
       if (restored) throw new Error('Verified cache installation has been restored');
-      await backing.put(nativeKey(modelFileUrl(name), model, name), new Response(body, { headers: { 'content-length': String(model.allFiles[name].size) } }));
+      const key = nativeKey(modelFileUrl(name), model, name);
+      const response = new Response(body, { headers: { 'content-length': String(model.allFiles[name].size) } });
+      if (isNode || typeof navigator !== 'undefined' && navigator.locks) await backing.withLock(key, () => backing.put(key, response));
+      else await backing.put(key, response);
     },
-    async delete(name) { await backing.delete(nativeKey(modelFileUrl(name), model, name)); },
+    async delete(name) {
+      const key = nativeKey(modelFileUrl(name), model, name);
+      if (isNode || typeof navigator !== 'undefined' && navigator.locks) await backing.withLock(key, () => backing.delete(key));
+      else await backing.delete(key);
+    },
   };
   return {
     restore() {
@@ -484,10 +594,17 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       installed = false;
     },
     async withSignal(signal, operation) {
+      if (restored) throw new Error('Verified cache installation has been restored');
+      signal?.throwIfAborted();
+      if (signalContext) return signalContext.run({ signal }, operation);
+      // Browsers lack async-local context. Nested loader scopes share the same signal;
+      // independently overlapping scopes must not inherit each other's cancellation.
+      if (browserSignalDepth && activeSignal !== signal) throw new NekoError('Overlapping browser cache signal scopes are not supported', 'cache', 'RUNTIME_BUSY');
       const previousSignal = activeSignal;
       activeSignal = signal;
-      try { signal?.throwIfAborted(); return await operation(); }
-      finally { activeSignal = previousSignal; }
+      browserSignalDepth++;
+      try { return await operation(); }
+      finally { browserSignalDepth--; activeSignal = previousSignal; }
     },
     exportBundle(signal) {
       if (restored) throw new Error('Verified cache installation has been restored');
@@ -516,50 +633,71 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     },
     async status(signal) {
       if (restored) throw new Error('Verified cache installation has been restored');
-      const previousSignal = activeSignal;
-      activeSignal = signal;
-      try {
-        const files: ModelCacheStatus['files'] = [];
-        for (const name of Object.keys(selectedFiles) as ModelFileName[]) {
-          signal?.throwIfAborted();
-          const response = await verifiedCache.match(modelFileUrl(name));
-          if (response instanceof Response) {
-            if (!response.headers.has('content-length')) await response.arrayBuffer();
-            await response.body?.cancel();
-          }
-          files.push({ name, present: response !== undefined, verified: response !== undefined, bytes: response === undefined ? 0 : model.allFiles[name].size });
+      const files: ModelCacheStatus['files'] = [];
+      for (const name of Object.keys(selectedFiles) as ModelFileName[]) {
+        signal?.throwIfAborted();
+        const response = await verifiedCache.match(modelFileUrl(name), signal);
+        if (response instanceof Response) {
+          if (!response.headers.has('content-length')) await response.arrayBuffer();
+          await response.body?.cancel();
         }
-        return { downloaded: files.every((file) => file.present), verified: files.every((file) => file.verified), bytes: files.reduce((total, file) => total + file.bytes, 0), totalBytes: Object.values(selectedFiles).reduce((total, file) => total + file.size, 0), path: backing.path, files };
-      } finally { activeSignal = previousSignal; }
+        files.push({ name, present: response !== undefined, verified: response !== undefined, bytes: response === undefined ? 0 : model.allFiles[name].size });
+      }
+      return { downloaded: files.every((file) => file.present), verified: files.every((file) => file.verified), bytes: files.reduce((total, file) => total + file.bytes, 0), totalBytes: Object.values(selectedFiles).reduce((total, file) => total + file.size, 0), path: backing.path, files };
     },
     async clear(signal) {
       if (restored) throw new Error('Verified cache installation has been restored');
       for (const name of Object.keys(model.allFiles) as ModelFileName[]) {
         signal?.throwIfAborted();
-        await backing.delete(nativeKey(modelFileUrl(name), model, name));
+        const key = nativeKey(modelFileUrl(name), model, name);
+        const remove = async () => {
+          await backing.delete(key);
+          if (isNode || typeof indexedDB !== 'undefined') await (await backing.stage(key)).reset();
+        };
+        if (isNode || typeof navigator !== 'undefined' && navigator.locks) await backing.withLock(key, remove, signal);
+        else await remove();
       }
     },
     async prefetch(signal?: AbortSignal, files: readonly ModelFileName[] = Object.keys(selectedFiles) as ModelFileName[]) {
       if (restored) throw new Error('Verified cache installation has been restored');
       if (files.some((name) => !Object.hasOwn(selectedFiles, name))) throw new ModelIntegrityError('Cannot prefetch an unpinned selected-model file');
-      const previousSignal = activeSignal;
-      activeSignal = signal;
-      try {
-        for (const name of files) {
-          signal?.throwIfAborted();
-          const request = modelFileUrl(name);
-          const cached = await verifiedCache.match(request);
-          if (cached !== undefined) {
-            // Reading an errored cached response must expose corruption even during prefetch.
-            if (cached instanceof Response && !cached.headers.has('content-length')) await cached.arrayBuffer();
-            else if (typeof cached !== 'string') await cached.body?.cancel();
-            continue;
+      const controller = new AbortController();
+      const operationSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+      let next = 0;
+      let failed = false;
+      let failure: unknown;
+      const worker = async () => {
+        try {
+          while (next < files.length) {
+            operationSignal.throwIfAborted();
+            const name = files[next++]!;
+            const request = modelFileUrl(name);
+            const key = nativeKey(request, model, name);
+            const cached = await verifiedCache.match(request, operationSignal);
+            if (cached !== undefined) {
+              if (cached instanceof Response && !cached.headers.has('content-length')) await cached.arrayBuffer();
+              else if (typeof cached !== 'string') await cached.body?.cancel();
+              continue;
+            }
+            if (options.localFilesOnly) throw new Error(`Offline cache miss: ${request}`);
+            const downloadSignal = AbortSignal.any([operationSignal, AbortSignal.timeout(15 * 60_000)]);
+            await backing.withLock(key, async () => {
+              // Another realm/process may have completed this file while we waited.
+              const installed = await verifiedCache.match(request, downloadSignal);
+              if (installed !== undefined) {
+                if (installed instanceof Response && !installed.headers.has('content-length')) await installed.arrayBuffer();
+                else if (typeof installed !== 'string') await installed.body?.cancel();
+                return;
+              }
+              await downloadFile(name, downloadSignal);
+            }, downloadSignal);
           }
-          const response = await fetchVerified(request, signal ? { signal } : undefined);
-          if (!response.ok) throw new Error(`Model download failed: HTTP ${response.status} (${name})`);
-          await verifiedCache.put(request, response);
+        } catch (error) {
+          if (!failed) { failed = true; failure = error; controller.abort(error); }
         }
-      } finally { activeSignal = previousSignal; }
+      };
+      await Promise.all(Array.from({ length: Math.min(downloadConcurrency, files.length) }, worker));
+      if (failed) throw failure;
     },
   };
 }
