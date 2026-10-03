@@ -3,9 +3,13 @@ import type { GenerationOptions } from '../core/generation.js';
 import { generationSettings } from '../core/generation.js';
 import { NekoError } from '../errors.js';
 import { DocumentIndex, type DocumentIndexSnapshot, type DocumentQuote, type DocumentSearchHit, type DocumentSearchOptions, type RetrievalCoverage } from './index.js';
+import type { DocumentEmbedder, SemanticSearchSettings } from './semantic.js';
 
 export interface AskDocumentsOptions {
   search?: DocumentSearchOptions;
+  /** Enables hybrid BM25 + vector retrieval. Neko.js bundles no embedding model; see DocumentEmbedder. */
+  embedder?: DocumentEmbedder;
+  embedding?: SemanticSearchSettings;
   maxNewTokens?: number;
   contextWindowTokens?: number;
   generation?: GenerationOptions;
@@ -80,7 +84,8 @@ export async function askDocuments(host: DocumentQueryHost, inputIndex: Document
   if (!host || typeof host.inferStructured !== 'function' || typeof host.planInference !== 'function') throw new TypeError('Document query host requires inferStructured and planInference');
   if (typeof question !== 'string' || !question.trim() || question.length > 8192) throw new NekoError('Question must be non-empty text of at most 8192 UTF-16 units', 'preprocess', 'INVALID_INPUT');
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Ask documents options must be an object');
-  if (Object.keys(options).some((key) => !['search', 'maxNewTokens', 'contextWindowTokens', 'generation', 'signal', 'hardDeadlineMs', 'onToken'].includes(key))) throw new TypeError('Unknown ask documents option');
+  if (Object.keys(options).some((key) => !['search', 'embedder', 'embedding', 'maxNewTokens', 'contextWindowTokens', 'generation', 'signal', 'hardDeadlineMs', 'onToken'].includes(key))) throw new TypeError('Unknown ask documents option');
+  if (options.embedding !== undefined && options.embedder === undefined) throw new TypeError('embedding settings require an embedder');
   const maxNewTokens = options.maxNewTokens ?? 512;
   if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1 || maxNewTokens > 2048) throw new RangeError('maxNewTokens must be between 1 and 2048');
   if (options.contextWindowTokens !== undefined && (!Number.isSafeInteger(options.contextWindowTokens) || options.contextWindowTokens < 32)) throw new RangeError('contextWindowTokens must be a safe integer of at least 32');
@@ -90,7 +95,9 @@ export async function askDocuments(host: DocumentQueryHost, inputIndex: Document
   generationSettings(options.generation, Number.MAX_SAFE_INTEGER); options.signal?.throwIfAborted();
   const index = inputIndex instanceof DocumentIndex ? inputIndex : await DocumentIndex.importSnapshot(inputIndex);
   options.signal?.throwIfAborted();
-  const found = index.search(question, options.search); const indexId = index.id;
+  const found = options.embedder
+    ? await index.searchHybrid(question, { ...options.search, ...options.embedding, embedder: options.embedder, ...(options.signal ? { signal: options.signal } : {}) })
+    : index.search(question, options.search); const indexId = index.id;
   const selected: DocumentSearchHit[] = []; const omitted: string[] = []; let planningCalls = 0; let selectedPlan: InferencePlan | undefined;
   const checkCurrent = (): void => {
     options.signal?.throwIfAborted();

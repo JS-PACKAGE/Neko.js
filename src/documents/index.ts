@@ -1,5 +1,7 @@
 import type { Page } from '../types.js';
 import { hashValue, validatePage } from '../web/source.js';
+import { NekoError } from '../errors.js';
+import { cosineRanking, EmbeddingStore, embedTexts, rankOrder, reciprocalRankFusion, semanticSettings, validateEmbedder, type DocumentEmbedder, type Ranked, type SemanticCoverage, type SemanticSearchSettings } from './semantic.js';
 
 export interface DocumentSource {
   kind: 'text' | 'page' | 'pdf' | 'ocr';
@@ -67,6 +69,10 @@ export interface DocumentSearchOptions {
   documentIds?: string[];
   maxScoredChunks?: number;
 }
+export interface DocumentHybridSearchOptions extends DocumentSearchOptions, SemanticSearchSettings {
+  embedder: DocumentEmbedder;
+  signal?: AbortSignal;
+}
 export interface DocumentSearchHit { chunk: DocumentChunk; score: number; citation: DocumentQuote; }
 export interface RetrievalCoverage {
   indexId: string;
@@ -80,7 +86,9 @@ export interface RetrievalCoverage {
   candidateLimitReached: boolean;
   /** Searching all lexical candidates is not a guarantee of semantic recall or completeness. */
   exhaustive: false;
-  strategy: 'bm25-cjk-v1';
+  strategy: 'bm25-cjk-v1' | 'hybrid-bm25-vector-rrf-v1';
+  /** Present only for hybrid retrieval. */
+  semantic?: SemanticCoverage;
 }
 export interface DocumentSearchResult { hits: DocumentSearchHit[]; coverage: RetrievalCoverage; }
 export interface DocumentIndexSnapshot {
@@ -239,6 +247,7 @@ function unversioned(document: IndexedDocument): DocumentInput {
 /** Caller-owned local index. Persistence contains source text; it is never uploaded by this module. */
 export class DocumentIndex {
   private pending: Promise<unknown> = Promise.resolve();
+  private readonly embeddings = new EmbeddingStore();
   private constructor(private state: IndexState) {}
   static async create(input: readonly DocumentInput[] = [], options: DocumentIndexOptions = {}): Promise<DocumentIndex> {
     if (!Array.isArray(input)) throw new TypeError('Documents must be an array');
@@ -275,6 +284,7 @@ export class DocumentIndex {
       integer(this.revision + 1, 1, Number.MAX_SAFE_INTEGER, 'Index revision');
       const next = change(this.state.snapshot.documents.map(unversioned));
       const state = await build(next, this.state.snapshot.options, this.revision + 1); this.state = state;
+      this.embeddings.retain(new Set([...state.chunks.values()].map(({ chunk }) => chunk.versionId)));
     });
     this.pending = operation.catch(() => undefined); return operation;
   }
@@ -310,9 +320,8 @@ export class DocumentIndex {
     return Object.freeze({ kind: 'document-quote', indexId: this.id, documentId: chunk.documentId, documentVersionId: chunk.documentVersionId, chunkId: chunk.id, chunkVersionId: chunk.versionId,
       startOffset: chunk.startOffset + offset, endOffset: chunk.startOffset + offset + quote.length, quote, ...(chunk.source === undefined ? {} : { source: chunk.source }) });
   }
-  search(question: string, options: DocumentSearchOptions = {}): DocumentSearchResult {
+  private rank(question: string, options: DocumentSearchOptions): { state: IndexState; selected: Set<string> | undefined; topK: number; eligible: number; candidates: Map<string, number>; queryTerms: string[]; matchedTerms: string[]; candidateLimitReached: boolean } {
     if (typeof question !== 'string' || !question.trim() || question.length > 8192) throw new TypeError('Search query must be non-empty text of at most 8192 UTF-16 units');
-    object(options, 'Search options'); keys(options, ['topK', 'documentIds', 'maxScoredChunks'], 'Search options');
     const topK = options.topK ?? 8; const maxScored = options.maxScoredChunks ?? 10_000;
     integer(topK, 1, 100, 'topK'); integer(maxScored, 1, 100_000, 'maxScoredChunks');
     let selected: Set<string> | undefined;
@@ -338,17 +347,56 @@ export class DocumentIndex {
       }
       if (matched) matchedTerms.push(term);
     }
+    return { state, selected, topK, eligible, candidates, queryTerms, matchedTerms, candidateLimitReached };
+  }
+  search(question: string, options: DocumentSearchOptions = {}): DocumentSearchResult {
+    object(options, 'Search options'); keys(options, ['topK', 'documentIds', 'maxScoredChunks'], 'Search options');
+    const { state, topK, eligible, candidates, queryTerms, matchedTerms, candidateLimitReached } = this.rank(question, options);
     // Only retain topK scores; ties are ordered independently of insertion/mutation history.
-    const best: { id: string; score: number }[] = [];
-    const rank = (a: { id: string; score: number }, b: { id: string; score: number }): number => b.score - a.score || compare(a.id, b.id);
+    const best: Ranked[] = [];
     for (const [id, score] of candidates) {
-      const candidate = { id, score }; if (best.length === topK && rank(candidate, best[best.length - 1]!) >= 0) continue;
-      let index = 0; while (index < best.length && rank(best[index]!, candidate) <= 0) index++;
+      const candidate = { id, score }; if (best.length === topK && rankOrder(candidate, best[best.length - 1]!) >= 0) continue;
+      let index = 0; while (index < best.length && rankOrder(best[index]!, candidate) <= 0) index++;
       best.splice(index, 0, candidate); if (best.length > topK) best.pop();
     }
     return { hits: best.map(({ id, score }) => ({ chunk: state.chunks.get(id)!.chunk, score, citation: this.quote(id) })), coverage: {
       indexId: this.id, documents: this.documentCount, chunks: this.chunkCount, eligibleChunks: eligible, scoredChunks: candidates.size, returnedChunks: best.length,
       queryTerms, matchedTerms, candidateLimitReached, exhaustive: false, strategy: 'bm25-cjk-v1',
+    } };
+  }
+  /**
+   * BM25 plus caller-supplied embeddings, fused by reciprocal rank. Hit scores are fusion scores, not similarities.
+   * Chunk vectors are cached by content version; unchanged text is not re-embedded after an index mutation.
+   * Retrieval is still not exhaustive or a relevance guarantee, and cited text remains an exact chunk substring.
+   */
+  async searchHybrid(question: string, options: DocumentHybridSearchOptions): Promise<DocumentSearchResult> {
+    object(options, 'Search options'); keys(options, ['topK', 'documentIds', 'maxScoredChunks', 'embedder', 'batchSize', 'maxEmbeddedChunks', 'minSimilarity', 'signal'], 'Search options');
+    validateEmbedder(options.embedder); const embedder = options.embedder; const settings = semanticSettings(options);
+    if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw new TypeError('signal must be an AbortSignal');
+    const signal = options.signal; signal?.throwIfAborted();
+    const { state, selected, topK, eligible, candidates, queryTerms, matchedTerms, candidateLimitReached } = this.rank(question, options);
+    const vectors = new Map<string, Float32Array>(); const missing: DocumentChunk[] = [];
+    for (const { chunk } of state.chunks.values()) {
+      if (selected && !selected.has(chunk.documentId)) continue;
+      const cached = this.embeddings.get(embedder.id, chunk.versionId, embedder.dimensions);
+      if (cached) vectors.set(chunk.id, cached); else missing.push(chunk);
+    }
+    if (missing.length > settings.maxEmbeddedChunks) throw new NekoError(`Search would embed ${missing.length} chunks, above maxEmbeddedChunks (${settings.maxEmbeddedChunks}); narrow documentIds or raise the limit`, 'preprocess', 'INVALID_INPUT');
+    const cachedChunks = vectors.size;
+    const [queryVector] = await embedTexts(embedder, [question], 'query', 1, signal);
+    for (let start = 0; start < missing.length; start += settings.batchSize) {
+      const batch = missing.slice(start, start + settings.batchSize);
+      const embedded = await embedTexts(embedder, batch.map(({ text }) => text), 'document', settings.batchSize, signal);
+      batch.forEach((chunk, offset) => { vectors.set(chunk.id, embedded[offset]!); this.embeddings.set(embedder.id, chunk.versionId, embedded[offset]!); });
+    }
+    signal?.throwIfAborted();
+    const semantic = cosineRanking(queryVector!, vectors, settings.minSimilarity);
+    const lexical = [...candidates].map(([id, score]) => ({ id, score })).sort(rankOrder);
+    const fused = reciprocalRankFusion([lexical, semantic]).slice(0, topK);
+    return { hits: fused.map(({ id, score }) => ({ chunk: state.chunks.get(id)!.chunk, score, citation: this.quote(id) })), coverage: {
+      indexId: state.snapshot.id, documents: state.snapshot.documents.length, chunks: state.chunks.size, eligibleChunks: eligible, scoredChunks: new Set([...candidates.keys(), ...semantic.map(({ id }) => id)]).size, returnedChunks: fused.length,
+      queryTerms, matchedTerms, candidateLimitReached, exhaustive: false, strategy: 'hybrid-bm25-vector-rrf-v1',
+      semantic: { embedderId: embedder.id, dimensions: embedder.dimensions, embeddedChunks: missing.length, cachedChunks, scoredChunks: semantic.length, minSimilarity: settings.minSimilarity },
     } };
   }
 }
@@ -367,3 +415,4 @@ export type { AskDocumentsOptions, DocumentQueryHost, DocumentQueryInferenceResu
 export { extractPdf, documentForIndex } from './pdf/index.js';
 export { ocrImage } from './ocr.js';
 export type * from './pdf/types.js';
+export type { DocumentEmbedder, SemanticSearchSettings, SemanticCoverage } from './semantic.js';
