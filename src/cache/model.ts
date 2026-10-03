@@ -76,7 +76,7 @@ export interface VerifiedCacheInstallation {
 }
 
 type ResourceSpec = { readonly size: number; readonly sha256: string };
-type CachedResponse = Pick<Response, 'body' | 'headers' | 'status'> & { filePath?: string };
+type CachedResponse = Pick<Response, 'body' | 'headers' | 'status'> & { filePath?: string; fingerprint?: string };
 type NativeCache = {
   match(request: string): Promise<CachedResponse | undefined>;
   put(request: string, response: Response): Promise<void>;
@@ -281,7 +281,8 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
     try {
       const info = await fs.lstat(entry);
       if (info.isSymbolicLink() || !info.isFile() || !owned(info)) throw new ModelIntegrityError(`Unsafe cached model file: ${entry}`);
-      await fs.chmod(entry, 0o600);
+      // chmod always advances ctime, which would defeat the verified-file fingerprint below.
+      if ((info.mode & 0o777) !== 0o600) await fs.chmod(entry, 0o600);
     } catch (error) { if (!missing(error)) throw error; if (!createParents) return undefined; }
     return entry;
   }
@@ -322,7 +323,9 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
       const info = await handle.stat();
       const { Readable }: typeof NodeStream = await import(`${protocol}stream`);
       const stream = Readable.toWeb(handle.createReadStream()) as ReadableStream<Uint8Array<ArrayBuffer>>;
-      return { body: stream, headers: new Headers({ 'content-length': String(info.size) }), status: 200, filePath: entry };
+      // ctime cannot be set by callers, so an unchanged tuple means this process already hashed these exact bytes.
+      const fingerprint = `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
+      return { body: stream, headers: new Headers({ 'content-length': String(info.size) }), status: 200, filePath: entry, fingerprint };
     },
     async put(request, response) {
       const entry = await secureEntry(request, true);
@@ -389,6 +392,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   let activeSignal: AbortSignal | undefined;
   let browserSignalDepth = 0;
   const currentSignal = () => signalContext?.getStore()?.signal ?? activeSignal;
+  const hashedFiles = new Map<string, string>();
   const verifiedCache = {
     async match(request: string, signal = currentSignal()): Promise<Response | string | undefined> {
       signal?.throwIfAborted();
@@ -400,7 +404,13 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
         response = await backing.match(nativeKey(request, model, name));
         if (!response || !name) return response as Response | undefined;
         if (isNode && name.startsWith('onnx/') && response.filePath) {
+          // Transformers.js asks for each ONNX file several times per load; hash unchanged bytes once per installation.
+          if (response.fingerprint !== undefined && hashedFiles.get(response.filePath) === response.fingerprint) {
+            await response.body?.cancel().catch(() => undefined);
+            return response.filePath;
+          }
           await hashCachedFile(response, name, model.allFiles[name], options, signal);
+          if (response.fingerprint !== undefined) hashedFiles.set(response.filePath, response.fingerprint);
           return response.filePath;
         }
         return await readVerified(response, name, model.allFiles[name], options, 'verify', signal);
