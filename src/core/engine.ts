@@ -1,4 +1,5 @@
 import { AutoImageProcessor, Qwen3VLProcessor, TokenizersBackend, Qwen3_5ForConditionalGeneration, RawImage, TextStreamer, Tensor, DynamicCache, InterruptableStoppingCriteria, LogitsProcessorList, cat, type PreTrainedModel, type Processor } from '@huggingface/transformers';
+import type * as NodeOs from 'node:os';
 import { type ModelProfileId, type ModelDtype } from '../cache/manifest.js';
 import { getRegisteredModelProfile, type ModelId } from '../cache/registry.js';
 import type { BackendInfo } from '../backend/index.js';
@@ -66,6 +67,12 @@ export interface InferenceResult {
   reuse?: InferenceReuseResult;
 }
 export interface StructuredInferenceResult<T = unknown> extends InferenceResult { value: T; structured: { mode: 'tokenizer-constrained-runtime-validation' | 'json-boundary-runtime-validation'; dialect: 'draft-07' }; }
+async function availableThreads(): Promise<number> {
+  // Node-only module; browser bundles must not reference it statically.
+  const protocol = 'node:';
+  const os: typeof NodeOs = await import(`${protocol}os`);
+  return os.availableParallelism();
+}
 function disposeInputs(inputs: Record<string, unknown>): void { for (const value of Object.values(inputs)) if (value instanceof Tensor) value.dispose(); }
 
 export class VisionEngine {
@@ -98,8 +105,10 @@ export class VisionEngine {
       const vocabulary: unknown = configuration.text_config?.vocab_size;
       if (typeof vocabulary !== 'number' || !Number.isSafeInteger(vocabulary) || vocabulary < 1) throw new Error('Pinned model has no valid vocabulary size');
       const processor = new Qwen3VLProcessor({}, { tokenizer: new TokenizersBackend(tokenizerJSON, tokenizerConfig), image_processor: imageProcessor }, chatTemplate);
+      // Native ONNX Runtime sizes its intra-op pool from physical cores; use every thread the process may run on.
+      const threads = backend.runtime === 'node' ? await availableThreads() : undefined;
       const model = await Qwen3_5ForConditionalGeneration.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device,
-        session_options: { executionProviders: backend.executionProviders, ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) },
+        session_options: { executionProviders: backend.executionProviders, ...(threads ? { intraOpNumThreads: threads } : {}), ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) },
       });
       try {
         signal?.throwIfAborted();
