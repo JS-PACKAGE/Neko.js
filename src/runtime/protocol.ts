@@ -35,7 +35,7 @@ export function encode(value: unknown, callback?: (fn: (...args: unknown[]) => u
   if (value === null || value === undefined || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return value;
   if (typeof value === 'function') {
     if (!callback) throw new TypeError('Functions are not supported in worker results');
-    const mode = key === 'onToken' || key === 'progressCallback' || key === 'onCacheProgress' ? 'notify' : 'await';
+    const mode = key === 'onToken' || key === 'progressCallback' || key === 'onCacheProgress' || key === 'onEvent' ? 'notify' : 'await';
     return { kind: 'callback', id: callback(value as (...args: unknown[]) => unknown, mode, key), mode };
   }
   if (typeof value !== 'object') throw new TypeError('Worker values must be structured-cloneable');

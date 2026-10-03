@@ -163,6 +163,12 @@ class Connection {
     if (message.type === 'callback') {
       const state = this.pending.get(message.requestId);
       const callback = this.callbacks.get(message.callbackId);
+      if (callback?.key === 'onEvent') {
+        // Observers are independent of request cancellation and acknowledgement barriers.
+        try { void Promise.resolve(callback.fn(...decode(message.args) as unknown[])).catch(() => undefined); }
+        catch { /* Ignore observer failures without exposing their contents. */ }
+        return;
+      }
       if (!state || state.settled && !state.streaming || state.localFailure || state.cancellation.signal.aborted || !callback) {
         this.post({ type: 'callback-result', id: message.id, ok: false, error: encodeFailure(aborted(state?.method ?? 'create', 'Request is no longer active')) });
         return;

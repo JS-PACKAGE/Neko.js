@@ -25,6 +25,7 @@ export function installWorkerServer(port: MessagePort<MainMessage, WorkerMessage
   let initialized: Promise<Neko> | undefined;
   let owner: Neko | undefined;
   let creatingSignal: AbortSignal | undefined;
+  let eventCallbackId: number | undefined;
   let outstandingNotifications = 0;
   let notificationCharacters = 0;
 
@@ -43,6 +44,12 @@ export function installWorkerServer(port: MessagePort<MainMessage, WorkerMessage
     if (persistent) {
       const signal = owner ? activeRequestSignal(owner) : creatingSignal;
       requestId = signal ? operationSignals.get(signal) ?? -1 : -1;
+    }
+    if (persistent && callbackId === eventCallbackId) {
+      // Lifecycle observers never hold an ACK barrier or abort an operation.
+      try { port.post({ type: 'callback', id: nextCallback++, requestId, callbackId, args: encode(args) }); }
+      catch { /* Observability is best-effort, including transport failures. */ }
+      return undefined;
     }
     const operation = operations.get(requestId);
     if (!operation || operation.finished) throw new NekoError('Worker callback has no active request', 'generate', 'ABORTED');
@@ -92,6 +99,13 @@ export function installWorkerServer(port: MessagePort<MainMessage, WorkerMessage
       for (const callback of operation.callbacks) void callback.catch(() => undefined);
     };
     try {
+      if (message.method === 'create' && message.args !== null && typeof message.args === 'object' && message.args.kind === 'array') {
+        const configuration = message.args.items[0];
+        if (configuration !== null && typeof configuration === 'object' && configuration.kind === 'record') {
+          const event = configuration.entries.find(([key]) => key === 'onEvent')?.[1];
+          if (event !== null && typeof event === 'object' && event.kind === 'callback') eventCallbackId = event.id;
+        }
+      }
       const args = decode(message.args, (id, mode) => callbackProxy(message.id, id, mode, message.method === 'create')) as unknown[];
       if (message.method === 'cache.model.importBundle' && args[0] instanceof ReadableStream) importedStream = args[0] as ReadableStream<Uint8Array>;
       let value: unknown;
