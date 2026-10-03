@@ -1,8 +1,81 @@
 import { Validator, type Schema } from '@cfworker/json-schema';
 import { NekoError } from '../errors.js';
-export interface CompiledStructuredSchema {
+import type { GrammarSchema } from './json-grammar.js';
+export type StructuredMode = 'constrained' | 'validation-only';
+type RequiredKeys<S> = S extends { required: readonly (infer K)[] } ? Extract<K, string> : never;
+type ObjectValue<P, R extends string> = { [K in keyof P as K extends R ? K : never]-?: SchemaValue<P[K]> } & { [K in keyof P as K extends R ? never : K]?: SchemaValue<P[K]> };
+/** Types follow the supplied schema, never a caller-selected arbitrary result generic. */
+export type SchemaValue<S> =
+  S extends { const: infer C } ? C :
+  S extends { enum: readonly (infer E)[] } ? E :
+  S extends { type: 'string' } ? string :
+  S extends { type: 'number' | 'integer' } ? number :
+  S extends { type: 'boolean' } ? boolean :
+  S extends { type: 'null' } ? null :
+  S extends { type: 'array'; items: infer I } ? SchemaValue<I>[] :
+  S extends { type: 'object'; properties: infer P } ? ObjectValue<P, RequiredKeys<S>> : unknown;
+export interface CompiledStructuredSchema<S = unknown> {
   json: string;
+  mode: StructuredMode;
+  grammar?: GrammarSchema;
+  /** Retains the schema type without trusting generated data. */
+  readonly schema: S;
   validator: { validate(value: unknown): { valid: boolean; errors: { error: string; keyword: string; keywordLocation: string; instanceLocation: string }[] } };
+}
+
+export function validateStructuredValue<S>(compiled: CompiledStructuredSchema<S>, value: unknown): SchemaValue<S> {
+  const validation = compiled.validator.validate(value);
+  if (!validation.valid) throw new NekoError(`Generated JSON does not match the schema: ${validation.errors.map((error) => error.error).join('; ')}`, 'generate', 'STRUCTURED_OUTPUT');
+  // The runtime validator above establishes the schema-derived type.
+  return value as SchemaValue<S>;
+}
+
+function constrainedSchema(schema: unknown): GrammarSchema {
+  if (schema === true) return { type: 'any' };
+  if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) throw new Error('Constrained mode requires a typed schema or true');
+  const node = schema as Record<string, unknown>;
+  const annotations: Record<string, true> = { $schema: true, $id: true, $comment: true, title: true, description: true, default: true, examples: true, readOnly: true, writeOnly: true };
+  const constraints: Record<string, readonly string[]> = {
+    object: ['type', 'properties', 'required', 'additionalProperties'],
+    array: ['type', 'items', 'minItems', 'maxItems', 'uniqueItems'],
+    string: ['type', 'minLength', 'maxLength', 'enum', 'const'],
+    number: ['type', 'enum', 'const'], integer: ['type', 'enum', 'const'],
+    boolean: ['type', 'enum', 'const'], null: ['type', 'enum', 'const'],
+  };
+  if (typeof node.type !== 'string' || !Object.hasOwn(constraints, node.type)) throw new Error('Constrained mode requires one explicit supported type');
+  for (const key of Object.keys(node)) if (!Object.hasOwn(annotations, key) && !constraints[node.type]!.includes(key)) throw new Error(`Constrained mode does not support keyword ${key}; use structuredMode:"validation-only" explicitly`);
+  const type = node.type as GrammarSchema['type'];
+  const grammar: GrammarSchema = { type };
+  if (type === 'object') {
+    if (node.additionalProperties !== false) throw new Error('Constrained objects require additionalProperties:false');
+    const properties = (node.properties ?? {}) as Record<string, unknown>;
+    grammar.properties = Object.fromEntries(Object.entries(properties).map(([key, child]) => [key, constrainedSchema(child)]));
+    grammar.required = (node.required ?? []) as string[];
+    if (grammar.required.some((key) => !Object.hasOwn(properties, key))) throw new Error('Required properties must have declared schemas');
+  }
+  if (type === 'array') {
+    if (node.items === undefined || Array.isArray(node.items)) throw new Error('Constrained arrays require one items schema');
+    grammar.items = constrainedSchema(node.items);
+    grammar.minItems = node.minItems as number | undefined;
+    grammar.maxItems = node.maxItems as number | undefined;
+    grammar.uniqueItems = node.uniqueItems as boolean | undefined;
+    if ((grammar.minItems ?? 0) > (grammar.maxItems ?? Infinity)) throw new Error('Array bounds are unsatisfiable');
+  }
+  if (type === 'string') {
+    grammar.minLength = node.minLength as number | undefined;
+    grammar.maxLength = node.maxLength as number | undefined;
+    if ((grammar.minLength ?? 0) > (grammar.maxLength ?? Infinity)) throw new Error('String bounds are unsatisfiable');
+  }
+  if (node.enum !== undefined || Object.hasOwn(node, 'const')) {
+    grammar.enum = Object.hasOwn(node, 'const') ? [node.const] : node.enum as unknown[];
+    if (node.enum !== undefined && Object.hasOwn(node, 'const') && !(node.enum as unknown[]).some((value) => JSON.stringify(value) === JSON.stringify(node.const))) throw new Error('Enum and const constraints are unsatisfiable');
+    if (!grammar.enum!.every((value) => type === 'null' ? value === null : type === 'integer' ? typeof value === 'number' && Number.isInteger(value) : typeof value === type)) throw new Error('Enum values must match the explicit primitive type');
+    if (type === 'string') {
+      grammar.enum = grammar.enum!.filter((value) => Array.from(value as string).length >= (grammar.minLength ?? 0) && Array.from(value as string).length <= (grammar.maxLength ?? Infinity));
+      if (!grammar.enum.length) throw new Error('String enum is unsatisfiable');
+    }
+  }
+  return grammar;
 }
 
 // Draft-07's official meta-schema, bundled so schema checking never needs remote resolution.
@@ -33,8 +106,9 @@ const maps: Record<string, true> = { definitions: true, properties: true, patter
 const arrays: Record<string, true> = { allOf: true, anyOf: true, oneOf: true };
 const newer: Record<string, true> = { $defs: true, $anchor: true, $dynamicRef: true, $dynamicAnchor: true, $recursiveRef: true, $recursiveAnchor: true, prefixItems: true, unevaluatedItems: true, unevaluatedProperties: true, dependentSchemas: true, dependentRequired: true, minContains: true, maxContains: true };
 
-export function compileStructuredSchema(input: unknown): CompiledStructuredSchema {
+export function compileStructuredSchema<S>(input: S, mode: StructuredMode = 'constrained'): CompiledStructuredSchema<S> {
   try {
+    if (mode !== 'constrained' && mode !== 'validation-only') throw new Error('structuredMode must be constrained or validation-only');
     // Reject non-JSON values/cycles, and avoid the validator's hidden property mutations on caller data.
     const json = JSON.stringify(input, (_key, value: unknown) => {
       if (typeof value === 'number' && !Number.isFinite(value) || ['undefined', 'function', 'symbol', 'bigint'].includes(typeof value)) throw new Error('Schema must contain only JSON values');
@@ -71,6 +145,14 @@ export function compileStructuredSchema(input: unknown): CompiledStructuredSchem
       if (!meta.validate(target).valid) throw new Error('Reference target is not a schema');
     }
     if (typeof schema === 'object' && schema !== null) delete (schema as Record<string, unknown>).$id;
-    return { validator: new Validator(schema as Schema | boolean, '7'), json };
-  } catch (cause) { throw new NekoError(cause instanceof Error ? cause.message : 'Invalid JSON schema', 'preprocess', 'SCHEMA_INVALID', { cause }); }
+    let grammar: GrammarSchema | undefined;
+    if (mode === 'constrained') {
+      try { grammar = constrainedSchema(schema); }
+      catch (cause) { throw new NekoError(cause instanceof Error ? cause.message : 'Unsupported constrained schema', 'preprocess', 'SCHEMA_UNSUPPORTED', { cause }); }
+    }
+    return { validator: new Validator(schema as Schema | boolean, '7'), json, schema: input, mode, ...(grammar ? { grammar } : {}) };
+  } catch (cause) {
+    if (cause instanceof NekoError) throw cause;
+    throw new NekoError(cause instanceof Error ? cause.message : 'Invalid JSON schema', 'preprocess', 'SCHEMA_INVALID', { cause });
+  }
 }

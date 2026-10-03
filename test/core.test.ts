@@ -54,7 +54,7 @@ test('generation bounds reject unsupported sampling and invalid stop IDs', () =>
 test('Draft-07 local references validate data without mutating caller schemas', () => {
   const schema = { definitions: { number: { type: 'integer' } }, type: 'object', properties: { value: { $ref: '#/definitions/number' } }, required: ['value'], additionalProperties: false };
   const before = JSON.stringify(schema);
-  const { validator } = compileStructuredSchema(schema);
+  const { validator } = compileStructuredSchema(schema, 'validation-only');
   assert.equal(validator.validate({ value: 2 }).valid, true);
   assert.equal(validator.validate({ value: 'two' }).valid, false);
   assert.equal(validator.validate({ value: 2, extra: true }).valid, false);
