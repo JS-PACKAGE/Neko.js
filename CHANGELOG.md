@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.1 — 2026-10-03
 
 - Performance: on Node, each pinned ONNX payload file is hashed once per installed runtime instead of four times per load (prefetch plus three loader requests); unchanged files are recognised by device, inode, size, mtime and ctime, and new processes still verify every byte. Measured warm model load fell from about 2.3 s to about 1.3 s on macOS arm64. The cache no longer calls `chmod` on files that already have mode `0600`, which would have advanced ctime.
 - Performance: Node ONNX sessions now use `os.availableParallelism()` intra-op threads. On a 4 performance + 6 efficiency core Apple machine this raised prefill about 25% (about 213-238 to about 290 tokens/s) and lowered decode about 12% (about 28 to about 25 tokens/s); the best value depends on hardware.
