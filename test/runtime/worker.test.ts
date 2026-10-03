@@ -33,6 +33,12 @@ test('native workers have independent runtime ownership and disposal releases ea
     for (const diagnostic of [first.backend.current(), first.runtimeStatus(), first.queueStatus(), first.cache.engine.status()]) {
       await assert.rejects(diagnostic, (error: unknown) => error instanceof NekoError && error.code === 'DISPOSED');
     }
+    for (const request of [
+      () => first.infer({ prompt: '' }),
+      () => first.inferStructured({ prompt: '', schema: { type: 'invalid' } }),
+      () => first.planInference({ prompt: '', schema: { type: 'invalid' } }),
+      () => first.describe('', { language: 'not_a_language' }),
+    ]) await assert.rejects(request(), (error: unknown) => error instanceof NekoError && error.code === 'DISPOSED');
     assert.equal((await second.cache.engine.status()).loaded, false);
     assert.equal((await inline.backend.current())?.runtime, 'node');
   } finally {
@@ -55,6 +61,10 @@ test('worker policy receives URLs on the parent and preserves a denial that thro
     await assert.rejects(neko.cache.model.prefetch(), (error: unknown) => error instanceof NekoError && error.code === 'OPERATION_FAILED' && Object.hasOwn(error, 'cause') && error.cause === undefined);
     assert.deepEqual(decisions, ['worker', 'model']);
     assert.equal((await neko.cache.model.status()).bytes, 0);
+    await assert.rejects(neko.planInference({ prompt: 'Count the actual chat tokens.' }), (error: unknown) => error instanceof NekoError && error.code === 'OPERATION_FAILED' && Object.hasOwn(error, 'cause') && error.cause === undefined);
+    assert.deepEqual(decisions, ['worker', 'model', 'model']);
+    assert.equal((await neko.cache.engine.status()).loaded, false);
+    assert.equal((await neko.queueStatus()).running, null);
   } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -193,4 +203,30 @@ test('worker creation isolates parent-only Node execution flags', { timeout: 30_
     assert.equal(status.backend.runtime, 'node');
     assert.equal(status.cache.bytes, 0);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('worker cold invalid inference and report options reject before model or source acquisition', { timeout: 30_000 }, async () => {
+  const directory = await cacheDirectory();
+  const decisions: string[] = [];
+  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'worker', policy: {
+    network: (_url, kind) => { decisions.push(kind); return kind === 'worker'; },
+  } });
+  try {
+    for (const request of [
+      () => neko.infer({ prompt: '' }),
+      () => neko.infer({ prompt: 'preserved', maxNewTokens: 0 }),
+      () => neko.infer({ prompt: 'preserved', validateDestination: false as never }),
+      () => neko.inferStructured({ prompt: 'preserved', schema: { $ref: 'https://example.test/schema' } }),
+      () => neko.planInference({ prompt: 'preserved', contextWindowTokens: 0 }),
+      () => neko.describe('https://example.test/', { language: 'not_a_language' }),
+    ]) {
+      await assert.rejects(request(), (error: unknown) => error instanceof NekoError && error.stage === 'preprocess' && ['INVALID_INPUT', 'SCHEMA_INVALID'].includes(error.code));
+    }
+    assert.equal((await neko.cache.engine.status()).loaded, false);
+    assert.equal((await neko.cache.model.status()).bytes, 0);
+    assert.deepEqual(decisions, ['worker']);
+    const controller = new AbortController(); controller.abort('cancel planning');
+    await assert.rejects(neko.planInference({ prompt: '', signal: controller.signal }), (error: unknown) => error instanceof NekoError && error.code === 'ABORTED' && error.stage === 'preprocess');
+    assert.equal((await neko.queueStatus()).running, null);
+  } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
 });

@@ -8,6 +8,8 @@ import { atStage, NekoError } from '../errors.js';
 import { generationSettings, NucleusProcessor, StopBuffer, type GenerationOptions } from './generation.js';
 import { compileStructuredSchema, type CompiledStructuredSchema } from './structured.js';
 import type { ExecutionInfo } from '../types.js';
+import { inferenceChat, validateInferenceOptions } from './preflight.js';
+import { JsonBoundary } from './json-boundary.js';
 
 export type ChatContent = { type: 'text'; text: string } | { type: 'image'; image: ImageInput };
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string | ChatContent[]; }
@@ -25,6 +27,17 @@ export interface InferOptions extends ImageOptions {
   _preparedImages?: PreparedImage[] | undefined;
 }
 export interface StructuredInferOptions extends InferOptions { schema: unknown; _structured?: CompiledStructuredSchema | undefined; }
+export interface InferencePlanOptions extends InferOptions { schema?: unknown; }
+export interface InferencePlan {
+  inputTokens: number;
+  maxNewTokens: number;
+  contextLimit: number;
+  availableOutputTokens: number;
+  fits: boolean;
+  model: ModelIdentity;
+  images?: ImageObservation[];
+  execution?: ExecutionInfo;
+}
 export interface ImageObservation { versionId: string; width: number; height: number; }
 export interface PreparedImage { readonly input: ImageInput; readonly observation: ImageObservation; }
 export interface ModelIdentity { id: string; revision: string; profile: ModelProfileId; dtype: ModelDtype; }
@@ -41,7 +54,7 @@ export interface InferenceResult {
   memory: { jsHeapBytes: number | null; gpuBytes: null };
   execution?: ExecutionInfo;
 }
-export interface StructuredInferenceResult extends InferenceResult { value: unknown; structured: { mode: 'runtime-validation'; dialect: 'draft-07' }; }
+export interface StructuredInferenceResult extends InferenceResult { value: unknown; structured: { mode: 'json-boundary-runtime-validation'; dialect: 'draft-07' }; }
 async function pinnedResource(name: ModelFileName): Promise<Response> {
   const response: unknown = await env.customCache?.match(modelFileUrl(name));
   if (!(response instanceof Response)) throw new Error(`Verified processor resource is missing: ${name}`);
@@ -87,26 +100,7 @@ export class VisionEngine {
     return limit;
   }
   private chat(options: Pick<InferOptions, 'prompt' | 'messages' | 'image' | 'images'>, instruction?: string): { text: string; images: ImageInput[] } {
-    if (options.image !== undefined && options.images !== undefined) throw new TypeError('image and images are exclusive');
-    if (options.messages !== undefined && (options.prompt !== undefined || options.image !== undefined || options.images !== undefined)) throw new TypeError('messages and prompt/image/images shorthand are exclusive');
-    if (options.images !== undefined && (!Array.isArray(options.images) || !options.images.length)) throw new TypeError('images must be a nonempty array');
-    const supplied = options.images ?? (options.image === undefined ? [] : [options.image]);
-    const messages: ChatMessage[] = options.messages ?? [{ role: 'user', content: [...supplied.map((image): ChatContent => ({ type: 'image', image })), { type: 'text', text: options.prompt! }] }];
-    if (!Array.isArray(messages) || messages.length < 1 || messages.length > 128) throw new TypeError('messages must contain between 1 and 128 entries');
-    const images: ImageInput[] = [];
-    let hasText = false;
-    const rendered = messages.map((message, index) => {
-      if (!message || !['system', 'user', 'assistant'].includes(message.role) || message.role === 'system' && index !== 0) throw new TypeError('Messages need valid roles; system must be first');
-      const content = typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content;
-      if (!Array.isArray(content) || !content.length) throw new TypeError('Message content must be text or a nonempty content array');
-      return { role: message.role, content: content.map((item) => {
-        if (item.type === 'text') { if (typeof item.text !== 'string') throw new TypeError('Message text must be a string'); hasText ||= !!item.text.trim(); return { type: 'text', text: item.text }; }
-        if (item.type !== 'image' || item.image === undefined || message.role === 'system') throw new TypeError('Invalid message image content');
-        images.push(item.image); return { type: 'image' };
-      }) };
-    });
-    if (!hasText) throw new TypeError('A nonempty prompt or message text is required');
-    if (images.length > 16) throw new RangeError('At most 16 joint images are supported per request');
+    const { rendered, images } = inferenceChat(options);
     if (instruction) {
       if (rendered[0]!.role === 'system') rendered[0]!.content.push({ type: 'text', text: `\n\n${instruction}` });
       else rendered.unshift({ role: 'system', content: [{ type: 'text', text: instruction }] });
@@ -198,25 +192,24 @@ export class VisionEngine {
   }
   async inferStructured(options: StructuredInferOptions): Promise<StructuredInferenceResult> {
     const compiled = options._structured ?? compileStructuredSchema(options.schema);
-    const result = await this.runInference(options, this.structuredInstruction(compiled));
+    const result = await this.runInference(options, this.structuredInstruction(compiled), true);
     try {
       if (result.finishReason === 'length') throw new Error('Structured generation exhausted its output budget');
       const value: unknown = JSON.parse(result.text);
       const validation = compiled.validator.validate(value);
       if (!validation.valid) throw new Error(`Generated JSON does not match the schema: ${validation.errors.map((error) => error.error).join('; ')}`);
-      return { ...result, value, structured: { mode: 'runtime-validation', dialect: 'draft-07' } };
+      return { ...result, value, structured: { mode: 'json-boundary-runtime-validation', dialect: 'draft-07' } };
     } catch (cause) { throw new NekoError(cause instanceof Error ? cause.message : 'Invalid structured output', 'generate', 'STRUCTURED_OUTPUT', { cause }); }
   }
   infer(options: InferOptions): Promise<InferenceResult> { return this.runInference(options); }
-  private async runInference(options: InferOptions, instruction?: string): Promise<InferenceResult> {
-    const signal = options.signal; const started = performance.now();
+  private async prepareInputs(options: InferOptions, instruction?: string, planning = false) {
+    const started = performance.now();
     let allocatedInputs: Record<string, unknown> | undefined;
     const budget = options._budget;
-    const checkDeadline = () => { if (budget && performance.now() >= budget.deadline) throw new NekoError('Report duration budget exhausted', 'generate', 'BUDGET_EXCEEDED'); };
-    const prepared = await atStage('preprocess', signal, async () => {
-      checkDeadline();
+    return atStage('preprocess', options.signal, async () => {
+      validateInferenceOptions(options, planning);
+      if (budget && performance.now() >= budget.deadline) throw new NekoError('Report duration budget exhausted', 'preprocess', 'BUDGET_EXCEEDED');
       let maxNewTokens = options.maxNewTokens ?? 128;
-      if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1 || maxNewTokens > 2048) throw new RangeError('maxNewTokens must be between 1 and 2048');
       const settings = generationSettings(options.generation, this.vocabularySize);
       const chat = this.chat(options, instruction);
       const handles = options._preparedImages;
@@ -235,15 +228,29 @@ export class VisionEngine {
       if (!(ids instanceof Tensor) || ids.dims.length !== 2) throw new Error('Processor produced invalid input IDs');
       const inputTokens = ids.dims[1]!;
       if (budget) {
-        checkDeadline();
+        if (performance.now() >= budget.deadline) throw new NekoError('Report duration budget exhausted', 'preprocess', 'BUDGET_EXCEEDED');
         if (inputTokens + 1 > budget.remainingTokens) throw new NekoError('Report total token budget exhausted before generation', 'preprocess', 'BUDGET_EXCEEDED');
         maxNewTokens = Math.min(maxNewTokens, budget.remainingTokens - inputTokens);
       }
       const contextLimit = this.contextLimit(options.contextWindowTokens);
-      if (inputTokens + maxNewTokens > contextLimit) throw new NekoError(`Input (${inputTokens}) plus output budget (${maxNewTokens}) exceeds context limit (${contextLimit})`, 'preprocess', 'CONTEXT_LIMIT');
-      return { inputs, inputTokens, maxNewTokens, settings, images: decoded.map(({ observation }) => observation) };
+      if (!planning && inputTokens + maxNewTokens > contextLimit) throw new NekoError(`Input (${inputTokens}) plus output budget (${maxNewTokens}) exceeds context limit (${contextLimit})`, 'preprocess', 'CONTEXT_LIMIT');
+      return { inputs, inputTokens, maxNewTokens, contextLimit, settings, images: decoded.map(({ observation }) => observation) };
     }).catch((error: unknown) => { if (allocatedInputs) disposeInputs(allocatedInputs); throw error; })
       .finally(() => { if (budget?.timings) budget.timings.preprocessMs += performance.now() - started; });
+  }
+  async planInference(options: InferencePlanOptions, compiled?: CompiledStructuredSchema): Promise<InferencePlan> {
+    const schema = compiled ?? (options.schema === undefined ? undefined : compileStructuredSchema(options.schema));
+    const prepared = await this.prepareInputs(options, schema ? this.structuredInstruction(schema) : undefined, true);
+    try {
+      const { inputTokens, maxNewTokens, contextLimit, images } = prepared;
+      return { inputTokens, maxNewTokens, contextLimit, availableOutputTokens: Math.max(0, contextLimit - inputTokens), fits: inputTokens + maxNewTokens <= contextLimit, model: this.identity, ...(images.length ? { images } : {}) };
+    } finally { disposeInputs(prepared.inputs); }
+  }
+  private async runInference(options: InferOptions, instruction?: string, structured = false): Promise<InferenceResult> {
+    const signal = options.signal; const started = performance.now();
+    const budget = options._budget;
+    const checkDeadline = () => { if (budget && performance.now() >= budget.deadline) throw new NekoError('Report duration budget exhausted', 'generate', 'BUDGET_EXCEEDED'); };
+    const prepared = await this.prepareInputs(options, instruction);
     const { inputs, inputTokens, maxNewTokens, settings, images } = prepared;
     const generationStarted = performance.now();
     const stopping = new InterruptableStoppingCriteria();
@@ -251,17 +258,30 @@ export class VisionEngine {
     signal?.addEventListener('abort', interrupt, { once: true });
     let response = ''; let firstTokenMs: number | null = null; let callbackError: unknown; let callbackFailed = false; let output: unknown;
     let outputTokens = 0; let explicitStop = false; let deadlineExceeded = false;
-    const generated: bigint[] | undefined = settings.stop.length ? [] : undefined;
+    const generated: bigint[] | undefined = structured || settings.stop.length ? [] : undefined;
+    const boundary = structured ? new JsonBoundary() : undefined;
+    let structuredDecoded = '';
     const buffer = new StopBuffer(settings.stop, (text) => {
       if (signal?.aborted || callbackFailed) return;
       response += text;
       try { options.onToken?.(text); } catch (error) { callbackFailed = true; callbackError = error; interrupt(); }
     });
+    const acceptStructured = (decoded: string, final = false) => {
+      // A partial UTF-8 token may decode to replacement characters until its next token.
+      const stable = final ? decoded : decoded.replace(/\uFFFD+$/, '');
+      if (!stable.startsWith(structuredDecoded)) throw new NekoError('Structured token decoding changed already streamed text', 'generate', 'STRUCTURED_OUTPUT');
+      const delta = stable.slice(structuredDecoded.length);
+      structuredDecoded = stable;
+      boundary!.push(delta);
+      buffer.push(delta);
+      if (boundary!.complete || boundary!.invalid || buffer.stopped) { explicitStop = true; interrupt(); }
+    };
     const streamer = new TextStreamer(this.processor.tokenizer!, { skip_prompt: true, skip_special_tokens: true, callback_function: (text: string) => { buffer.push(text); if (buffer.stopped) { explicitStop = true; interrupt(); } } });
     const originalPut = streamer.put.bind(streamer);
+    if (structured) streamer.end = () => {};
     let prompt = true;
     streamer.put = (value: bigint[][]) => {
-      if (prompt) { prompt = false; originalPut(value); return; }
+      if (prompt) { prompt = false; if (!structured) originalPut(value); return; }
       const tokens = value[0]!;
       outputTokens += tokens.length;
       if (budget) { budget.outputTokens += tokens.length; budget.remainingTokens -= tokens.length; }
@@ -269,10 +289,11 @@ export class VisionEngine {
       const stopIndex = tokens.findIndex((id) => settings.stopTokenIds.includes(Number(id)));
       const visible = stopIndex < 0 ? tokens : tokens.slice(0, stopIndex);
       generated?.push(...visible);
-      if (visible.length) originalPut([visible]);
+      if (!structured && visible.length) originalPut([visible]);
       if (stopIndex >= 0) { explicitStop = true; interrupt(); }
       if (generated) {
         const decoded = this.processor.tokenizer!.decode(generated, { skip_special_tokens: true });
+        if (structured) acceptStructured(decoded);
         if (settings.stop.some((stop) => decoded.includes(stop))) { explicitStop = true; interrupt(); }
       }
       if (budget && performance.now() >= budget.deadline) { deadlineExceeded = true; interrupt(); }
@@ -287,15 +308,22 @@ export class VisionEngine {
           repetition_penalty: settings.repetitionPenalty, no_repeat_ngram_size: settings.noRepeatNgramSize,
           max_new_tokens: maxNewTokens, stopping_criteria: stopping, logits_processor: processors, streamer,
         });
+        if (structured) acceptStructured(this.processor.tokenizer!.decode(generated!, { skip_special_tokens: true }), true);
         buffer.end();
         if (callbackFailed) throw new NekoError(callbackError instanceof Error ? callbackError.message : String(callbackError), 'generate', 'OPERATION_FAILED', { cause: callbackError });
         signal?.throwIfAborted();
         if (deadlineExceeded) throw new NekoError('Report duration budget exhausted during generation', 'generate', 'BUDGET_EXCEEDED');
         if (!(output instanceof Tensor)) throw new NekoError('Model returned invalid output sequences', 'generate', 'MODEL_OUTPUT');
-        if (!response.trim() && !explicitStop) throw new NekoError('Model produced no decoded response', 'generate', 'MODEL_OUTPUT');
+        if (!response.trim() && !explicitStop) throw new NekoError('Model produced no decoded response', 'generate', structured ? 'STRUCTURED_OUTPUT' : 'MODEL_OUTPUT');
         const last = Number(output.data[output.data.length - 1]);
         const eos = this.model.generation_config?.eos_token_id;
         const stopped = explicitStop || (Array.isArray(eos) ? eos : [eos]).some((id) => id === last);
+        if (boundary) {
+          if (stopped) boundary.end();
+          if (boundary.invalid || !boundary.complete) throw new NekoError('Generated text is not one complete JSON value', 'generate', 'STRUCTURED_OUTPUT');
+          try { JSON.parse(structuredDecoded); }
+          catch (cause) { throw new NekoError('Generated text is not valid JSON', 'generate', 'STRUCTURED_OUTPUT', { cause }); }
+        }
         if (images.length) this.visionReady = true; else this.textReady = true;
         const now = performance.now();
         return { text: response, finishReason: stopped ? 'stop' : 'length', usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens }, model: this.identity, backend: this.loadedBackend(), ...(images.length ? { images } : {}),

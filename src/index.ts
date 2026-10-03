@@ -2,8 +2,8 @@ import { env } from '@huggingface/transformers';
 import { EngineCache, type EngineCacheStatus } from './cache/engine.js';
 import { captureModelSource, installVerifiedCache, type VerifiedCacheInstallation, type ModelCacheStatus, type ModelSource } from './cache/model.js';
 import { inspectBackend, type BackendInfo, type BackendDevice } from './backend/index.js';
-import { VisionEngine, type InferOptions, type InferenceResult, type StructuredInferOptions, type StructuredInferenceResult, type RuntimeReadiness } from './core/engine.js';
-import { generateReport, ReportError, type DescribeOptions } from './report/generate.js';
+import { VisionEngine, type InferOptions, type InferenceResult, type InferencePlanOptions, type InferencePlan, type StructuredInferOptions, type StructuredInferenceResult, type RuntimeReadiness } from './core/engine.js';
+import { generateReport, validateDescribeOptions, ReportError, type DescribeOptions } from './report/generate.js';
 import type { Page, StructuredReport, ExecutionInfo } from './types.js';
 import { atStage, NekoError, type ErrorStage } from './errors.js';
 import { RequestQueue, type QueueStatus } from './core-queue.js';
@@ -14,6 +14,7 @@ import { selectPage } from './web/source.js';
 import { extractPage } from './web/extract.js';
 import { compileStructuredSchema } from './core/structured.js';
 import { setActiveRequest } from './runtime/context.js';
+import { validateInferenceOptions } from './core/preflight.js';
 
 export * from './types.js';
 export * from './web/index.js';
@@ -22,7 +23,7 @@ export * from './cache/manifest.js';
 export * from './backend/index.js';
 export * from './errors.js';
 export { ReportError } from './report/generate.js';
-export type { InferOptions, InferenceResult, StructuredInferOptions, StructuredInferenceResult, RuntimeReadiness, ChatContent, ChatMessage, ModelIdentity, ImageObservation } from './core/engine.js';
+export type { InferOptions, InferenceResult, InferencePlanOptions, InferencePlan, StructuredInferOptions, StructuredInferenceResult, RuntimeReadiness, ChatContent, ChatMessage, ModelIdentity, ImageObservation } from './core/engine.js';
 export type { GenerationOptions } from './core/generation.js';
 export type { DescribeOptions, ReportCheckpoint, ReportEvent, ReportBudget } from './report/generate.js';
 export type { ModelCacheStatus, CacheProgress, ModelSource } from './cache/model.js';
@@ -53,6 +54,7 @@ export interface Neko {
   readonly backend: { current(): Promise<BackendInfo | null>; detect(device?: BackendDevice, signal?: AbortSignal): Promise<BackendInfo> };
   infer(options: InferOptions): Promise<InferenceResult>;
   inferStructured(options: StructuredInferOptions): Promise<StructuredInferenceResult>;
+  planInference(options: InferencePlanOptions): Promise<InferencePlan>;
   describe(input: string | Page, options: DescribeOptions & { format: 'markdown' }): Promise<string>;
   describe(input: string | Page, options?: DescribeOptions & { format?: 'json' }): Promise<StructuredReport>;
   describe(input: string | Page, options: DescribeOptions): Promise<StructuredReport | string>;
@@ -95,19 +97,38 @@ class LocalNeko implements Neko {
     return this.engines.use(async (engine) => { try { return await operation(engine); } finally { this.readiness = engine.readiness(); } }, signal);
   }
   private execution(): ExecutionInfo { return { mode: 'inline', runtime: typeof process !== 'undefined' && process.release?.name === 'node' ? 'node' : 'browser' }; }
-  infer(options: InferOptions): Promise<InferenceResult> {
+  private checkRequest(stage: ErrorStage, signal?: AbortSignal): void {
+    if (this.closed) throw new NekoError('Neko is disposed', stage, 'DISPOSED');
+    if (signal instanceof AbortSignal && signal.aborted) throw new NekoError('Operation was cancelled', stage, 'ABORTED', { cause: signal.reason });
+  }
+  async infer(options: InferOptions): Promise<InferenceResult> {
+    this.checkRequest('generate', options?.signal);
+    validateInferenceOptions(options);
     return this.run('generate', options.signal, (signal, queueWaitMs) => this.use(signal, async (engine) => { const result = await engine.infer({ ...options, signal, _budget: undefined, _preparedImages: undefined, _policy: this.options.policy, _offline: this.options.localFilesOnly }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; }));
   }
-  inferStructured(options: StructuredInferOptions): Promise<StructuredInferenceResult> {
+  async inferStructured(options: StructuredInferOptions): Promise<StructuredInferenceResult> {
+    this.checkRequest('generate', options?.signal);
+    validateInferenceOptions(options);
+    const compiled = compileStructuredSchema(options.schema);
     return this.run('generate', options.signal, (signal, queueWaitMs) => {
-      const compiled = compileStructuredSchema(options.schema);
       return this.use(signal, async (engine) => { const result = await engine.inferStructured({ ...options, signal, _structured: compiled, _budget: undefined, _preparedImages: undefined, _policy: this.options.policy, _offline: this.options.localFilesOnly }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; });
     });
+  }
+  async planInference(options: InferencePlanOptions): Promise<InferencePlan> {
+    this.checkRequest('preprocess', options?.signal);
+    validateInferenceOptions(options, true);
+    const compiled = options.schema === undefined ? undefined : compileStructuredSchema(options.schema);
+    return this.run('preprocess', options.signal, (signal) => this.use(signal, async (engine) => ({
+      ...await engine.planInference({ ...options, schema: undefined, signal, _budget: undefined, _preparedImages: undefined, _policy: this.options.policy, _offline: this.options.localFilesOnly }, compiled),
+      execution: this.execution(),
+    })));
   }
   describe(input: string | Page, options: DescribeOptions & { format: 'markdown' }): Promise<string>;
   describe(input: string | Page, options?: DescribeOptions & { format?: 'json' }): Promise<StructuredReport>;
   describe(input: string | Page, options: DescribeOptions): Promise<StructuredReport | string>;
-  describe(input: string | Page, options: DescribeOptions = {}): Promise<StructuredReport | string> {
+  async describe(input: string | Page, options: DescribeOptions = {}): Promise<StructuredReport | string> {
+    this.checkRequest('report', options?.signal);
+    validateDescribeOptions(options);
     const started = performance.now();
     const captured = typeof input === 'string' ? Promise.resolve({ ok: true as const, value: input }) : selectPage(input).then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
     const deadline = new AbortController(); let timer: Parameters<typeof globalThis.clearTimeout>[0];

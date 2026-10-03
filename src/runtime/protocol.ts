@@ -7,7 +7,7 @@ export interface WorkerExecution {
   workerId: string;
   threadId?: number;
 }
-export type WorkerMethod = 'create' | 'infer' | 'inferStructured' | 'describe' | 'load' | 'warmup' | 'runtimeStatus' | 'queueStatus' | 'cache.model.prefetch' | 'cache.model.status' | 'cache.model.clear' | 'cache.engine.status' | 'cache.engine.release' | 'backend.current' | 'backend.detect' | 'dispose';
+export type WorkerMethod = 'create' | 'infer' | 'inferStructured' | 'planInference' | 'describe' | 'load' | 'warmup' | 'runtimeStatus' | 'queueStatus' | 'cache.model.prefetch' | 'cache.model.status' | 'cache.model.clear' | 'cache.engine.status' | 'cache.engine.release' | 'backend.current' | 'backend.detect' | 'dispose';
 export type CallbackMode = 'notify' | 'await';
 export type Encoded = null | undefined | string | number | boolean | bigint
   | { kind: 'array'; items: Encoded[] }
@@ -87,6 +87,7 @@ export function decode(value: Encoded, callback?: (id: number, mode: CallbackMod
 export function methodStage(method: WorkerMethod): ErrorStage {
   if (method === 'create') return 'create';
   if (method === 'describe') return 'report';
+  if (method === 'planInference') return 'preprocess';
   if (method === 'load' || method === 'warmup') return 'load';
   if (method.startsWith('cache.')) return 'cache';
   if (method.startsWith('backend.')) return 'backend';

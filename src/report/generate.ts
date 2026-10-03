@@ -1,7 +1,7 @@
 import type { Citation, ExecutionInfo, Page, PageSnapshot, ReportClaim, ReportImage, ReportSection, SourceSelection, StructuredReport } from '../types.js';
 import { extractPage, type ExtractOptions } from '../web/extract.js';
 import type { VisionEngine, InferenceBudget, InferenceResult, ModelIdentity, PreparedImage, LoadedBackend } from '../core/engine.js';
-import type { GenerationOptions } from '../core/generation.js';
+import { generationSettings, type GenerationOptions } from '../core/generation.js';
 import { atStage, awaitUser, NekoError } from '../errors.js';
 import { hashValue, selectPage, snapshotPage } from '../web/source.js';
 import { validateStructuredReport } from './validate.js';
@@ -44,6 +44,43 @@ export interface DescribeOptions extends ExtractOptions {
   _queueWaitMs?: number;
   _execution?: ExecutionInfo;
   _selectionApplied?: boolean;
+}
+/** Model-independent option checks, suitable before extraction or cold model acquisition. */
+export function validateDescribeOptions(options: DescribeOptions = {}): void {
+  try {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('describe options must be an object');
+    const language = options.language ?? 'en';
+    if (typeof language !== 'string' || !language.trim()) throw new TypeError('language must be a valid BCP 47 language tag');
+    try { Intl.getCanonicalLocales(language); } catch { throw new TypeError('language must be a valid BCP 47 language tag'); }
+    if (options.format !== undefined && options.format !== 'json' && options.format !== 'markdown') throw new TypeError('format must be json or markdown');
+    if (options.imageFailurePolicy !== undefined && options.imageFailurePolicy !== 'error' && options.imageFailurePolicy !== 'omit') throw new TypeError('imageFailurePolicy must be error or omit');
+    const maxNewTokens = options.maxNewTokens ?? 256;
+    if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1 || maxNewTokens > 2048) throw new RangeError('maxNewTokens must be between 1 and 2048');
+    if (options.contextWindowTokens !== undefined && (!Number.isSafeInteger(options.contextWindowTokens) || options.contextWindowTokens < 32)) throw new RangeError('contextWindowTokens must be a safe integer of at least 32');
+    if (options.budget !== undefined && (!options.budget || typeof options.budget !== 'object' || Array.isArray(options.budget))) throw new TypeError('budget must be an object');
+    const tokens = options.budget?.maxTotalTokens; const duration = options.budget?.maxDurationMs;
+    if (tokens !== undefined && (!Number.isSafeInteger(tokens) || tokens < 1)) throw new RangeError('maxTotalTokens must be a positive safe integer');
+    if (duration !== undefined && (!Number.isSafeInteger(duration) || duration < 1 || duration > 2_147_483_647)) throw new RangeError('maxDurationMs must be a positive integer up to 2147483647');
+    for (const key of ['maxHtmlBytes', 'maxImageBytes'] as const) if (options[key] !== undefined && (!Number.isSafeInteger(options[key]) || options[key]! < 1)) throw new RangeError(`${key} must be a positive safe integer`);
+    if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw new TypeError('signal must be an AbortSignal');
+    if (options.maxImages !== undefined && (!Number.isSafeInteger(options.maxImages) || options.maxImages < 0)) throw new RangeError('maxImages must be a non-negative safe integer');
+    if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > 2_147_483_647)) throw new RangeError('timeoutMs must be between 1 and 2147483647');
+    if (options.includeImages !== undefined && typeof options.includeImages !== 'boolean') throw new TypeError('includeImages must be boolean');
+    if (options.baseUrl !== undefined) { if (typeof options.baseUrl !== 'string') throw new TypeError('baseUrl must be a URL string'); new URL(options.baseUrl); }
+    generationSettings(options.generation, Number.MAX_SAFE_INTEGER);
+    for (const key of ['onToken', 'onEvent', 'onCheckpoint', 'validateDestination'] as const) if (options[key] !== undefined && typeof options[key] !== 'function') throw new TypeError(`${key} must be a function`);
+    if (options.sources !== undefined) {
+      if (!options.sources || typeof options.sources !== 'object' || Array.isArray(options.sources)) throw new TypeError('sources must be an object');
+      for (const key of ['paragraphIds', 'imageIds'] as const) {
+        const ids = options.sources[key];
+        if (ids !== undefined && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !id.trim()) || new Set(ids).size !== ids.length)) throw new TypeError(`${key} must contain unique source IDs`);
+      }
+      for (const key of ['paragraph', 'image'] as const) if (options.sources[key] !== undefined && typeof options.sources[key] !== 'function') throw new TypeError(`${key} selector must be a function`);
+    }
+  } catch (cause) {
+    if (cause instanceof NekoError) throw cause;
+    throw new NekoError(cause instanceof Error ? cause.message : String(cause), 'preprocess', 'INVALID_INPUT', { cause });
+  }
 }
 export class ReportError extends NekoError {
   constructor(error: NekoError, readonly checkpoint: ReportCheckpoint) { super(error.message, error.stage, error.code, Object.hasOwn(error, 'cause') ? { cause: error.cause } : { cause: error }); }

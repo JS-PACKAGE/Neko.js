@@ -4,6 +4,8 @@ import { Tensor } from '@huggingface/transformers';
 import { generationSettings, NucleusProcessor, StopBuffer } from '../src/core/generation.js';
 import { compileStructuredSchema } from '../src/core/structured.js';
 import { NekoError } from '../src/errors.js';
+import { JsonBoundary } from '../src/core/json-boundary.js';
+import { inferenceChat, validateInferenceOptions } from '../src/core/preflight.js';
 
 test('stops crossing chunks never enter the delivered output', () => {
   let output = '';
@@ -64,4 +66,35 @@ test('invalid schemas and unresolved/remote references fail before generation', 
   for (const schema of [{ type: 'unknown' }, { minItems: -1 }, { required: ['x', 'x'] }, { pattern: '[' }, { $ref: '#/missing' }, { $ref: 'https://example.com/schema' }, { $schema: 'https://json-schema.org/draft/2020-12/schema' }, { prefixItems: [] }]) {
     assert.throws(() => compileStructuredSchema(schema), (error: unknown) => error instanceof NekoError && error.code === 'SCHEMA_INVALID');
   }
+});
+
+test('JSON boundaries handle nested containers, escaped strings and primitive delimiters incrementally', () => {
+  for (const text of [' {"a":[1,{"b":"quote: \\" and brace }"}]}', '"escaped \\" quote"', 'true', 'false', 'null', '-12.4e+2\n']) {
+    const boundary = new JsonBoundary();
+    for (const character of text) boundary.push(character);
+    assert.equal(boundary.invalid, false, text);
+    assert.equal(boundary.complete, true, text);
+    assert.doesNotThrow(() => JSON.parse(text));
+  }
+  const number = new JsonBoundary();
+  number.push('1'); assert.equal(number.complete, false);
+  number.push('2e'); assert.equal(number.complete, false);
+  number.push('+3'); assert.equal(number.complete, false);
+  number.end(); assert.equal(number.complete, true);
+  for (const text of ['{} trailing', 'truefalse', '\"x\"{}', '[}', '```json\\n{}']) {
+    const boundary = new JsonBoundary(); boundary.push(text);
+    assert.equal(boundary.invalid, true, text);
+  }
+  for (const text of ['{\"x\":', '[1', '\"unterminated', 'tru']) {
+    const boundary = new JsonBoundary(); boundary.push(text); boundary.end();
+    assert.equal(boundary.complete, false, text);
+  }
+});
+
+test('cheap preflight preserves exact source text and permits non-fitting planning budgets', () => {
+  const prompt = '\\n  exact prompt\\t ';
+  validateInferenceOptions({ prompt });
+  assert.deepEqual(inferenceChat({ prompt }).rendered, [{ role: 'user', content: [{ type: 'text', text: prompt }] }]);
+  assert.throws(() => validateInferenceOptions({ prompt, contextWindowTokens: 32, maxNewTokens: 32 }), (error: unknown) => error instanceof NekoError && error.code === 'CONTEXT_LIMIT');
+  assert.doesNotThrow(() => validateInferenceOptions({ prompt, contextWindowTokens: 32, maxNewTokens: 32 }, true));
 });

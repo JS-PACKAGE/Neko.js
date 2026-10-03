@@ -1,11 +1,13 @@
 import type { Neko, NekoOptions } from '../index.js';
 import type { Page, StructuredReport } from '../types.js';
-import { ReportError, type DescribeOptions, type ReportCheckpoint } from '../report/generate.js';
+import { ReportError, validateDescribeOptions, type DescribeOptions, type ReportCheckpoint } from '../report/generate.js';
 import { NekoError } from '../errors.js';
 import { authorizeNetwork } from '../web/policy.js';
 import { aborted, decode, encode, encodeFailure, failure, methodStage, type MainMessage, type MessagePort, type WorkerMessage, type WorkerMethod } from './protocol.js';
 import type * as NodeWorkers from 'node:worker_threads';
 import { workerBootstrapUrl } from './context.js';
+import { validateInferenceOptions } from '../core/preflight.js';
+import { compileStructuredSchema } from '../core/structured.js';
 
 export type WorkerClient = Neko;
 interface WorkerHandle extends MessagePort<WorkerMessage, MainMessage> {
@@ -83,9 +85,13 @@ class Connection {
     this.unfail = worker.onFailure((cause) => { this.crash(cause); });
   }
 
+  checkRequest(method: WorkerMethod, signal?: AbortSignal): void {
+    if (this.stopped || this.closed && method !== 'dispose') throw new NekoError('Neko is disposed', methodStage(method), 'DISPOSED');
+    if (signal instanceof AbortSignal && signal.aborted) throw aborted(method, signal.reason);
+  }
   request<T>(method: WorkerMethod, args: unknown[], signal?: AbortSignal): Promise<T> {
-    if (this.stopped || this.closed && method !== 'dispose') return Promise.reject(new NekoError('Neko is disposed', methodStage(method), 'DISPOSED'));
-    if (signal?.aborted) return Promise.reject(aborted(method, signal.reason));
+    try { this.checkRequest(method, signal); }
+    catch (cause) { return Promise.reject(cause); }
     const id = this.nextRequest++;
     return new Promise<T>((resolve, reject) => {
       const callbackIds: number[] = [];
@@ -230,13 +236,16 @@ export async function createWorkerClient(options: NekoOptions = {}): Promise<Wor
   function describe(input: string | Page, options: DescribeOptions & { format: 'markdown' }): Promise<string>;
   function describe(input: string | Page, options?: DescribeOptions & { format?: 'json' }): Promise<StructuredReport>;
   function describe(input: string | Page, options: DescribeOptions): Promise<StructuredReport | string>;
-  function describe(input: string | Page, options: DescribeOptions = {}): Promise<StructuredReport | string> {
+  async function describe(input: string | Page, options: DescribeOptions = {}): Promise<StructuredReport | string> {
+    connection.checkRequest('describe', options?.signal);
+    validateDescribeOptions(options);
     const { signal, ...configuration } = options;
     return connection.request('describe', [input, configuration], signal);
   }
   return {
-    infer: (options) => { const { signal, ...configuration } = options; return connection.request('infer', [configuration], signal); },
-    inferStructured: (options) => { const { signal, ...configuration } = options; return connection.request('inferStructured', [configuration], signal); },
+    infer: async (options) => { connection.checkRequest('infer', options?.signal); validateInferenceOptions(options); const { signal, ...configuration } = options; return connection.request('infer', [configuration], signal); },
+    inferStructured: async (options) => { connection.checkRequest('inferStructured', options?.signal); validateInferenceOptions(options); compileStructuredSchema(options.schema); const { signal, ...configuration } = options; return connection.request('inferStructured', [configuration], signal); },
+    planInference: async (options) => { connection.checkRequest('planInference', options?.signal); validateInferenceOptions(options, true); if (options.schema !== undefined) compileStructuredSchema(options.schema); const { signal, ...configuration } = options; return connection.request('planInference', [configuration], signal); },
     describe,
     load: (signal) => connection.request('load', [], signal),
     warmup: (signal) => connection.request('warmup', [], signal),

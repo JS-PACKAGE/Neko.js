@@ -79,6 +79,7 @@ export function installWorkerServer(port: MessagePort<MainMessage, WorkerMessage
         switch (message.method) {
           case 'infer': value = await instance.infer({ ...(args[0] as Parameters<Neko['infer']>[0]), signal }); break;
           case 'inferStructured': value = await instance.inferStructured({ ...(args[0] as Parameters<Neko['inferStructured']>[0]), signal }); break;
+          case 'planInference': value = await instance.planInference({ ...(args[0] as Parameters<Neko['planInference']>[0]), signal }); break;
           case 'describe': value = await instance.describe(args[0] as Parameters<Neko['describe']>[0], { ...(args[1] as Parameters<Neko['describe']>[1]), signal }); break;
           case 'load': value = await instance.load(signal); break;
           case 'warmup': value = await instance.warmup(signal); break;
@@ -94,7 +95,7 @@ export function installWorkerServer(port: MessagePort<MainMessage, WorkerMessage
         }
         if (value !== null && typeof value === 'object') {
           if (message.method === 'describe' && 'metadata' in value) value = { ...value, metadata: { ...(value.metadata as Record<string, unknown>), execution } };
-          else if (message.method === 'infer' || message.method === 'inferStructured' || message.method === 'load' || message.method === 'warmup' || message.method === 'runtimeStatus') value = { ...value, execution };
+          else if (message.method === 'infer' || message.method === 'inferStructured' || message.method === 'planInference' || message.method === 'load' || message.method === 'warmup' || message.method === 'runtimeStatus') value = { ...value, execution };
         }
       }
       operation.finished = true;
