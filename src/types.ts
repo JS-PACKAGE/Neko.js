@@ -2,6 +2,11 @@ import type { ErrorStage, ErrorCode } from './errors.js';
 import type { ModelIdentity, LoadedBackend } from './core/engine.js';
 import type { ClaimAudit } from './report/audit.js';
 import type { ImageObservation } from './web/image.js';
+export interface GenerationStateHandle { readonly id: string; }
+export interface InferenceReuseOptions { state?: GenerationStateHandle; retainState?: boolean; vision?: boolean; }
+export interface InferenceReuseResult { state?: GenerationStateHandle; reusedDecoderTokens: number; visionEncoderHits: number; visionEncoderMisses: number; }
+export interface ReuseCacheLimits { stateEntries?: number; stateBytes?: number; visionEntries?: number; visionBytes?: number; }
+export interface ReuseCacheInfo { stateEntries: number; stateBytes: number; visionEntries: number; visionBytes: number; visionEncoderHits: number; visionEncoderMisses: number; evictions: number; limits: Required<ReuseCacheLimits>; }
 
 export type ImageDiscovery = 'img' | 'picture' | 'background' | 'og:image';
 

@@ -24,6 +24,8 @@ import { queuedReadable } from './queued-stream.js';
 import { askDocument, type AskOptions } from './web/query.js';
 import type { ModelBundleSource } from './cache/bundle.js';
 import { generateExtractiveReport, planExtractiveReport } from './report/extractive.js';
+import type { GenerationStateHandle, ReuseCacheInfo, ReuseCacheLimits } from './types.js';
+import { attachGenerationDiagnostic, getGenerationDiagnostic } from './core/diagnostics.js';
 
 export * from './types.js';
 export * from './web/index.js';
@@ -32,6 +34,8 @@ export * from './cache/manifest.js';
 export * from './cache/registry.js';
 export * from './backend/index.js';
 export * from './errors.js';
+export { getGenerationDiagnostic } from './core/diagnostics.js';
+export type { GenerationDiagnostic, GenerationDiagnosticOptions, DiagnosticCapture } from './core/diagnostics.js';
 export { ReportError } from './report/generate.js';
 export type { InferOptions, InferenceResult, InferencePlanOptions, InferencePlan, StructuredInferOptions, StructuredInferenceResult, RuntimeReadiness, ChatContent, ChatMessage, ModelIdentity, ImageObservation } from './core/engine.js';
 export type { GenerationOptions } from './core/generation.js';
@@ -55,6 +59,7 @@ export interface NekoOptions {
   queue?: { maxPending?: number };
   cacheDir?: string;
   cache?: { engine?: boolean; engineTtlMs?: number };
+  reuseCache?: ReuseCacheLimits;
   downloadConcurrency?: number;
   resumeDownloads?: boolean;
   onCacheProgress?: (event: CacheProgress) => void;
@@ -81,6 +86,9 @@ export interface Neko {
   infer(options: InferOptions): Promise<InferenceResult>;
   inferStream(options: InferStreamOptions): AsyncIterable<InferenceStreamEvent>;
   inferStructured<const S>(options: StructuredInferOptions<S>): Promise<StructuredInferenceResult<SchemaValue<S>>>;
+  releaseGenerationState(handle: GenerationStateHandle): Promise<void>;
+  reuseCacheInfo(): Promise<ReuseCacheInfo | null>;
+  clearReuseCaches(): Promise<void>;
   planInference(options: InferencePlanOptions): Promise<InferencePlan>;
   planReport(input: string | Page, options?: DescribeOptions): Promise<ReportPlan>;
   session(options?: SessionOptions): ConversationSession;
@@ -160,6 +168,14 @@ class LocalNeko implements Neko {
       return this.use(signal, async (engine) => { const result = await engine.inferStructured({ ...options, signal }, { structured: compiled }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; });
     });
   }
+  releaseGenerationState(handle: GenerationStateHandle): Promise<void> {
+    return this.run('cache', undefined, async () => this.engines.inspect((engine) => {
+      if (!engine) throw new NekoError('Generation state is unavailable', 'cache', 'INVALID_INPUT');
+      engine.releaseGenerationState(handle);
+    }));
+  }
+  reuseCacheInfo(): Promise<ReuseCacheInfo | null> { return this.run('cache', undefined, async () => this.engines.inspect((engine) => engine?.reuseCacheInfo() ?? null)); }
+  clearReuseCaches(): Promise<void> { return this.run('cache', undefined, async () => this.engines.inspect((engine) => { engine?.clearReuseCaches(); })); }
   async planInference(options: InferencePlanOptions): Promise<InferencePlan> {
     this.checkRequest('preprocess', options?.signal);
     validateInferenceOptions(options, true);
@@ -236,6 +252,8 @@ class LocalNeko implements Neko {
     }, options.signal).catch((cause: unknown) => {
       if (deadline.signal.aborted && cause instanceof NekoError && cause.code === 'ABORTED') {
         const error = deadline.signal.reason as NekoError;
+        const diagnostic = getGenerationDiagnostic(cause);
+        if (diagnostic) attachGenerationDiagnostic(error, { ...diagnostic, code: error.code });
         throw cause instanceof ReportError ? new ReportError(error, cause.checkpoint, cause.partial) : error;
       }
       throw cause;
@@ -291,7 +309,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
     if (configuration.execution !== undefined && configuration.execution !== 'inline' && configuration.execution !== 'worker') throw new TypeError('execution must be inline or worker');
     const { policy, modelSource, ...settings } = configuration;
     const source = captureModelSource(modelSource);
-    const options: OwnedNekoOptions = { ...settings, model: profile.id, modelProfile: profile.profile, ...(source === undefined ? {} : { modelSource: source }), policy: capturePolicy(policy), localFilesOnly: settings.localFilesOnly ?? false, cache: { ...settings.cache }, queue: { ...settings.queue } };
+    const options: OwnedNekoOptions = { ...settings, model: profile.id, modelProfile: profile.profile, ...(source === undefined ? {} : { modelSource: source }), policy: capturePolicy(policy), localFilesOnly: settings.localFilesOnly ?? false, cache: { ...settings.cache }, queue: { ...settings.queue }, ...(settings.reuseCache === undefined ? {} : { reuseCache: Object.freeze({ ...settings.reuseCache }) }) };
     if (options.execution === 'worker') return createWorkerClient(options);
     const admission = new RequestQueue(options.queue?.maxPending);
     const backend = await atStage('backend', options.signal, () => inspectBackend(options.device ?? 'webgpu', options.modelProfile));
@@ -326,7 +344,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
       options.signal?.throwIfAborted();
       const engines = new EngineCache((signal) => cache.withSignal(signal, async () => {
         const started = performance.now(); await configureRuntime(signal); await atStage('load', signal, () => cache.prefetch(signal));
-        return VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy });
+        return VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}) });
       }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000);
       return new LocalNeko(engines, cache, restore, backend, options, admission);
     } catch (error) { if (restore) restore(); else installation?.restore(); throw error; }

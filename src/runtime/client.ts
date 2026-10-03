@@ -15,6 +15,7 @@ import { createConversationSession } from '../core/session.js';
 import { deferredReadableStream } from './readable.js';
 import type { StructuredInferOptions, StructuredInferenceResult } from '../core/engine.js';
 import type { SchemaValue } from '../core/structured.js';
+import { attachGenerationDiagnostic, getGenerationDiagnostic } from '../core/diagnostics.js';
 
 export type WorkerClient = Neko;
 interface WorkerHandle extends MessagePort<WorkerMessage, MainMessage> {
@@ -208,9 +209,13 @@ class Connection {
     void state.events.then(() => {
       if (!state.settled) {
         try {
-          if (state.localFailure && value instanceof ReportError) state.localFailure = new ReportError(state.localFailure, value.checkpoint, value.partial);
+          if (state.localFailure && value instanceof ReportError) {
+            const diagnostic = getGenerationDiagnostic(value);
+            if (diagnostic) attachGenerationDiagnostic(state.localFailure, diagnostic);
+            state.localFailure = new ReportError(state.localFailure, value.checkpoint, value.partial);
+          }
           else if (state.localFailure && value instanceof Error) {
-            for (const key of ['checkpoint', 'partial'] as const) if (Object.hasOwn(value, key) && !Object.hasOwn(state.localFailure, key)) Object.defineProperty(state.localFailure, key, { value: Object.getOwnPropertyDescriptor(value, key)?.value, enumerable: true });
+            for (const key of ['checkpoint', 'partial', 'diagnostics'] as const) if (Object.hasOwn(value, key) && !Object.hasOwn(state.localFailure, key)) Object.defineProperty(state.localFailure, key, { value: Object.getOwnPropertyDescriptor(value, key)?.value, enumerable: true });
           }
           this.settle(state, ok && !state.localFailure, state.localFailure ?? value);
         }
@@ -348,6 +353,9 @@ export async function createWorkerClient(options: NekoOptions = {}): Promise<Wor
       const { signal, hardDeadlineMs, ...configuration } = options;
       return connection.request('inferStructured', [configuration], signal, hardDeadlineMs);
     },
+    releaseGenerationState: (handle) => connection.request('releaseGenerationState', [handle]),
+    reuseCacheInfo: () => connection.request('reuseCacheInfo', []),
+    clearReuseCaches: () => connection.request('clearReuseCaches', []),
     planInference: async (options) => {
       connection.checkRequest('planInference', options?.signal); validateInferenceOptions(options, true);
       if (options.schema !== undefined) compileStructuredSchema(options.schema, options.structuredMode);

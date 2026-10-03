@@ -13,6 +13,7 @@ import { getRegisteredModelProfile, type ModelId } from '../cache/registry.js';
 import { auditClaim, type ClaimAudit } from './audit.js';
 import { validateImageObservation, type ImageObservation } from '../web/image.js';
 import { generateExtractiveReport, planExtractiveReport } from './extractive.js';
+import { attachGenerationDiagnostic, getGenerationDiagnostic, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from '../core/diagnostics.js';
 
 export interface ReportPlan {
   mode: 'generated' | 'extractive';
@@ -83,6 +84,7 @@ export interface DescribeOptions extends ExtractOptions {
   generation?: GenerationOptions;
   budget?: ReportBudget;
   resume?: ReportCheckpoint;
+  diagnostics?: GenerationDiagnosticOptions;
   onToken?: (text: string, phase: ReportPhase) => void;
   onEvent?: (event: ReportEvent) => void | Promise<void>;
   onCheckpoint?: (checkpoint: ReportCheckpoint) => void | Promise<void>;
@@ -98,6 +100,7 @@ export interface InternalReportContext extends ExtractContext {
 export function validateDescribeOptions(options: DescribeOptions = {}): void {
   try {
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('describe options must be an object');
+    validateDiagnosticOptions(options.diagnostics);
     const language = options.language ?? 'en';
     if (typeof language !== 'string' || !language.trim()) throw new TypeError('language must be a valid BCP 47 language tag');
     try { Intl.getCanonicalLocales(language); } catch { throw new TypeError('language must be a valid BCP 47 language tag'); }
@@ -137,7 +140,11 @@ export function validateDescribeOptions(options: DescribeOptions = {}): void {
   }
 }
 export class ReportError extends NekoError {
-  constructor(error: NekoError, readonly checkpoint: ReportCheckpoint, readonly partial: PartialReport = partialReport(checkpoint)) { super(error.message, error.stage, error.code, Object.hasOwn(error, 'cause') ? { cause: error.cause } : { cause: error }); }
+  constructor(error: NekoError, readonly checkpoint: ReportCheckpoint, readonly partial: PartialReport = partialReport(checkpoint)) {
+    super(error.message, error.stage, error.code, Object.hasOwn(error, 'cause') ? { cause: error.cause } : { cause: error });
+    const diagnostic = getGenerationDiagnostic(error) ?? getGenerationDiagnostic(error.cause);
+    if (diagnostic) attachGenerationDiagnostic(this, diagnostic);
+  }
 }
 function partialReport(checkpoint: ReportCheckpoint): PartialReport {
   const evidence = new Map<string, Citation>(checkpoint.sourceFacts.map(({ id, citation }) => [id, citation]));
@@ -418,19 +425,26 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         await notify({ type: 'stage-start', id, phase, usage: checkpoint.usage, elapsedMs: elapsed() });
         const beforeInput = budget.inputTokens; const beforeOutput = budget.outputTokens;
         const beforePreprocess = checkpoint.timings.preprocessMs; const beforeGeneration = checkpoint.timings.generationMs;
-        let items: EvidenceClaim[]; let result: InferenceResult;
+        let items: EvidenceClaim[]; let result: InferenceResult | undefined;
         try {
-          const generated = await engine.inferStructured({ ...options, prompt: request, ...(prepared === undefined ? {} : { image: prepared.input }), schema, maxNewTokens, contextWindowTokens: context, onToken: (token) => { try { options.onToken?.(token, phase); } catch (cause) { callbackFailed = true; throw cause; } } }, { preparedImages: prepared === undefined ? undefined : [prepared], structured: compiled, budget });
+          const generated = await engine.inferStructured({ ...options, prompt: request, ...(prepared === undefined ? {} : { image: prepared.input }), schema, maxNewTokens, contextWindowTokens: context, onToken: (token) => { try { options.onToken?.(token, phase); } catch (cause) { callbackFailed = true; throw cause; } } }, { preparedImages: prepared === undefined ? undefined : [prepared], structured: compiled, budget, diagnosticStage: { id, attempt: attempt + 1 } });
           result = generated;
           items = validateClaims(multiple ? generated.value : { claims: [generated.value] }, allowed, language);
         } catch (cause) {
           const error = cause instanceof NekoError ? cause : new NekoError(String(cause), 'report', 'OPERATION_FAILED', { cause });
           const inputTokens = budget.inputTokens - beforeInput; const outputTokens = budget.outputTokens - beforeOutput;
           checkpoint.attempts.push({ id, phase, attempt: ++attempt, requestHash: await hashValue({ request, schema }), outcome: 'error', errorCode: error.code, usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens }, timings: { preprocessMs: checkpoint.timings.preprocessMs - beforePreprocess, generationMs: checkpoint.timings.generationMs - beforeGeneration } });
+          if (options.diagnostics) {
+            const previous = getGenerationDiagnostic(cause);
+            const diagnostic: GenerationDiagnostic = previous ?? { version: 1, stageId: id, attempt, stage: error.stage, code: error.code, finishReason: result?.finishReason ?? (signal?.aborted ? 'aborted' : 'not-started'), usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens }, outputCharacters: result?.text.length ?? 0 };
+            diagnostic.aggregateUsage = { inputTokens: budget.inputTokens, outputTokens: budget.outputTokens, totalTokens: budget.inputTokens + budget.outputTokens };
+            if (!previous && result && options.diagnostics !== true && options.diagnostics.capture) { const maxCharacters = options.diagnostics.capture.maxCharacters; diagnostic.capture = { output: result.text.slice(0, maxCharacters), truncated: result.text.length > maxCharacters, maxCharacters }; }
+            attachGenerationDiagnostic(error, diagnostic);
+          }
           if (!callbackFailed && !signal?.aborted) { await save(); await notify({ type: 'stage-error', id, phase, usage: checkpoint.usage, elapsedMs: elapsed() }); }
           const eligible = ['STRUCTURED_OUTPUT', 'MODEL_OUTPUT'].includes(error.code);
           if (eligible) outputFailures++;
-          if (callbackFailed || signal?.aborted || !eligible || outputFailures >= maximum) throw cause;
+          if (callbackFailed || signal?.aborted || !eligible || outputFailures >= maximum) throw error;
           continue;
         }
         const inputTokens = budget.inputTokens - beforeInput; const outputTokens = budget.outputTokens - beforeOutput;

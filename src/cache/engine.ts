@@ -12,6 +12,11 @@ export class EngineCache<T extends CachedEngine> {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 0 || ttlMs > 2_147_483_647) throw new RangeError('engineTtlMs must be an integer between 0 and 2147483647');
   }
   status(): EngineCacheStatus { return { loaded: !!this.engine, sessions: this.engine ? 1 : 0, memory: this.engine ? this.engine.memory : 0, hits: this.hits, loads: this.loads }; }
+  inspect<R>(operation: (engine: T | undefined) => R | Promise<R>): Promise<R> {
+    const work = this.queue.catch(() => undefined).then(() => operation(this.engine));
+    this.queue = work;
+    return work;
+  }
   async use<R>(operation: (engine: T) => Promise<R>, signal?: AbortSignal): Promise<R> {
     const work = this.queue.catch(() => undefined).then(async () => {
       signal?.throwIfAborted();

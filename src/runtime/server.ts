@@ -118,6 +118,9 @@ export function installWorkerServer(port: MessagePort<MainMessage, WorkerMessage
           case 'describe': value = await instance.describe(args[0] as Parameters<Neko['describe']>[0], { ...(args[1] as Parameters<Neko['describe']>[1]), signal }); break;
           case 'planReport': value = await instance.planReport(args[0] as Parameters<Neko['planReport']>[0], { ...(args[1] as Parameters<Neko['planReport']>[1]), signal }); break;
           case 'ask': value = await instance.ask(args[0] as Parameters<Neko['ask']>[0], args[1] as string, { ...(args[2] as Parameters<Neko['ask']>[2]), signal }); break;
+          case 'releaseGenerationState': value = await instance.releaseGenerationState(args[0] as Parameters<Neko['releaseGenerationState']>[0]); break;
+          case 'reuseCacheInfo': value = await instance.reuseCacheInfo(); break;
+          case 'clearReuseCaches': value = await instance.clearReuseCaches(); break;
           case 'load': value = await instance.load(signal); break;
           case 'warmup': value = await instance.warmup(signal); break;
           case 'runtimeStatus': value = await instance.runtimeStatus(); break;

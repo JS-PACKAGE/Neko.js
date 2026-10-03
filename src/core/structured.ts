@@ -25,7 +25,7 @@ export interface CompiledStructuredSchema<S = unknown> {
 
 export function validateStructuredValue<S>(compiled: CompiledStructuredSchema<S>, value: unknown): SchemaValue<S> {
   const validation = compiled.validator.validate(value);
-  if (!validation.valid) throw new NekoError(`Generated JSON does not match the schema: ${validation.errors.map((error) => error.error).join('; ')}`, 'generate', 'STRUCTURED_OUTPUT');
+  if (!validation.valid) throw new NekoError('Generated JSON does not match the schema', 'generate', 'STRUCTURED_OUTPUT');
   // The runtime validator above establishes the schema-derived type.
   return value as SchemaValue<S>;
 }

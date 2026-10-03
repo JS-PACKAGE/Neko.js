@@ -9,7 +9,7 @@ export interface WorkerExecution {
 }
 export const MAX_OUTSTANDING_NOTIFICATIONS = 128;
 export const MAX_NOTIFICATION_CHARACTERS = 1_048_576;
-export type WorkerMethod = 'create' | 'infer' | 'inferStructured' | 'planInference' | 'describe' | 'planReport' | 'ask' | 'load' | 'warmup' | 'runtimeStatus' | 'queueStatus' | 'diagnostics' | 'cache.model.prefetch' | 'cache.model.status' | 'cache.model.clear' | 'cache.model.exportBundle' | 'cache.model.importBundle' | 'cache.model.diagnostics' | 'cache.engine.status' | 'cache.engine.release' | 'backend.current' | 'backend.detect' | 'dispose';
+export type WorkerMethod = 'create' | 'infer' | 'inferStructured' | 'planInference' | 'describe' | 'planReport' | 'ask' | 'releaseGenerationState' | 'reuseCacheInfo' | 'clearReuseCaches' | 'load' | 'warmup' | 'runtimeStatus' | 'queueStatus' | 'diagnostics' | 'cache.model.prefetch' | 'cache.model.status' | 'cache.model.clear' | 'cache.model.exportBundle' | 'cache.model.importBundle' | 'cache.model.diagnostics' | 'cache.engine.status' | 'cache.engine.release' | 'backend.current' | 'backend.detect' | 'dispose';
 export type CallbackMode = 'notify' | 'await';
 export type Encoded = null | undefined | string | number | boolean | bigint
   | { kind: 'array'; items: Encoded[] }
@@ -17,7 +17,7 @@ export type Encoded = null | undefined | string | number | boolean | bigint
   | { kind: 'url'; href: string }
   | { kind: 'native'; value: unknown }
   | { kind: 'callback'; id: number; mode: CallbackMode }
-  | { kind: 'error'; name: string; message: string; stack?: string; stage?: ErrorStage; code?: ErrorCode; cause?: Encoded; checkpoint?: Encoded; partial?: Encoded; reportError?: true };
+  | { kind: 'error'; name: string; message: string; stack?: string; stage?: ErrorStage; code?: ErrorCode; cause?: Encoded; checkpoint?: Encoded; partial?: Encoded; diagnostics?: Encoded; reportError?: true };
 export type RequestMessage = { type: 'request'; id: number; method: WorkerMethod; args: Encoded };
 export type MainMessage = RequestMessage | { type: 'ping'; id: number } | { type: 'abort'; id: number; reason: Encoded }
   | { type: 'callback-result'; id: number; ok: true; value: Encoded }
@@ -53,6 +53,7 @@ export function encode(value: unknown, callback?: (fn: (...args: unknown[]) => u
       ...(Object.hasOwn(value, 'cause') ? { cause: encode(value.cause, callback, 'cause', ancestors) } : {}),
       ...('checkpoint' in value ? { checkpoint: encode(value.checkpoint, callback, 'checkpoint', ancestors) } : {}),
       ...('partial' in value ? { partial: encode(value.partial, callback, 'partial', ancestors) } : {}),
+      ...('diagnostics' in value ? { diagnostics: encode(value.diagnostics, callback, 'diagnostics', ancestors) } : {}),
     };
     if (Array.isArray(value)) return { kind: 'array', items: value.map((item) => encode(item, callback, key, ancestors)) };
     const prototype: unknown = Object.getPrototypeOf(value);
@@ -81,6 +82,7 @@ export function decode(value: Encoded, callback?: (id: number, mode: CallbackMod
         else Object.defineProperty(error, 'checkpoint', { value: checkpoint, enumerable: true });
       }
       if (Object.hasOwn(value, 'partial') && !Object.hasOwn(error, 'partial')) Object.defineProperty(error, 'partial', { value: decode(value.partial, callback), enumerable: true });
+      if (Object.hasOwn(value, 'diagnostics')) Object.defineProperty(error, 'diagnostics', { value: decode(value.diagnostics, callback), enumerable: true, configurable: true });
       error.name = value.name;
       if (value.stack !== undefined) error.stack = value.stack;
       return error;
@@ -93,6 +95,7 @@ export function methodStage(method: WorkerMethod): ErrorStage {
   if (method === 'describe' || method === 'planReport' || method === 'ask') return 'report';
   if (method === 'planInference') return 'preprocess';
   if (method === 'load' || method === 'warmup') return 'load';
+  if (method === 'releaseGenerationState' || method === 'reuseCacheInfo' || method === 'clearReuseCaches') return 'cache';
   if (method.startsWith('cache.')) return 'cache';
   if (method.startsWith('backend.')) return 'backend';
   if (method === 'dispose') return 'dispose';

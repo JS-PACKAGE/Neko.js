@@ -1,4 +1,4 @@
-import { AutoImageProcessor, Qwen3VLProcessor, TokenizersBackend, Qwen3_5ForConditionalGeneration, RawImage, TextStreamer, Tensor, InterruptableStoppingCriteria, LogitsProcessorList, cat, type PreTrainedModel, type Processor } from '@huggingface/transformers';
+import { AutoImageProcessor, Qwen3VLProcessor, TokenizersBackend, Qwen3_5ForConditionalGeneration, RawImage, TextStreamer, Tensor, DynamicCache, InterruptableStoppingCriteria, LogitsProcessorList, cat, type PreTrainedModel, type Processor } from '@huggingface/transformers';
 import { type ModelProfileId, type ModelDtype } from '../cache/manifest.js';
 import { getRegisteredModelProfile, type ModelId } from '../cache/registry.js';
 import type { BackendInfo } from '../backend/index.js';
@@ -9,11 +9,14 @@ import type { ResourcePolicy } from '../web/policy.js';
 import { atStage, NekoError } from '../errors.js';
 import { generationSettings, NucleusProcessor, StopBuffer, type GenerationOptions } from './generation.js';
 import { compileStructuredSchema, validateStructuredValue, type CompiledStructuredSchema, type SchemaValue, type StructuredMode } from './structured.js';
-import type { ExecutionInfo } from '../types.js';
+import type { ExecutionInfo, GenerationStateHandle, InferenceReuseOptions, InferenceReuseResult, ReuseCacheLimits } from '../types.js';
 import { inferenceChat, validateInferenceOptions } from './preflight.js';
 import { JsonBoundary } from './json-boundary.js';
 import { JsonGrammarProcessor, tokenizerByteTrie, type TokenByteTrie } from './json-grammar.js';
 import { pinnedTokenizerResource, promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
+import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot } from './reuse.js';
+import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
+import { hashValue } from '../web/source.js';
 
 export type ChatContent = { type: 'text'; text: string } | { type: 'image'; image: ImageInput };
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string | ChatContent[]; }
@@ -28,10 +31,12 @@ export interface InferOptions extends ImageOptions {
   generation?: GenerationOptions;
   onToken?: (text: string) => void;
   hardDeadlineMs?: number;
+  reuse?: InferenceReuseOptions;
+  diagnostics?: GenerationDiagnosticOptions;
 }
 export interface StructuredInferOptions<S = unknown> extends InferOptions { schema: S; structuredMode?: StructuredMode; }
 export interface InferencePlanOptions extends InferOptions { schema?: unknown; structuredMode?: StructuredMode; }
-export interface InternalInferenceContext { budget?: InferenceBudget | undefined; preparedImages?: PreparedImage[] | undefined; structured?: CompiledStructuredSchema | undefined; }
+export interface InternalInferenceContext { budget?: InferenceBudget | undefined; preparedImages?: PreparedImage[] | undefined; structured?: CompiledStructuredSchema | undefined; diagnosticStage?: { id: string; attempt: number } | undefined; }
 export interface InferencePlan {
   inputTokens: number;
   maxNewTokens: number;
@@ -58,6 +63,7 @@ export interface InferenceResult {
   memory: { jsHeapBytes: number | null; gpuBytes: null };
   execution?: ExecutionInfo;
   preprocessing?: PreprocessingReuse;
+  reuse?: InferenceReuseResult;
 }
 export interface StructuredInferenceResult<T = unknown> extends InferenceResult { value: T; structured: { mode: 'tokenizer-constrained-runtime-validation' | 'json-boundary-runtime-validation'; dialect: 'draft-07' }; }
 function disposeInputs(inputs: Record<string, unknown>): void { for (const value of Object.values(inputs)) if (value instanceof Tensor) value.dispose(); }
@@ -71,9 +77,14 @@ export class VisionEngine {
   private readonly imageCache = new ImagePreprocessCache();
   private tokenTrie?: TokenByteTrie;
   private readonly tokenCache: PromptTokenCache;
-  private constructor(private readonly model: PreTrainedModel, private readonly processor: Processor, readonly backend: BackendInfo, private readonly loadMs: number, private readonly profiling: boolean, readonly modelContextTokens: number, private readonly vocabularySize: number, readonly identity: ModelIdentity, private readonly policy: ResourcePolicy | undefined, private readonly offline: boolean) { this.tokenCache = promptTokenCache(identity); }
+  private readonly reuseCache: InferenceReuseCache;
+  private generating = false;
+  private constructor(private readonly model: PreTrainedModel, private readonly processor: Processor, readonly backend: BackendInfo, private readonly loadMs: number, private readonly profiling: boolean, readonly modelContextTokens: number, private readonly vocabularySize: number, readonly identity: ModelIdentity, private readonly policy: ResourcePolicy | undefined, private readonly offline: boolean, reuseCacheLimits?: ReuseCacheLimits) { this.tokenCache = promptTokenCache(identity); this.reuseCache = new InferenceReuseCache(reuseCacheLimits); }
   preprocessingCacheInfo() { return this.tokenCache.info(); }
-  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now(), config: { profile?: ModelProfileId; model?: ModelId; policy?: ResourcePolicy } = {}): Promise<VisionEngine> {
+  reuseCacheInfo() { return this.reuseCache.info(); }
+  releaseGenerationState(handle: GenerationStateHandle): void { if (this.generating) throw new NekoError('Cannot release generation state during inference', 'generate', 'RUNTIME_BUSY'); this.reuseCache.release(handle); }
+  clearReuseCaches(): void { if (this.generating) throw new NekoError('Cannot clear reuse caches during inference', 'generate', 'RUNTIME_BUSY'); this.reuseCache.clear(); }
+  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now(), config: { profile?: ModelProfileId; model?: ModelId; policy?: ResourcePolicy; reuseCacheLimits?: ReuseCacheLimits } = {}): Promise<VisionEngine> {
     return atStage('load', signal, async () => {
       const selected = getRegisteredModelProfile(config.profile, config.model);
       const options = { revision: selected.revision, local_files_only: localFilesOnly, ...(progressCallback ? { progress_callback: progressCallback } : {}) };
@@ -94,7 +105,7 @@ export class VisionEngine {
         signal?.throwIfAborted();
         if (!processor.tokenizer) throw new Error('Loaded processor has no tokenizer');
         return new VisionEngine(model, processor, backend, performance.now() - started, !!profilePrefix && backend.runtime === 'node', context, vocabulary,
-          { id: selected.id, revision: selected.revision, profile: selected.profile, dtype: selected.dtype }, config.policy, localFilesOnly);
+          { id: selected.id, revision: selected.revision, profile: selected.profile, dtype: selected.dtype }, config.policy, localFilesOnly, config.reuseCacheLimits);
       } catch (error) { await model.dispose(); throw error; }
     }, (engine) => engine.dispose());
   }
@@ -176,12 +187,21 @@ export class VisionEngine {
   async inferStructured<S>(options: StructuredInferOptions<S>, context: InternalInferenceContext = {}): Promise<StructuredInferenceResult<SchemaValue<S>>> {
     const compiled = compileStructuredSchema(options.schema, options.structuredMode);
     const effective = context.structured ?? compiled;
-    const result = await this.runInference(options, structuredInstruction(effective), effective, context);
+    const result = await this.runInference(options, structuredInstruction(effective), effective, context, compiled);
     try {
       if (result.finishReason === 'length') throw new Error('Structured generation exhausted its output budget');
       const value = validateStructuredValue(compiled, JSON.parse(result.text));
       return { ...result, value, structured: { mode: effective.mode === 'constrained' ? 'tokenizer-constrained-runtime-validation' : 'json-boundary-runtime-validation', dialect: 'draft-07' } };
-    } catch (cause) { throw new NekoError(cause instanceof Error ? cause.message : 'Invalid structured output', 'generate', 'STRUCTURED_OUTPUT', { cause }); }
+    } catch (cause) {
+      if (result.reuse?.state) this.reuseCache.release(result.reuse.state);
+      const error = cause instanceof NekoError ? cause : new NekoError('Invalid structured output', 'generate', 'STRUCTURED_OUTPUT', { cause });
+      if (options.diagnostics) {
+        let locations: GenerationDiagnostic['schema'];
+        try { locations = compiled.validator.validate(JSON.parse(result.text)).errors.map(({ keyword, keywordLocation, instanceLocation }) => ({ keyword, keywordLocation, instanceLocation })); } catch { /* Preserve the original parsing error. */ }
+        attachGenerationDiagnostic(error, { version: 1, stageId: context.diagnosticStage?.id ?? 'structured', attempt: context.diagnosticStage?.attempt ?? 1, stage: error.stage, code: error.code, finishReason: result.finishReason, usage: result.usage, outputCharacters: result.text.length, ...(locations ? { schema: locations } : {}), ...(options.diagnostics !== true && options.diagnostics.capture ? { capture: { output: result.text.slice(0, options.diagnostics.capture.maxCharacters), truncated: result.text.length > options.diagnostics.capture.maxCharacters, maxCharacters: options.diagnostics.capture.maxCharacters } } : {}) });
+      }
+      throw error;
+    }
   }
   infer(options: InferOptions, context: InternalInferenceContext = {}): Promise<InferenceResult> { return this.runInference(options, undefined, undefined, context); }
   private async prepareInputs(options: InferOptions, instruction?: string, planning = false, context: InternalInferenceContext = {}) {
@@ -190,6 +210,8 @@ export class VisionEngine {
     const budget = context.budget;
     return atStage('preprocess', options.signal, async () => {
       validateInferenceOptions(options, planning);
+      validateDiagnosticOptions(options.diagnostics);
+      if (options.reuse !== undefined && (!options.reuse || typeof options.reuse !== 'object' || options.reuse.state !== undefined && (!options.reuse.state || typeof options.reuse.state.id !== 'string') || options.reuse.retainState !== undefined && typeof options.reuse.retainState !== 'boolean' || options.reuse.vision !== undefined && typeof options.reuse.vision !== 'boolean')) throw new TypeError('Invalid inference reuse options');
       if (budget && performance.now() >= budget.deadline) throw new NekoError('Report duration budget exhausted', 'preprocess', 'BUDGET_EXCEEDED');
       let maxNewTokens = options.maxNewTokens ?? 128;
       const settings = generationSettings(options.generation, this.vocabularySize);
@@ -211,13 +233,21 @@ export class VisionEngine {
           decoded.push(prepared); imageCounts.push(1);
         }
       }
-      const chat = renderInferenceChat(this.processor, options, instruction, imageCounts);
+      const chat = renderInferenceChat(this.processor, options, instruction, imageCounts, options.reuse?.retainState === true);
       const cached = decoded.length ? undefined : await this.tokenCache.inputs(chat.text, () => this.jointInputs(chat.text, []));
       const inputs = cached?.inputs ?? await this.jointInputs(chat.text, decoded.map(({ image }) => new RawImage(image.data, image.width, image.height, image.channels)));
       allocatedInputs = inputs;
       const ids = inputs.input_ids;
       if (!(ids instanceof Tensor) || ids.dims.length !== 2) throw new Error('Processor produced invalid input IDs');
       const inputTokens = ids.dims[1]!;
+      let checkpointTokens: number | undefined;
+      if (chat.generationPrompt !== undefined) {
+        const suffix = this.processor.tokenizer!.encode(chat.generationPrompt, { add_special_tokens: false }).map(BigInt);
+        const tokens = Array.from(ids.data, BigInt);
+        const prefixLength = tokens.length - suffix.length;
+        if (prefixLength < 1 || suffix.some((token, index) => token !== tokens[prefixLength + index])) throw new Error('Pinned generation prompt does not align with processed token boundaries');
+        checkpointTokens = prefixLength;
+      }
       if (budget) {
         if (performance.now() >= budget.deadline) throw new NekoError('Report duration budget exhausted', 'preprocess', 'BUDGET_EXCEEDED');
         if (inputTokens + 1 > budget.remainingTokens) throw new NekoError('Report total token budget exhausted before generation', 'preprocess', 'BUDGET_EXCEEDED');
@@ -225,7 +255,7 @@ export class VisionEngine {
       }
       const contextLimit = this.contextLimit(options.contextWindowTokens);
       if (!planning && inputTokens + maxNewTokens > contextLimit) throw new NekoError(`Input (${inputTokens}) plus output budget (${maxNewTokens}) exceeds context limit (${contextLimit})`, 'preprocess', 'CONTEXT_LIMIT');
-      return { inputs, inputTokens, maxNewTokens, contextLimit, settings, images: decoded.map(({ observation }) => observation), preprocessing: cached?.reuse };
+      return { inputs, inputTokens, checkpointTokens, maxNewTokens, contextLimit, settings, images: decoded.map(({ observation }) => observation), preprocessing: cached?.reuse };
     }).catch((error: unknown) => { if (allocatedInputs) disposeInputs(allocatedInputs); throw error; })
       .finally(() => { if (budget?.timings) budget.timings.preprocessMs += performance.now() - started; });
   }
@@ -237,13 +267,16 @@ export class VisionEngine {
       return { inputTokens, maxNewTokens, contextLimit, availableOutputTokens: Math.max(0, contextLimit - inputTokens), fits: inputTokens + maxNewTokens <= contextLimit, model: this.identity, ...(images.length ? { images } : {}), ...(prepared.preprocessing ? { preprocessing: prepared.preprocessing } : {}) };
     } finally { disposeInputs(prepared.inputs); }
   }
-  private async runInference(options: InferOptions, instruction?: string, compiled?: CompiledStructuredSchema, context: InternalInferenceContext = {}): Promise<InferenceResult> {
+  private async runInference(options: InferOptions, instruction?: string, compiled?: CompiledStructuredSchema, context: InternalInferenceContext = {}, validationSchema = compiled): Promise<InferenceResult> {
     const signal = options.signal; const started = performance.now(); const structured = compiled !== undefined;
     const budget = context.budget;
     const checkDeadline = () => { if (budget && performance.now() >= budget.deadline) throw new NekoError('Report duration budget exhausted', 'generate', 'BUDGET_EXCEEDED'); };
     const constrainedTrie = compiled?.grammar ? (this.tokenTrie ??= tokenizerByteTrie(this.processor.tokenizer!)) : undefined;
-    const prepared = await this.prepareInputs(options, instruction, false, context);
-    const { inputs, inputTokens, maxNewTokens, settings, images } = prepared;
+    const prepared = await this.prepareInputs(options, instruction, false, context).catch((error: unknown) => {
+      if (options.diagnostics) attachGenerationDiagnostic(error, { version: 1, stageId: context.diagnosticStage?.id ?? (structured ? 'structured' : 'inference'), attempt: context.diagnosticStage?.attempt ?? 1, stage: error instanceof NekoError ? error.stage : 'preprocess', code: error instanceof NekoError ? error.code : 'OPERATION_FAILED', finishReason: signal?.aborted ? 'aborted' : 'not-started', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, outputCharacters: 0 });
+      throw error;
+    });
+    const { inputs, inputTokens, checkpointTokens, maxNewTokens, settings, images } = prepared;
     const generationStarted = performance.now();
     const incrementalDecoder = constrainedTrie ? new TextDecoder('utf-8', { fatal: true }) : undefined;
     const stopping = new InterruptableStoppingCriteria();
@@ -254,6 +287,17 @@ export class VisionEngine {
     const generated: bigint[] | undefined = !constrainedTrie && (structured || settings.stop.length) ? [] : undefined;
     const boundary = structured ? new JsonBoundary() : undefined;
     let structuredDecoded = '';
+    let ownsGeneration = false; let chargedInput = false;
+    let finishReason: GenerationDiagnostic['finishReason'] = 'not-started';
+    let jsonPosition: number | undefined;
+    let workingCache: DynamicCache | undefined;
+    let latestOutputs: Record<string, unknown> | undefined;
+    let stagedState: GenerationStateSnapshot | undefined;
+    let stagedCheckpoint: GenerationStateSnapshot | undefined;
+    const stagedFeatures = new Map<string, Tensor>();
+    const reuse: InferenceReuseResult = { reusedDecoderTokens: 0, visionEncoderHits: 0, visionEncoderMisses: 0 };
+    const originalForward = this.model.forward;
+    const originalEncodeImage = this.model.encode_image;
     const buffer = new StopBuffer(settings.stop, (text) => {
       if (signal?.aborted || callbackFailed) return;
       response += text;
@@ -304,13 +348,92 @@ export class VisionEngine {
     }
     if (settings.sampling && settings.topP < 1) processors.push(new NucleusProcessor(settings.topP, settings.temperature, settings.topK));
     try {
-      return await atStage('generate', signal, async () => {
+      if (this.generating) throw new NekoError('Engine already has active inference', 'generate', 'RUNTIME_BUSY');
+      this.generating = true; ownsGeneration = true;
+      const visionIdentity = options.reuse ? await inputVisionIdentity(inputs) : 'text';
+      const compatibility = options.reuse ? await hashValue({ model: this.identity, schema: validationSchema?.json ?? null, constraint: compiled?.json ?? null, mode: compiled?.mode ?? null, instruction: instruction ?? null, vision: visionIdentity, stop: settings.stop, stopTokenIds: settings.stopTokenIds }) : '';
+      if (options.reuse?.state) {
+        const ids = Array.from((inputs.input_ids as Tensor).data, BigInt);
+        const checked = this.reuseCache.checkout(options.reuse.state, ids, compatibility);
+        workingCache = checked.cache; reuse.reusedDecoderTokens = checked.tokens;
+        const imageToken = (this.model.config as unknown as Record<string, unknown>).image_token_id;
+        if (typeof imageToken === 'number' && ids.slice(checked.tokens).includes(BigInt(imageToken))) throw new TypeError('Decoder state cannot bypass new vision tokens');
+      }
+      if (options.reuse) {
+        let firstForward = true;
+        this.model.forward = async (modelInputs: Record<string, unknown>) => {
+          // Upstream marks consumed vision with null; multi-token cached prefill must omit that sentinel.
+          if (modelInputs.pixel_values === null) delete modelInputs.pixel_values;
+          if (modelInputs.past_key_values instanceof DynamicCache) workingCache = modelInputs.past_key_values;
+          if (firstForward && reuse.reusedDecoderTokens) {
+            const ids = modelInputs.input_ids;
+            if (!(ids instanceof Tensor) || ids.dims[1] !== inputTokens - reuse.reusedDecoderTokens) throw new Error('Pinned decoder did not skip the compatible processed prefix');
+          }
+          if (firstForward && checkpointTokens !== undefined) {
+            const cachedTokens = workingCache?.get_seq_length() ?? 0;
+            const split = checkpointTokens - cachedTokens;
+            if (split === 0 && workingCache) stagedCheckpoint = await this.reuseCache.snapshot(workingCache, Array.from((inputs.input_ids as Tensor).data, BigInt).slice(0, checkpointTokens), compatibility);
+            if (split > 0) {
+              const ids = modelInputs.input_ids; const positions = modelInputs.position_ids; const mask = modelInputs.attention_mask;
+              if (!(ids instanceof Tensor) || !(positions instanceof Tensor) || !(mask instanceof Tensor) || split >= ids.dims[1]!) throw new Error('Pinned decoder cannot split the retained conversation prefill safely');
+              // Keep upstream full-prompt RoPE positions, and expose only attended prefix tokens.
+              // Hybrid recurrent state cannot be truncated after the thinking-only generation prompt.
+              const prefixIds = ids.slice(null, [0, split]);
+              const prefixPositions = positions.slice(null, null, [0, split]);
+              const prefixMask = mask.slice(null, [0, checkpointTokens]);
+              const suffixIds = ids.slice(null, [split, ids.dims[1]!]);
+              const suffixPositions = positions.slice(null, null, [split, positions.dims[2]!]);
+              try {
+                signal?.throwIfAborted(); checkDeadline();
+                const prefixOutput = await originalForward.call(this.model, { ...modelInputs, input_ids: prefixIds, position_ids: prefixPositions, attention_mask: prefixMask });
+                latestOutputs = prefixOutput as unknown as Record<string, unknown>;
+                const entries: Record<string, Tensor> = {};
+                for (const [name, tensor] of Object.entries(latestOutputs)) if (name.startsWith('present') && tensor instanceof Tensor) entries[name.replace('present_conv', 'past_conv').replace('present_recurrent', 'past_recurrent').replace('present', 'past_key_values')] = tensor;
+                if (workingCache) workingCache.update(entries); else workingCache = new DynamicCache(entries);
+                stagedCheckpoint = await this.reuseCache.snapshot(workingCache, Array.from((inputs.input_ids as Tensor).data, BigInt).slice(0, checkpointTokens), compatibility);
+                signal?.throwIfAborted(); checkDeadline();
+                const suffixInputs: Record<string, unknown> = { ...modelInputs, input_ids: suffixIds, position_ids: suffixPositions, past_key_values: workingCache };
+                // Vision tokens have all been consumed in the conversation prefix.
+                delete suffixInputs.pixel_values;
+                const result = await originalForward.call(this.model, suffixInputs);
+                const cached = new Set(Object.values(workingCache));
+                for (const tensor of Object.values(latestOutputs)) if (tensor instanceof Tensor && !cached.has(tensor) && tensor.location !== 'none') tensor.dispose();
+                latestOutputs = result as unknown as Record<string, unknown>;
+                modelInputs.past_key_values = workingCache;
+                firstForward = false;
+                return result;
+              } finally { for (const tensor of [prefixIds, prefixPositions, prefixMask, suffixIds, suffixPositions]) tensor.dispose(); }
+            }
+          }
+          firstForward = false;
+          const result = await originalForward.call(this.model, modelInputs);
+          latestOutputs = result as unknown as Record<string, unknown>;
+          return result;
+        };
+        if (options.reuse.vision) this.model.encode_image = async (imageInputs: Record<string, unknown>) => {
+          const key = await inputVisionIdentity(imageInputs);
+          const cached = stagedFeatures.get(key) ?? this.reuseCache.feature(key);
+          if (cached) { reuse.visionEncoderHits++; return cached; }
+          reuse.visionEncoderMisses++;
+          const features: unknown = await originalEncodeImage.call(this.model, imageInputs);
+          if (!(features instanceof Tensor)) throw new Error('Vision encoder returned invalid features');
+          try { const owned = await this.reuseCache.snapshotFeature(features); stagedFeatures.set(key, owned); return owned; }
+          finally { features.dispose(); }
+        };
+      }
+      const result: InferenceResult = await atStage('generate', signal, async () => {
         checkDeadline();
+        finishReason = 'error'; chargedInput = true;
         if (budget) { budget.inputTokens += inputTokens; budget.remainingTokens -= inputTokens; }
-        output = await this.model.generate({ ...inputs, do_sample: settings.sampling, temperature: settings.temperature, top_k: settings.topK,
+        output = await this.model.generate({ ...inputs, ...(workingCache ? { past_key_values: workingCache } : {}), ...(options.reuse?.retainState ? { return_dict_in_generate: true } : {}), do_sample: settings.sampling, temperature: settings.temperature, top_k: settings.topK,
           repetition_penalty: settings.repetitionPenalty, no_repeat_ngram_size: settings.noRepeatNgramSize,
           max_new_tokens: maxNewTokens, stopping_criteria: stopping, logits_processor: processors, streamer,
         });
+        if (options.reuse?.retainState && typeof output === 'object' && output !== null && 'sequences' in output && 'past_key_values' in output) {
+          if (!(output.past_key_values instanceof DynamicCache)) throw new Error('Pinned generation returned invalid hybrid state');
+          workingCache = output.past_key_values;
+          output = output.sequences;
+        }
         if (structured) acceptStructured(incrementalDecoder ? structuredDecoded + incrementalDecoder.decode() : generated?.length ? this.processor.tokenizer!.decode(generated, { skip_special_tokens: true }) : '', true);
         buffer.end();
         if (callbackFailed) throw new NekoError(callbackError instanceof Error ? callbackError.message : String(callbackError), 'generate', 'OPERATION_FAILED', { cause: callbackError });
@@ -320,6 +443,7 @@ export class VisionEngine {
         const last = Number(output.data[output.data.length - 1]);
         const eos = this.model.generation_config?.eos_token_id;
         const stopped = explicitStop || (Array.isArray(eos) ? eos : [eos]).some((id) => id === last);
+        finishReason = stopped ? 'stop' : 'length';
         if (boundary && !boundary.complete && !boundary.invalid && !stopped && budget && budget.remainingTokens < 1 && maxNewTokens < (options.maxNewTokens ?? 128)) {
           throw new NekoError('Report aggregate token budget exhausted before completing structured output', 'generate', 'BUDGET_EXCEEDED');
         }
@@ -327,15 +451,50 @@ export class VisionEngine {
         if (boundary) {
           if (stopped) boundary.end();
           if (boundary.invalid || !boundary.complete) throw new NekoError('Generated text is not one complete JSON value', 'generate', 'STRUCTURED_OUTPUT');
-          try { JSON.parse(structuredDecoded); }
-          catch (cause) { throw new NekoError('Generated text is not valid JSON', 'generate', 'STRUCTURED_OUTPUT', { cause }); }
+          try { const value: unknown = JSON.parse(structuredDecoded); if (validationSchema) validateStructuredValue(validationSchema, value); }
+          catch (cause) { jsonPosition = jsonErrorPosition(cause); if (cause instanceof NekoError) throw cause; throw new NekoError('Generated text is not valid JSON', 'generate', 'STRUCTURED_OUTPUT', { cause }); }
         }
+        if (options.reuse?.retainState) {
+          if (!workingCache) throw new Error('Pinned generation did not expose reusable hybrid state');
+          // generate() returns the cache BEFORE its last sampled token, not the full returned sequence.
+          stagedState = await this.reuseCache.snapshot(workingCache, Array.from(output.data, BigInt).slice(0, -1), compatibility);
+        }
+        signal?.throwIfAborted(); checkDeadline();
         if (images.length) this.visionReady = true; else this.textReady = true;
         const now = performance.now();
         return { text: response, finishReason: stopped ? 'stop' : 'length', usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens }, model: this.identity, backend: this.loadedBackend(), ...(images.length ? { images } : {}),
-          timings: { loadMs: this.loadMs, preprocessMs: generationStarted - started, firstTokenMs, generationMs: now - generationStarted, totalMs: now - started }, memory: { jsHeapBytes: null, gpuBytes: null }, ...(prepared.preprocessing ? { preprocessing: prepared.preprocessing } : {}) };
+          timings: { loadMs: this.loadMs, preprocessMs: generationStarted - started, firstTokenMs, generationMs: now - generationStarted, totalMs: now - started }, memory: { jsHeapBytes: null, gpuBytes: null }, ...(prepared.preprocessing ? { preprocessing: prepared.preprocessing } : {}), ...(options.reuse ? { reuse } : {}) };
       });
+      signal?.throwIfAborted(); checkDeadline();
+      if (stagedState) { reuse.state = this.reuseCache.commitState(stagedState, stagedCheckpoint); stagedState = undefined; stagedCheckpoint = undefined; }
+      this.reuseCache.commitFeatures(stagedFeatures);
+      return result;
+    } catch (error) {
+      if (options.diagnostics) {
+        const text = structured ? structuredDecoded : response;
+        let locations: GenerationDiagnostic['schema'];
+        if (validationSchema && boundary?.complete && !boundary.invalid) {
+          try { locations = validationSchema.validator.validate(JSON.parse(text)).errors.map(({ keyword, keywordLocation, instanceLocation }) => ({ keyword, keywordLocation, instanceLocation })); } catch { /* Invalid JSON has no schema location. */ }
+        }
+        const input = chargedInput ? inputTokens : 0;
+        const diagnostic: GenerationDiagnostic = { version: 1, stageId: context.diagnosticStage?.id ?? (structured ? 'structured' : 'inference'), attempt: context.diagnosticStage?.attempt ?? 1, stage: error instanceof NekoError ? error.stage : 'generate', code: error instanceof NekoError ? error.code : 'OPERATION_FAILED', finishReason: signal?.aborted ? 'aborted' : finishReason, usage: { inputTokens: input, outputTokens, totalTokens: input + outputTokens }, outputCharacters: text.length, ...(boundary ? { json: { complete: boundary.complete, invalid: boundary.invalid, ...(jsonPosition !== undefined ? { position: jsonPosition } : !boundary.complete ? { position: text.length } : {}) } } : {}), ...(locations?.length ? { schema: locations } : {}), ...(budget ? { aggregateUsage: { inputTokens: budget.inputTokens, outputTokens: budget.outputTokens, totalTokens: budget.inputTokens + budget.outputTokens } } : {}) };
+        if (options.diagnostics !== true && options.diagnostics.capture) { const maxCharacters = options.diagnostics.capture.maxCharacters; diagnostic.capture = { output: text.slice(0, maxCharacters), truncated: text.length > maxCharacters, maxCharacters }; }
+        attachGenerationDiagnostic(error, diagnostic);
+      }
+      throw error;
     } finally {
+      if (ownsGeneration) {
+        this.model.forward = originalForward; this.model.encode_image = originalEncodeImage;
+        this.generating = false;
+      }
+      if (stagedState) this.reuseCache.discardState(stagedState);
+      if (stagedCheckpoint) this.reuseCache.discardState(stagedCheckpoint);
+      for (const tensor of stagedFeatures.values()) tensor.dispose();
+      if (options.reuse) {
+        const tensors = new Set<Tensor>(workingCache ? Object.values(workingCache) : []);
+        for (const value of Object.values(latestOutputs ?? {})) if (value instanceof Tensor) tensors.add(value);
+        for (const tensor of tensors) if (tensor.location !== 'none') tensor.dispose();
+      }
       if (budget?.timings) budget.timings.generationMs += performance.now() - generationStarted;
       signal?.removeEventListener('abort', interrupt);
       disposeInputs(inputs);
@@ -349,7 +508,7 @@ export class VisionEngine {
           const session: unknown = value;
           if (typeof session === 'object' && session !== null && 'endProfiling' in session && typeof session.endProfiling === 'function') session.endProfiling();
         }
-      } finally { this.tokenCache.clear(); this.imageCache.clear(); await this.model.dispose(); }
+      } finally { this.tokenCache.clear(); this.imageCache.clear(); this.reuseCache.clear(); await this.model.dispose(); }
     })();
     return this.disposePromise;
   }
