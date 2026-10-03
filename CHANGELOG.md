@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.0 — 2026-10-03
+
+- Add concurrent, resumable pinned-model downloads with validator-bound staging, cross-process/browser installation locks and explicit cache progress; preserve size/SHA-256 verification before promotion.
+- Add engine-local, entry/byte-bounded decoder-state and vision-feature reuse, opaque retained-state handles and explicit release/clear controls. Add opt-in generation/report diagnostics with bounded output capture; reuse does not imply backend parity or output-quality guarantees.
+- Add typed tool definitions, structured tool selection and separately invoked, approval-gated tool execution; model-selected calls never authorize handlers.
+- Add inert native PDF extraction, bounded PDF rendering and model-backed OCR composition, provenance-aware document indexes, local retrieval and multi-document questions with exact validated citations. Require Node.js 22.13 or newer and package browser PDF assets.
+- Add bounded structured/report/web-question/document-question streams and transactional session streaming; commit conversation history only after successful stream consumption.
+- Add bounded worker pools, cancellation-aware scheduling and batch results with independent worker ownership; this is not tensor batching.
+- Add a bilingual static project website with bounded preview routes. Expand CI contract coverage across OS/Node/browser matrices, packed-artifact checks and explicitly opt-in real CPU/WebGPU/quality lanes.
+- Verify typecheck, lint, build, 191 Node tests, 27 quality-tool tests, the static-site HTTP smoke, packed-consumer artifact checks and built public native-PDF extraction on macOS ARM64 with Node.js 26.7.0. These checks do not exercise real model inference, model-backed OCR, browser PDF extraction or the new remote CI matrix; no fresh model-quality or cross-platform parity pass is claimed.
+
 ## 1.4.0 — 2026-10-03
 
 - Add tokenizer-aware JSON constrained decoding for an explicit supported schema subset, inferred `SchemaValue` results and explicit validation-only fallback. Reject unsupported constrained schemas before model acquisition; handle integral exponent constants, finite unique-enum domains and UTF-8 token boundaries without weakening runtime validation.
