@@ -27,6 +27,9 @@ try {
   const packed = await runNpm(['pack', '--json', '--pack-destination', temporary], { cwd: root, maxBuffer: 4 * 1024 * 1024 });
   const [{ filename, files }] = JSON.parse(packed.stdout);
   const listed = new Set(files.map(({ path }) => path));
+  // File-sync conflict copies such as "pdf 3.mjs" can appear in a synced working tree; they must never ship.
+  const duplicates = [...listed].filter((path) => / \d+(\.[\w-]+)*$/.test(path.slice(path.lastIndexOf('/') + 1)));
+  if (duplicates.length) throw new Error(`Packed artifact contains sync-conflict duplicates: ${duplicates.slice(0, 5).join(', ')}`);
 
   const consumer = join(temporary, 'consumer');
   await mkdir(consumer);
@@ -166,6 +169,17 @@ try {
     '--moduleResolution', 'NodeNext', '--target', 'ES2022', '--lib', 'DOM,ESNext',
     typeFixture,
   ], { cwd: consumer, maxBuffer: 16 * 1024 * 1024 });
+  // A real bundler must resolve the browser conditions of every public entry without Node-only native modules.
+  const { build: bundle } = require('esbuild');
+  const bundled = await bundle({
+    stdin: { contents: "import * as neko from 'neko.js'; import * as documents from 'neko.js/documents'; import * as web from 'neko.js/web'; import * as report from 'neko.js/report'; export { neko, documents, web, report };", resolveDir: consumer, loader: 'js' },
+    bundle: true, platform: 'browser', format: 'esm', write: false, logLevel: 'silent', outdir: join(consumer, 'bundle-out'),
+  });
+  const bundledText = bundled.outputFiles.map((file) => file.text).join('\n');
+  if (!bundledText.includes('createDocumentIndex')) throw new Error('Browser bundle omitted the documents entry');
+  for (const native of ['onnxruntime-node', '@napi-rs/canvas', 'sharp']) {
+    if (bundledText.includes(`from "${native}"`) || bundledText.includes(`require("${native}")`)) throw new Error(`Browser bundle imported Node-only dependency ${native}`);
+  }
   const checks = `
     import * as neko from 'neko.js';
     import * as types from 'neko.js/types';
