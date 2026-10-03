@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 — 2026-10-03
 
 - **Fix (affects 1.5.0):** a first-use model download from Hugging Face could not complete. Observed against the live Hub on 2026-10-03: non-LFS files redirect same-origin to `/api/resolve-cache/models/<id>/<revision>/<file>`, which the default network policy denied (`POLICY_DENIED`), and interrupted CDN downloads could never resume because the signed redirect URL changes per request and was compared as part of the object location. The exact pinned model/revision/file `resolve-cache` path is now trusted (size/SHA-256 verification unchanged) and resume matches by origin and path, including partial staging written by 1.5.0. Verified by a complete live prefetch of the pinned default profile with every file SHA-256 checked.
 - **Fix (CI, Windows):** the 1.5.0 remote CI run failed 3 of 22 jobs, all `windows-2025`, in `npm run test:quality`. The CLI test built its script path from `URL.pathname` (`D:\D:\a\...`), and Git's CRLF conversion changed the byte-hashed quality fixtures (`LOCAL_FIXTURE_INTEGRITY`). The path now uses `fileURLToPath`, and `.gitattributes` marks `scripts/quality/fixtures/**` as `-text`. Linux and macOS locally pass 27/27; the Windows fix is not yet verified on a Windows runner.
