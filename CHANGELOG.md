@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 — 2026-10-03
 
 - Add tokenizer-aware JSON constrained decoding for an explicit supported schema subset, inferred `SchemaValue` results and explicit validation-only fallback. Reject unsupported constrained schemas before model acquisition; handle integral exponent constants, finite unique-enum domains and UTF-8 token boundaries without weakening runtime validation.
 - Add bounded AsyncIterable inference streams, transactional conversation sessions, context eviction, branching/reset and model-bound snapshots. Cache only exact rendered-prompt tokenization; do not claim growing-prefix or model KV-cache reuse.
