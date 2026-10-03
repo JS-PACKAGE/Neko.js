@@ -124,12 +124,15 @@ test('renders untrusted model text as inert Markdown and only links HTTP(S) prov
   const markdown = await page.evaluate(async () => {
     const { renderMarkdown } = await import('/report.js');
     return renderMarkdown({
+      schemaVersion: 2,
       language: 'en',
       imageFailurePolicy: 'error',
       page: { url: 'https://example.test', summary: '<img src=x onerror=alert(1)> [click](javascript:alert(1))' },
       sections: [{ heading: 'Heading', keyPoints: ['**bold** <svg/onload=alert(1)>'], paragraphIds: ['p1'] }],
       images: [{ imageId: 'i1', url: 'data:image/png;base64,AAAA', status: 'described', description: '![attack](javascript:alert(1)) <script>bad</script>', source: { kind: 'image', imageId: 'i1' }, alt: '<img>' }],
       conclusion: '[open](https://evil.test) & <b>unsafe</b>',
+      sourceFacts: [{ id: 'q1', citation: { kind: 'quote', paragraphId: 'p1', startOffset: 0, endOffset: 37, quote: '<script>alert(1)</script> [source](x)' } }],
+      metadata: { coverage: { selectedTextCharacters: 37, retainedTextCharacters: 37, retainedQuoteCount: 1, modelCitedFactIds: ['q1'], summaryCitedFactIds: ['q1'] } },
     });
   });
   expect(markdown).not.toContain('<img');
@@ -137,6 +140,7 @@ test('renders untrusted model text as inert Markdown and only links HTTP(S) prov
   expect(markdown).not.toMatch(/\]\(javascript:/i);
   expect(markdown).not.toMatch(/\]\(data:/i);
   expect(markdown).toContain('&lt;img');
+  expect(markdown).toContain('&lt;script');
   expect(markdown).toContain('i1');
   expect(markdown).toContain('p1');
 });

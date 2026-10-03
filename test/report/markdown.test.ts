@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { renderMarkdown, validateStructuredReport } from '../../src/report/index.js';
+import { renderMarkdown, validateStructuredReport, serializeStructuredReport, parseStructuredReport } from '../../src/report/index.js';
 import { snapshotPage } from '../../src/web/source.js';
 import { getModelProfile } from '../../src/cache/manifest.js';
 import { NekoError } from '../../src/errors.js';
 import type { Page, StructuredReport } from '../../src/types.js';
+import { reportChecksum, sourceCoverage } from '../../src/report/evidence.js';
 
 async function fixture(language = 'en', imageUrl = 'https://example.test/photo.png'): Promise<StructuredReport> {
   const page: Page = { url: 'about:blank', title: '<Source title>', paragraphs: [{ id: 'p1', text: 'The sky is blue.', source: { kind: 'html', startOffset: 10, endOffset: 26 } }, { id: 'p2', text: 'Unquoted navigation.', source: { kind: 'html' } }], images: [{ id: 'i1', url: imageUrl, alt: '<img src=x onerror=alert(1)>', discoveredBy: ['img'] }] };
@@ -14,7 +15,9 @@ async function fixture(language = 'en', imageUrl = 'https://example.test/photo.p
   const description = language === 'zh-TW' ? '圖片呈現紅色方形。' : 'A red square.';
   const quote = { kind: 'quote' as const, snapshotId: snapshot.id, paragraphId: 'p1', versionId: snapshot.paragraphs[0]!.versionId, startOffset: 0, endOffset: 16, quote: 'The sky is blue.' };
   const versionId = 'a'.repeat(64);
-  return {
+  const report: StructuredReport = {
+    schemaVersion: 2, integrity: { algorithm: 'sha256', checksum: '' },
+    sourceFacts: [{ id: 'q1', citation: quote }, { id: 'q2', citation: { kind: 'quote', snapshotId: snapshot.id, paragraphId: 'p2', versionId: snapshot.paragraphs[1]!.versionId, startOffset: 0, endOffset: page.paragraphs[1]!.text.length, quote: page.paragraphs[1]!.text } }],
     language, imageFailurePolicy: 'error', page: { url: page.url, title: page.title!, summary: text }, sections: [{ keyPoints: [text], paragraphIds: ['p1', 'p2'] }],
     images: [{ status: 'described', imageId: 'i1', url: imageUrl, alt: page.images[0]!.alt!, source: { kind: 'image', imageId: 'i1' }, description, observation: { versionId, width: 32, height: 32, verification: 'model-observation' } }],
     conclusion: text, snapshot,
@@ -22,8 +25,10 @@ async function fixture(language = 'en', imageUrl = 'https://example.test/photo.p
       ...['page.summary', 'sections[0].keyPoints[0]', 'conclusion'].map((target, index) => ({ id: `c${index}`, target, startOffset: 0, endOffset: text.length, citations: [quote], verification: 'references-validated' as const })),
       { id: 'image', target: 'images[0].description', startOffset: 0, endOffset: description.length, citations: [{ kind: 'image-observation', snapshotId: snapshot.id, imageId: 'i1', versionId }], verification: 'references-validated' },
     ],
-    metadata: { model: { id: profile.id, revision: profile.revision, profile: profile.profile, dtype: { ...profile.dtype } }, backend: { runtime: 'node', device: 'cpu', executionProviders: ['cpu'], gpuMemoryBytes: null, adapterEvidence: null, supported: true, capabilityEvidence: 'model-runtime-compatibility', providerEvidence: 'loaded-session-configuration', sessions: Object.entries(profile.dtype).map(([name, dtype]) => ({ name, dtype, device: 'cpu' })) }, usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, timings: { loadMs: 1, preprocessMs: 2, generationMs: 3, totalMs: 6, queueWaitMs: 0 }, memory: { jsHeapBytes: null, gpuBytes: null }, execution: { mode: 'inline', runtime: 'node' }, resumedStages: 0, evidence: 'references-validated-not-fact-checked' },
+    metadata: { model: { id: profile.id, revision: profile.revision, profile: profile.profile, dtype: { ...profile.dtype } }, backend: { runtime: 'node', device: 'cpu', executionProviders: ['cpu'], gpuMemoryBytes: null, adapterEvidence: null, supported: true, capabilityEvidence: 'model-runtime-compatibility', providerEvidence: 'loaded-session-configuration', sessions: Object.entries(profile.dtype).map(([name, dtype]) => ({ name, dtype, device: 'cpu' })) }, usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, timings: { loadMs: 1, preprocessMs: 2, generationMs: 3, totalMs: 6, queueWaitMs: 0 }, memory: { jsHeapBytes: null, gpuBytes: null }, execution: { mode: 'inline', runtime: 'node' }, resumedStages: 0, evidence: 'references-validated-not-fact-checked', coverage: { selectedParagraphIds: ['p1', 'p2'], selectedTextCharacters: 36, retainedQuoteCount: 2, retainedTextCharacters: 36, modelCitedFactIds: ['q1'], summaryCitedFactIds: ['q1'], conclusionBasis: 'retained-source', semanticRetention: 'not-measured' } },
   };
+  report.integrity.checksum = await reportChecksum(report);
+  return report;
 }
 
 test('persisted inline reports audit uncited source text without refetching', async () => {
@@ -77,6 +82,8 @@ test('failed-image reports preserve errors but cannot claim observations or succ
   const report = await fixture(); report.imageFailurePolicy = 'omit';
   report.images = [{ status: 'failed', imageId: 'i1', url: report.images[0]!.url, alt: report.images[0]!.alt!, source: { kind: 'image', imageId: 'i1' }, error: { stage: 'image', code: 'OPERATION_FAILED', message: '<decoder failed>' } }];
   report.claims = report.claims.filter(({ target }) => target !== 'images[0].description');
+  report.metadata.coverage = sourceCoverage(report.snapshot, report.sourceFacts, report.claims, 'retained-source');
+  report.integrity.checksum = await reportChecksum(report);
   await validateStructuredReport(report);
   assert.ok(renderMarkdown(report).includes('&lt;decoder failed&gt;'));
   await assert.rejects(validateStructuredReport({ ...report, imageFailurePolicy: 'error' }), TypeError);
@@ -89,4 +96,39 @@ test('Markdown escapes source HTML and refuses active-scheme provenance links', 
   assert.ok(markdown.includes('&lt;Source title&gt;'));
   assert.ok(!markdown.includes('<img'));
   assert.doesNotMatch(markdown, /\]\(javascript:/i);
+});
+
+test('versioned report persistence round-trips exact facts and rejects unknown versions and edited prose', async () => {
+  const original = await fixture();
+  const saved = await serializeStructuredReport(original);
+  const loaded = await parseStructuredReport(saved);
+  assert.deepEqual(loaded, original);
+  assert.equal(loaded.sourceFacts.map(({ citation }) => citation.quote).join(''), original.snapshot.source.paragraphs.map(({ text }) => text).join(''));
+  for (const schemaVersion of [undefined, 1, 3]) await assert.rejects(parseStructuredReport(JSON.stringify({ ...original, schemaVersion })), /Unsupported/);
+  const edited = structuredClone(original); edited.page.summary = 'The sea is blue.';
+  await assert.rejects(parseStructuredReport(JSON.stringify(edited)), TypeError);
+});
+
+test('ledger coverage rejects gaps, dropped quotes and false retention even with recomputed checksums', async () => {
+  const report = await fixture();
+  const dropped = structuredClone(report); dropped.sourceFacts.pop();
+  const gap = structuredClone(report); gap.sourceFacts[1]!.citation.startOffset = 1; gap.sourceFacts[1]!.citation.quote = gap.sourceFacts[1]!.citation.quote.slice(1);
+  const falseCoverage = structuredClone(report); falseCoverage.metadata.coverage.summaryCitedFactIds.push('q2');
+  for (const changed of [dropped, gap, falseCoverage]) {
+    changed.integrity.checksum = await reportChecksum(changed);
+    await assert.rejects(validateStructuredReport(changed), TypeError);
+  }
+  const markdown = renderMarkdown(report);
+  assert.ok(markdown.includes('Unquoted navigation'));
+  assert.ok(markdown.includes('not fact-checked'));
+});
+
+test('retained source quote markup remains inert in Markdown output', async () => {
+  const report = await fixture();
+  report.sourceFacts[1]!.citation.quote = '<img src=x onerror=alert(1)> [click](javascript:alert(1))';
+  const markdown = renderMarkdown(report);
+  assert.ok(markdown.includes('&lt;img src=x'));
+  assert.ok(!markdown.includes('<img'));
+  assert.doesNotMatch(markdown, /\]\(javascript:/i);
+  assert.throws(() => renderMarkdown({ ...report, schemaVersion: 1 } as unknown as StructuredReport), /Unsupported/);
 });

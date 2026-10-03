@@ -1,8 +1,8 @@
 import type { StructuredReport } from '../types.js';
 
-const LABELS: Record<string, { summary: string; sections: string; images: string; conclusion: string; source: string; failed: string }> = {
-  en: { summary: 'Summary', sections: 'Key points', images: 'Image descriptions', conclusion: 'Conclusion', source: 'Source', failed: 'Image description unavailable' },
-  zh: { summary: '頁面摘要', sections: '分段重點', images: '圖片描述', conclusion: '整體結論', source: '來源', failed: '無法產生圖片描述' },
+const LABELS: Record<string, { summary: string; sections: string; images: string; conclusion: string; source: string; failed: string; ledger: string; coverage: string; unverified: string }> = {
+  en: { summary: 'Summary', sections: 'Key points', images: 'Image descriptions', conclusion: 'Conclusion', source: 'Source', failed: 'Image description unavailable', ledger: 'Retained source quotes (verbatim, untrusted)', coverage: 'Source coverage', unverified: 'Generated text is not fact-checked. Quote retention and citations do not establish semantic retention.' },
+  zh: { summary: '頁面摘要', sections: '分段重點', images: '圖片描述', conclusion: '整體結論', source: '來源', failed: '無法產生圖片描述', ledger: '保留的原始引用（逐字、不可信）', coverage: '來源涵蓋', unverified: '生成文字未經事實查核。保留引用與引用 ID 不代表語義保留。' },
 };
 
 function markdownText(value: string): string {
@@ -27,6 +27,7 @@ function markdownUrl(value: string): string | undefined {
 }
 
 export function renderMarkdown(report: StructuredReport): string {
+  if (report.schemaVersion !== 2) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 2');
   const locale = report.language.toLowerCase();
   const labels = LABELS[locale] ?? (locale.startsWith('zh-') ? LABELS.zh! : LABELS.en!);
   const lines = [`# ${markdownText(report.page.title || report.page.url)}`, '', `## ${labels.summary}`, '', markdownText(report.page.summary), ''];
@@ -51,5 +52,9 @@ export function renderMarkdown(report: StructuredReport): string {
     }
   }
   lines.push(`## ${labels.conclusion}`, '', markdownText(report.conclusion));
+  lines.push('', `## ${labels.ledger}`, '');
+  for (const fact of report.sourceFacts) lines.push(`- ${markdownText(fact.id)} (${markdownText(fact.citation.paragraphId)}:${fact.citation.startOffset}–${fact.citation.endOffset}) — ${markdownText(fact.citation.quote)}`);
+  const coverage = report.metadata.coverage;
+  lines.push('', `## ${labels.coverage}`, '', `${coverage.retainedTextCharacters}/${coverage.selectedTextCharacters} UTF-16; ${coverage.retainedQuoteCount} quotes; model citations ${coverage.modelCitedFactIds.length}; summary citations ${coverage.summaryCitedFactIds.length}.`, '', labels.unverified);
   return `${lines.join('\n').trimEnd()}\n`;
 }

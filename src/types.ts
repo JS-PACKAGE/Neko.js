@@ -80,7 +80,27 @@ export type ReportImage = ReportImageSource & (
   | { status: 'failed'; error: { stage: ErrorStage; code: ErrorCode; message: string } }
 );
 
+export interface ReportSourceFact {
+  id: string;
+  /** Exact source text, not a generated interpretation or a verified real-world fact. */
+  citation: Extract<Citation, { kind: 'quote' }>;
+}
+export interface ReportCoverage {
+  selectedParagraphIds: string[];
+  /** Character counts use JavaScript UTF-16 offsets, like quote citations. */
+  selectedTextCharacters: number;
+  retainedQuoteCount: number;
+  retainedTextCharacters: number;
+  modelCitedFactIds: string[];
+  summaryCitedFactIds: string[];
+  conclusionBasis: 'retained-source' | 'reduced-generated-claims';
+  semanticRetention: 'not-measured';
+}
+
 export interface StructuredReport {
+  schemaVersion: 2;
+  integrity: { algorithm: 'sha256'; checksum: string };
+  sourceFacts: ReportSourceFact[];
   language: string;
   imageFailurePolicy: 'error' | 'omit';
   page: { url: string; title?: string; summary: string };
@@ -98,5 +118,6 @@ export interface StructuredReport {
     execution: ExecutionInfo;
     resumedStages: number;
     evidence: 'references-validated-not-fact-checked';
+    coverage: ReportCoverage;
   };
 }

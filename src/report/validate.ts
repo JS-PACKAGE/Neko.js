@@ -4,6 +4,7 @@ import { validateGeneratedLanguage } from './language.js';
 import { snapshotPage, validatePage } from '../web/source.js';
 import { getModelProfile } from '../cache/manifest.js';
 import type { PageSnapshot } from '../types.js';
+import { reportChecksum, sourceCoverage, validateSourceFacts } from './evidence.js';
 
 function object(value: unknown, name: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new TypeError(`${name} must be an object`);
@@ -18,6 +19,7 @@ function texts(value: unknown, name: string, allowEmpty = false): asserts value 
 
 function validateReportBody(report: unknown, page: Page): asserts report is StructuredReport {
   object(report, 'Report');
+  if (report.schemaVersion !== 2) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 2');
   text(report.language, 'Report language');
   try { Intl.getCanonicalLocales(report.language); } catch { throw new TypeError('Report language must be a valid BCP 47 language tag'); }
   if (report.imageFailurePolicy !== 'error' && report.imageFailurePolicy !== 'omit') throw new TypeError('Report imageFailurePolicy is invalid');
@@ -99,6 +101,8 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
   }
   const paragraphs = new Map(expected.source.paragraphs.map((paragraph) => [paragraph.id, paragraph]));
   const versions = new Map(expected.paragraphs.map((paragraph) => [paragraph.id, paragraph.versionId]));
+  validateSourceFacts(report.sourceFacts, expected);
+  const retainedQuotes = new Set(report.sourceFacts.map(({ citation }) => `${citation.paragraphId}:${citation.startOffset}:${citation.endOffset}`));
   const images = new Map(report.images.map((image) => [image.imageId, image]));
   const targets = new Map<string, string>([['page.summary', report.page.summary], ['conclusion', report.conclusion]]);
   for (const [index, section] of report.sections.entries()) for (const [point, value] of section.keyPoints.entries()) targets.set(`sections[${index}].keyPoints[${point}]`, value);
@@ -124,6 +128,9 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
       if (citation.kind === 'quote') {
         const paragraph = paragraphs.get(citation.paragraphId);
         if (!paragraph || citation.versionId !== versions.get(citation.paragraphId) || !Number.isSafeInteger(citation.startOffset) || !Number.isSafeInteger(citation.endOffset) || citation.startOffset < 0 || citation.endOffset <= citation.startOffset || citation.endOffset > paragraph.text.length || citation.quote !== paragraph.text.slice(citation.startOffset, citation.endOffset)) throw new TypeError('Citation quote, offsets, or paragraph version is invalid');
+        if (!retainedQuotes.has(`${citation.paragraphId}:${citation.startOffset}:${citation.endOffset}`)) throw new TypeError('Claim quote is absent from the retained source fact ledger');
+        const sectionTarget = /^sections\[(\d+)\]\.keyPoints\[\d+\]$/.exec(claim.target);
+        if (sectionTarget && !report.sections[Number(sectionTarget[1])]!.paragraphIds.includes(citation.paragraphId)) throw new TypeError('Section claim cites a paragraph outside its planned source');
         reference = `${citation.paragraphId}:${citation.startOffset}:${citation.endOffset}`;
       } else if (citation.kind === 'image-observation') {
         const image = images.get(citation.imageId);
@@ -163,13 +170,33 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
   if (sessions.size !== Object.keys(profile.dtype).length) throw new TypeError('Loaded session configuration is incomplete');
   object(report.metadata.execution, 'Report execution');
   if (!['inline', 'worker'].includes(report.metadata.execution.mode) || report.metadata.execution.runtime !== report.metadata.backend.runtime || report.metadata.execution.mode === 'worker' && typeof report.metadata.execution.workerId !== 'string' || !Number.isSafeInteger(report.metadata.resumedStages) || report.metadata.resumedStages < 0 || report.metadata.evidence !== 'references-validated-not-fact-checked') throw new TypeError('Report execution or evidence metadata is invalid');
+  object(report.metadata.coverage, 'Report coverage');
+  const coverage = report.metadata.coverage;
+  if (coverage.conclusionBasis !== 'retained-source' && coverage.conclusionBasis !== 'reduced-generated-claims') throw new TypeError('Conclusion source basis is invalid');
+  const expectedCoverage = sourceCoverage(expected, report.sourceFacts, report.claims, coverage.conclusionBasis);
+  for (const key of ['selectedParagraphIds', 'modelCitedFactIds', 'summaryCitedFactIds'] as const) if (!Array.isArray(coverage[key]) || coverage[key].length !== expectedCoverage[key].length || coverage[key].some((id, index) => id !== expectedCoverage[key][index])) throw new TypeError(`Report ${key} coverage is inconsistent`);
+  for (const key of ['selectedTextCharacters', 'retainedQuoteCount', 'retainedTextCharacters', 'semanticRetention'] as const) if (coverage[key] !== expectedCoverage[key]) throw new TypeError(`Report ${key} coverage is inconsistent`);
 }
 
 /** Audits persisted source hashes and exact references, not factual entailment or image pixels. */
 export async function validateStructuredReport(report: unknown, page?: Page): Promise<StructuredReport> {
-  object(report, 'Report'); object(report.snapshot, 'Report snapshot'); validatePage(report.snapshot.source);
+  object(report, 'Report');
+  if (report.schemaVersion !== 2) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 2');
+  object(report.snapshot, 'Report snapshot'); validatePage(report.snapshot.source);
   const [expected, external] = await Promise.all([snapshotPage(report.snapshot.source), page === undefined || page === report.snapshot.source ? undefined : snapshotPage(page)]);
   if (external && external.id !== expected.id) throw new TypeError('Report source differs from the supplied selected Page');
   validateReportBody(report, expected.source); validateEvidence(report, expected);
+  object(report.integrity, 'Report integrity');
+  digest(report.integrity.checksum, 'Report checksum');
+  if (report.integrity.algorithm !== 'sha256' || report.integrity.checksum !== await reportChecksum(report)) throw new TypeError('Report checksum is invalid; checksums are not authentication');
   return report;
+}
+
+export async function serializeStructuredReport(report: unknown, page?: Page): Promise<string> {
+  return JSON.stringify(await validateStructuredReport(report, page));
+}
+
+export async function parseStructuredReport(json: string, page?: Page): Promise<StructuredReport> {
+  if (typeof json !== 'string') throw new TypeError('Saved report must be JSON text');
+  return validateStructuredReport(JSON.parse(json) as unknown, page);
 }

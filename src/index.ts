@@ -13,7 +13,7 @@ import { createWorkerClient } from './runtime/client.js';
 import { selectPage } from './web/source.js';
 import { extractPage } from './web/extract.js';
 import { compileStructuredSchema } from './core/structured.js';
-import { setActiveRequest } from './runtime/context.js';
+import { setActiveRequest, workerExecution } from './runtime/context.js';
 import { validateInferenceOptions } from './core/preflight.js';
 
 export * from './types.js';
@@ -96,7 +96,7 @@ class LocalNeko implements Neko {
   private async use<T>(signal: AbortSignal, operation: (engine: VisionEngine) => Promise<T>): Promise<T> {
     return this.engines.use(async (engine) => { try { return await operation(engine); } finally { this.readiness = engine.readiness(); } }, signal);
   }
-  private execution(): ExecutionInfo { return { mode: 'inline', runtime: typeof process !== 'undefined' && process.release?.name === 'node' ? 'node' : 'browser' }; }
+  private execution(): ExecutionInfo { return workerExecution(this) ?? { mode: 'inline', runtime: typeof process !== 'undefined' && process.release?.name === 'node' ? 'node' : 'browser' }; }
   private checkRequest(stage: ErrorStage, signal?: AbortSignal): void {
     if (this.closed) throw new NekoError('Neko is disposed', stage, 'DISPOSED');
     if (signal instanceof AbortSignal && signal.aborted) throw new NekoError('Operation was cancelled', stage, 'ABORTED', { cause: signal.reason });

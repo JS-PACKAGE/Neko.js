@@ -1,6 +1,6 @@
 import type { Neko, NekoOptions } from '../index.js';
 import { NekoError } from '../errors.js';
-import { activeRequestSignal } from './context.js';
+import { activeRequestSignal, setWorkerExecution } from './context.js';
 import { aborted, decode, encode, encodeFailure, failure, type CallbackMode, type MainMessage, type MessagePort, type RequestMessage, type WorkerExecution, type WorkerMessage } from './protocol.js';
 
 interface Operation {
@@ -67,6 +67,7 @@ export function installWorkerServer(port: MessagePort<MainMessage, WorkerMessage
         creatingSignal = operation.controller.signal;
         initialized = create({ ...options, execution: 'inline', signal: operation.controller.signal });
         owner = await initialized;
+        setWorkerExecution(owner, execution);
         value = execution;
       } else if (message.method === 'dispose') {
         for (const [id, pending] of operations) if (id !== message.id) pending.controller.abort(new Error('Neko disposed'));
@@ -94,8 +95,7 @@ export function installWorkerServer(port: MessagePort<MainMessage, WorkerMessage
           case 'backend.detect': value = await instance.backend.detect(args[0] as Parameters<Neko['backend']['detect']>[0], signal); break;
         }
         if (value !== null && typeof value === 'object') {
-          if (message.method === 'describe' && 'metadata' in value) value = { ...value, metadata: { ...(value.metadata as Record<string, unknown>), execution } };
-          else if (message.method === 'infer' || message.method === 'inferStructured' || message.method === 'planInference' || message.method === 'load' || message.method === 'warmup' || message.method === 'runtimeStatus') value = { ...value, execution };
+          if (message.method === 'infer' || message.method === 'inferStructured' || message.method === 'planInference' || message.method === 'load' || message.method === 'warmup' || message.method === 'runtimeStatus') value = { ...value, execution };
         }
       }
       operation.finished = true;
