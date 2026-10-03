@@ -1,0 +1,2 @@
+# Quality fixtures are byte-hashed against an oracle; checkout must never normalize their line endings.
+scripts/quality/fixtures/** -text

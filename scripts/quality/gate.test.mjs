@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { MODEL_ID, MODEL_REVISION } from '../../dist/src/cache/manifest.js';
 import { ARTIFACT_VERSION, FIXTURE_VERSION, loadQualityContract } from './contract.mjs';
@@ -144,7 +145,7 @@ test('CLI emits structured diagnostics and exits nonzero for failed or invalid a
   const directory = await mkdtemp(join(tmpdir(), 'neko-quality-gate-'));
   try {
     const input = join(directory, 'input.json'); const output = join(directory, 'gate.json');
-    const command = new URL('./gate-cli.mjs', import.meta.url).pathname;
+    const command = fileURLToPath(new URL('./gate-cli.mjs', import.meta.url));
     await writeFile(input, JSON.stringify(goodArtifact()));
     await promisify(execFile)(process.execPath, [command, '--input', input, '--output', output]);
     assert.equal(JSON.parse(await readFile(output, 'utf8')).passed, true);
