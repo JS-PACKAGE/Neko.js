@@ -278,6 +278,8 @@ Handle 屬於 engine，不是可攜 snapshot；已釋放、淘汰或其他 engin
 
 以 `createNeko({ reuseCache: { stateEntries, stateBytes, visionEntries, visionBytes } })` 限制 entries／bytes（正 safe integers）。預設 4 個 state／512 MiB、8 個 vision entries／64 MiB。過大的 state／features 會失敗，已保留 entries 可被淘汰。`reuseCacheInfo()` 提供 accounting，engine 尚未取得時為 `null`；`releaseGenerationState(handle)` 釋放單一 state，`clearReuseCaches()` 清除兩種快取。釋放／dispose engine 會使 handle 失效。`scripts/smoke-reuse.mjs` 是明確執行的真實模型重用 exercise；檔案存在不代表已在你的後端通過。
 
+結構化呼叫（`inferStructured` 與報告階段）在固定 system 指令至少 32 個 token、請求僅含文字且未傳入 `reuse` 時，另外保留最多四個 engine 私有的 decoder state。它們不是 handle、不改變結果形狀、與 handle 分開計入 `stateBytes` 限制（過大者略過），並以 `prefixEntries`、`prefixBytes`、`prefixHits`、`prefixMisses` 出現在 `reuseCacheInfo()`；`clearReuseCaches()` 會清除它們。
+
 ### 生成診斷與生命週期事件
 
 ```ts
@@ -522,6 +524,8 @@ Checkpoint 的 `sectionPlan` 記錄依序排列的 source-fact ID 群組，每�
 ## 快取與後端
 
 模型 manifest 固定 Hugging Face revision、必要檔案大小與 SHA-256。每次使用快取前都會驗證；不符時會失敗，不會靜默當作 cache miss。`neko.cache.model.prefetch/status/clear` 僅操作這些固定檔案。瀏覽器 Cache Storage 仍受使用者操作與瀏覽器淘汰策略影響。
+
+在 Node 上，每個 ONNX payload 檔案每個已安裝的 runtime 只雜湊一次：Transformers.js 每次載入會多次要求這些檔案，因此未變動的檔案（device、inode、大小、mtime 與 ctime 皆相同；ctime 無法由呼叫端設定）在該 installation 內不會重複雜湊。新行程、檔案身分改變，以及所有非 ONNX 檔案仍完整驗證。Node session 使用 `os.availableParallelism()` 個 intra-op 執行緒。在一台 Apple M 系列機器（4 效能核心加 6 效率核心）上，416 token 的 prefill 由約 213–238 提升到約 290 tokens/s，decode 由約 28 降到約 25 tokens/s；這只是單機觀察、不是保證，最佳執行緒數取決於硬體。
 
 ### 並行下載與 validator-bound 續傳
 

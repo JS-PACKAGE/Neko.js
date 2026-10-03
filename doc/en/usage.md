@@ -280,6 +280,8 @@ Handles are engine-owned, not portable snapshots; released, evicted or foreign h
 
 Set `createNeko({ reuseCache: { stateEntries, stateBytes, visionEntries, visionBytes } })` to bound entries and bytes (positive safe integers). Defaults are 4 states / 512 MiB and 8 vision entries / 64 MiB. Oversized states/features fail; retained entries can be evicted. `reuseCacheInfo()` returns cache accounting or `null` before engine acquisition; `releaseGenerationState(handle)` releases one state and `clearReuseCaches()` clears both caches. Engine release/disposal invalidates handles. `scripts/smoke-reuse.mjs` is an explicit real-model reuse exercise; its presence is not a claim that it passed on your backend.
 
+Structured calls (`inferStructured` and report stages) additionally keep up to four engine-private decoder states for their fixed system instruction when it is at least 32 tokens, the request is text-only and no `reuse` option is given. They are never handles, do not change the result shape, count against the `stateBytes` limit separately from handles (an oversized one is skipped) and appear in `reuseCacheInfo()` as `prefixEntries`, `prefixBytes`, `prefixHits` and `prefixMisses`; `clearReuseCaches()` clears them.
+
 ### Generation diagnostics and lifecycle events
 
 ```ts
@@ -530,6 +532,8 @@ Checkpoint `sectionPlan` records ordered groups of one to four source-fact IDs c
 ## Cache and backend notes
 
 The model manifest fixes the Hugging Face revision and SHA-256/size of required files. Every cache hit is verified before use; mismatches fail instead of silently becoming misses. `neko.cache.model.prefetch/status/clear` operate on only these pinned files. Browser Cache Storage remains subject to browser user actions and eviction.
+
+On Node, each ONNX payload file is hashed once per installed runtime: Transformers.js requests these files several times per load, so an unchanged file (same device, inode, size, mtime and ctime; ctime cannot be set by callers) is not re-hashed within that installation. Every new process, any changed file identity and every non-ONNX file are verified in full. Node sessions use `os.availableParallelism()` intra-op threads. On one Apple M-series machine (4 performance + 6 efficiency cores) this raised 416-token prefill from about 213-238 to about 290 tokens/s and lowered decode from about 28 to about 25 tokens/s; these are single-machine observations, not a guarantee, and the best thread count depends on the hardware.
 
 ### Concurrent downloads and validator-bound resume
 

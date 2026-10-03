@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Performance: on Node, each pinned ONNX payload file is hashed once per installed runtime instead of four times per load (prefetch plus three loader requests); unchanged files are recognised by device, inode, size, mtime and ctime, and new processes still verify every byte. Measured warm model load fell from about 2.3 s to about 1.3 s on macOS arm64. The cache no longer calls `chmod` on files that already have mode `0600`, which would have advanced ctime.
+- Performance: Node ONNX sessions now use `os.availableParallelism()` intra-op threads. On a 4 performance + 6 efficiency core Apple machine this raised prefill about 25% (about 213-238 to about 290 tokens/s) and lowered decode about 12% (about 28 to about 25 tokens/s); the best value depends on hardware.
+- Performance: structured calls reuse an engine-private decoder state for their fixed system instruction (text-only, at least 32 tokens, no explicit `reuse`). Time to first token for a 115-token structured prompt fell from about 460-540 ms to about 130-160 ms on a hit, with identical output in the exercised cases. `reuseCacheInfo()` gains `prefixEntries`, `prefixBytes`, `prefixHits` and `prefixMisses`.
+- Performance: the constrained-decoding token trie uses typed arrays; building it for the 248,056-piece vocabulary took about 270 ms (was about 337 ms) and about 54 MB of external/array-buffer memory instead of about 230 MB of JavaScript heap.
+
 ## 1.6.0 — 2026-10-03
 
 - **Fix (affects 1.5.0):** a first-use model download from Hugging Face could not complete. Observed against the live Hub on 2026-10-03: non-LFS files redirect same-origin to `/api/resolve-cache/models/<id>/<revision>/<file>`, which the default network policy denied (`POLICY_DENIED`), and interrupted CDN downloads could never resume because the signed redirect URL changes per request and was compared as part of the object location. The exact pinned model/revision/file `resolve-cache` path is now trusted (size/SHA-256 verification unchanged) and resume matches by origin and path, including partial staging written by 1.5.0. Verified by a complete live prefetch of the pinned default profile with every file SHA-256 checked.
