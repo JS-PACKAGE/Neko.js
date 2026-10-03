@@ -103,3 +103,50 @@ test('cancellation stops a pending streamed HTML response', async (t) => {
   const extraction = extractPage(`http://127.0.0.1:${address.port}/stream`, { signal: controller.signal });
   await started; controller.abort(); await assert.rejects(extraction, { name: 'AbortError' });
 });
+
+test('structured tables retain captions, spans, exact source offsets and paragraph/header relations', async () => {
+  const html = '<main><section><h2>Counts 🌳</h2><table><caption>Tree counts</caption><thead><tr><th id="name" scope="col" rowspan="2">Species</th><th scope="colgroup" colspan="2">Trees</th></tr><tr><th id="old" scope="col">Old</th><th scope="col">New</th></tr></thead><tbody><tr><th id="oak" scope="row">Oak</th><td headers="oak old">4</td><td>2</td></tr></tbody></table></section></main>';
+  const page = await extractPage(html);
+  const table = page.tables![0]!;
+  assert.equal(table.caption!.text, 'Tree counts');
+  assert.equal(table.rowCount, 3); assert.equal(table.columnCount, 3);
+  const species = table.cells[0]!;
+  assert.equal(species.rowSpan, 2);
+  const grouped = table.cells[1]!;
+  assert.equal(grouped.columnSpan, 2);
+  const four = table.cells.find((cell) => cell.paragraphIds.some((id) => page.paragraphs.find((paragraph) => paragraph.id === id)?.text === '4'))!;
+  assert.deepEqual([four.row, four.column], [2, 1]);
+  assert.equal(four.rowHeaderIds.length, 1); assert.equal(four.columnHeaderIds.length, 1);
+  assert.deepEqual(new Set(four.headerIds), new Set([...four.rowHeaderIds, ...four.columnHeaderIds]));
+  const paragraph = page.paragraphs.find(({ id }) => id === four.paragraphIds[0])!;
+  assert.equal(page.containers!.find(({ id }) => id === paragraph.containerId)!.kind, 'td');
+  assert.equal(page.containers!.find(({ id }) => id === paragraph.sectionId)!.kind, 'section');
+  assert.equal(html.slice(paragraph.source.startOffset, paragraph.source.endOffset), '<td headers="oak old">4</td>');
+  assert.equal(html.slice(table.source.startOffset, table.source.endOffset).startsWith('<table>'), true);
+});
+
+test('main extraction is opt-in and ambiguous or empty landmarks conservatively fall back', async () => {
+  const html = '<nav><p>Navigation</p></nav><main><p>Article 🌳</p><img src="/main.png"></main><footer><p>Footer</p><img src="/footer.png"></footer>';
+  const full = await extractPage(html, { baseUrl: 'https://example.test' });
+  assert.deepEqual(full.paragraphs.map(({ text }) => text), ['Navigation', 'Article 🌳', 'Footer']);
+  const main = await extractPage(html, { content: 'main', baseUrl: 'https://example.test' });
+  assert.deepEqual(main.paragraphs.map(({ text }) => text), ['Article 🌳']);
+  assert.deepEqual(main.images.map(({ url }) => url), ['https://example.test/main.png']);
+  assert.deepEqual(main.extraction, { mode: 'main', root: 'main', fallback: false });
+  assert.equal(html.slice(main.paragraphs[0]!.source.startOffset, main.paragraphs[0]!.source.endOffset), '<p>Article 🌳</p>');
+  assert.equal((await extractPage('<article><p>Only article</p></article>', { content: 'main' })).extraction!.root, 'article');
+  const ambiguous = await extractPage('<main><p>One</p></main><main><p>Two</p></main>', { content: 'main' });
+  assert.deepEqual(ambiguous.paragraphs.map(({ text }) => text), ['One', 'Two']);
+  assert.equal(ambiguous.extraction!.fallback, true);
+  assert.equal((await extractPage('<main hidden><p>Hidden</p></main><p>Visible</p>', { content: 'main' })).extraction!.fallback, true);
+  await assert.rejects(extractPage(html, { content: 'unknown' as 'main' }), /content must be/);
+});
+
+test('table rowSpan zero stops at the row group and nested tables retain source ownership', async () => {
+  const page = await extractPage('<table><tbody><tr><th rowspan="0" scope="rowgroup">Group</th><td><table><tr><td>Nested</td></tr></table></td></tr><tr><td>Next</td></tr></tbody><tbody><tr><td>Other</td></tr></tbody></table>');
+  assert.equal(page.tables![0]!.cells[0]!.rowSpan, 2);
+  assert.equal(page.tables!.length, 2);
+  const nested = page.paragraphs.find(({ text }) => text === 'Nested')!;
+  assert.ok(page.tables![0]!.paragraphIds.includes(nested.id));
+  assert.ok(page.tables![1]!.paragraphIds.includes(nested.id));
+});

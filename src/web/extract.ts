@@ -1,5 +1,5 @@
 import { parse } from 'parse5';
-import type { ImageDiscovery, Page, PageImage, Paragraph } from '../types.js';
+import type { ImageDiscovery, Page, PageImage, Paragraph, PageContainer, PageTable, TableCell } from '../types.js';
 import { policyDestination } from './policy.js';
 import type { ResourcePolicy } from './policy.js';
 import { awaitUser } from '../errors.js';
@@ -7,6 +7,8 @@ import { awaitUser } from '../errors.js';
 export interface ExtractOptions {
   baseUrl?: string;
   includeImages?: boolean;
+  /** Prefer a unique visible main/article; ambiguous or empty candidates fall back to full body extraction. */
+  content?: 'full' | 'main';
   signal?: AbortSignal;
   maxHtmlBytes?: number;
   maxImages?: number;
@@ -14,10 +16,8 @@ export interface ExtractOptions {
   timeoutMs?: number;
   /** Called before each HTTP(S) request, including redirects; applications must enforce their own network policy. */
   validateDestination?: (url: URL) => void | Promise<void>;
-  /** Instance-owned restrictions; SDK methods overwrite these fields. */
-  _policy?: ResourcePolicy;
-  _offline?: boolean;
 }
+export interface ExtractContext { policy?: ResourcePolicy | undefined; offline?: boolean | undefined; }
 
 interface HtmlNode {
   nodeName: string;
@@ -32,7 +32,7 @@ interface HtmlNode {
 const blockedTextTags: Record<string, true> = { script: true, style: true, noscript: true, template: true, svg: true, canvas: true, head: true };
 const textBlockTags: Record<string, true> = {
   h1: true, h2: true, h3: true, h4: true, h5: true, h6: true, p: true, li: true, blockquote: true,
-  figcaption: true, td: true, th: true, dt: true, dd: true,
+  figcaption: true, caption: true, td: true, th: true, dt: true, dd: true,
 };
 const flowContainerTags: Record<string, true> = { div: true, section: true, article: true, main: true, header: true, footer: true, aside: true, nav: true };
 const defaultHtmlLimit = 2 * 1024 * 1024;
@@ -127,32 +127,77 @@ function location(node: HtmlNode): Paragraph['source'] {
     : { kind: 'html' };
 }
 
-function extractParagraphs(document: HtmlNode): Paragraph[] {
+function visible(node: HtmlNode): boolean {
+  return !(node.tagName && blockedTextTags[node.tagName]) && attr(node, 'hidden') === undefined && attr(node, 'aria-hidden')?.toLowerCase() !== 'true';
+}
+
+function contentRoot(document: HtmlNode, mode: 'full' | 'main'): { node: HtmlNode; extraction: NonNullable<Page['extraction']> } {
+  const body = findFirst(document, 'body') ?? document;
+  if (mode === 'main') {
+    for (const tag of ['main', 'article'] as const) {
+      const candidates: HtmlNode[] = [];
+      const visit = (node: HtmlNode): void => {
+        if (!visible(node)) return;
+        if (node.tagName === tag && normalizeText(textContent(node))) { candidates.push(node); return; }
+        for (const child of node.childNodes ?? []) visit(child);
+      };
+      visit(body);
+      if (candidates.length === 1) return { node: candidates[0]!, extraction: { mode, root: tag, fallback: false } };
+      if (candidates.length > 1) break;
+    }
+  }
+  return { node: body, extraction: { mode, root: 'body', fallback: mode === 'main' } };
+}
+
+function extractStructure(root: HtmlNode): Pick<Page, 'paragraphs' | 'containers' | 'tables'> {
   const paragraphs: Paragraph[] = [];
+  const containers: PageContainer[] = [];
+  const containerNodes = new Map<HtmlNode, PageContainer>();
+  const paragraphNodes = new Map<HtmlNode, string[]>();
+  const tables: HtmlNode[] = [];
+  const prepare = (node: HtmlNode, parent?: PageContainer): void => {
+    if (!visible(node)) return;
+    const tag = node.tagName;
+    let container = parent;
+    if (tag && (flowContainerTags[tag] || ['body', 'figure', 'table', 'td', 'th', 'ul', 'ol'].includes(tag))) {
+      container = { id: `c${containers.length + 1}`, kind: tag, ...(parent ? { parentId: parent.id } : {}), paragraphIds: [], source: location(node) };
+      containers.push(container); containerNodes.set(node, container);
+    }
+    if (tag === 'table') tables.push(node);
+    for (const child of node.childNodes ?? []) prepare(child, container);
+  };
+  prepare(root);
   let heading: string | undefined;
   let bufferedText = '';
   let bufferStart: number | undefined;
   let bufferEnd: number | undefined;
+  let bufferNode: HtmlNode | undefined;
+  const add = (node: HtmlNode, text: string, source: Paragraph['source']): void => {
+    let container: PageContainer | undefined;
+    let section: PageContainer | undefined;
+    const id = `p${paragraphs.length + 1}`;
+    for (let current: HtmlNode | undefined = node; current; current = current.parentNode) {
+      const ids = paragraphNodes.get(current) ?? []; ids.push(id); paragraphNodes.set(current, ids);
+      const owner = containerNodes.get(current);
+      if (owner) {
+        owner.paragraphIds.push(id); container ??= owner;
+        if (!section && ['section', 'article', 'main'].includes(owner.kind)) section = owner;
+      }
+      if (current === root) break;
+    }
+    paragraphs.push({ id, text, ...(heading ? { heading } : {}), ...(container ? { containerId: container.id } : {}), ...(section ? { sectionId: section.id } : {}), source });
+  };
   const flushText = (): void => {
     const value = normalizeText(bufferedText);
-    if (value) {
-      const source: Paragraph['source'] = {
-        kind: 'html',
-        ...(bufferStart === undefined ? {} : { startOffset: bufferStart }),
-        ...(bufferEnd === undefined ? {} : { endOffset: bufferEnd }),
-      };
-      paragraphs.push({ id: `p${paragraphs.length + 1}`, text: value, ...(heading ? { heading } : {}), source });
-    }
-    bufferedText = '';
-    bufferStart = undefined;
-    bufferEnd = undefined;
+    if (value && bufferNode) add(bufferNode, value, { kind: 'html', ...(bufferStart === undefined ? {} : { startOffset: bufferStart, endOffset: bufferEnd! }) });
+    bufferedText = ''; bufferStart = undefined; bufferEnd = undefined; bufferNode = undefined;
   };
+  const hasTable = (node: HtmlNode): boolean => (node.childNodes ?? []).some((child) => visible(child) && (child.tagName === 'table' || hasTable(child)));
   const visit = (node: HtmlNode): void => {
+    if (!visible(node)) return;
     const tag = node.tagName;
-    if (tag && blockedTextTags[tag]) return;
-    if (attr(node, 'hidden') !== undefined || attr(node, 'aria-hidden')?.toLowerCase() === 'true') return;
     if (node.nodeName === '#text') {
-      bufferedText += node.value ?? '';
+      bufferedText += node.value ?? ''; bufferNode ??= node;
       if (node.sourceCodeLocation) {
         bufferStart = bufferStart === undefined ? node.sourceCodeLocation.startOffset : Math.min(bufferStart, node.sourceCodeLocation.startOffset);
         bufferEnd = bufferEnd === undefined ? node.sourceCodeLocation.endOffset : Math.max(bufferEnd, node.sourceCodeLocation.endOffset);
@@ -160,33 +205,90 @@ function extractParagraphs(document: HtmlNode): Paragraph[] {
       return;
     }
     if (tag && /^h[1-6]$/.test(tag)) {
-      flushText();
-      const value = normalizeText(textContent(node));
-      if (value) {
-        heading = value;
-        paragraphs.push({ id: `p${paragraphs.length + 1}`, text: value, heading: value, source: location(node) });
-      }
+      flushText(); const value = normalizeText(textContent(node));
+      if (value) { heading = value; add(node, value, location(node)); }
       return;
     }
-    if (tag && textBlockTags[tag]) {
-      flushText();
-      const value = normalizeText(textContent(node));
-      if (value) paragraphs.push({ id: `p${paragraphs.length + 1}`, text: value, ...(heading ? { heading } : {}), source: location(node) });
+    if (tag && textBlockTags[tag] && !hasTable(node)) {
+      flushText(); const value = normalizeText(textContent(node));
+      if (value) add(node, value, location(node));
       return;
     }
-    if (tag && flowContainerTags[tag]) flushText();
+    const boundary = !!tag && (!!flowContainerTags[tag] || ['table', 'tr', 'td', 'th', 'caption'].includes(tag));
+    if (boundary) flushText();
     for (const child of node.childNodes ?? []) visit(child);
-    if (tag && flowContainerTags[tag]) flushText();
+    if (boundary) flushText();
   };
-  let body: HtmlNode | undefined;
-  const findBody = (node: HtmlNode): void => {
-    if (node.tagName === 'body') { body = node; return; }
-    for (const child of node.childNodes ?? []) if (!body) findBody(child);
-  };
-  findBody(document);
-  visit(body ?? document);
-  flushText();
-  return paragraphs;
+  visit(root); flushText();
+  const structuredTables = tables.map((table, index): PageTable => {
+    const rows: { node: HtmlNode; group: HtmlNode }[] = [];
+    const gatherRows = (node: HtmlNode, group: HtmlNode): void => {
+      for (const child of node.childNodes ?? []) {
+        if (!visible(child) || child.tagName === 'table') continue;
+        if (child.tagName === 'tr') rows.push({ node: child, group });
+        else gatherRows(child, ['thead', 'tbody', 'tfoot'].includes(child.tagName ?? '') ? child : group);
+      }
+    };
+    gatherRows(table, table);
+    const cells: TableCell[] = [];
+    const nodes = new Map<HtmlNode, TableCell>();
+    const occupied = new Map<number, number>();
+    const rowGroups = new Map<HtmlNode, number>();
+    const span = (node: HtmlNode, name: string, maximum: number): number => {
+      const raw = attr(node, name)?.trim();
+      const value = raw && /^\d+$/.test(raw) ? Number(raw) : 1;
+      return Number.isSafeInteger(value) ? Math.max(1, Math.min(maximum, value)) : 1;
+    };
+    let columnCount = 0;
+    for (let row = 0; row < rows.length; row++) {
+      let column = 0;
+      const entry = rows[row]!;
+      if (!rowGroups.has(entry.group)) rowGroups.set(entry.group, rowGroups.size);
+      for (const node of entry.node.childNodes ?? []) {
+        if (!visible(node) || !['td', 'th'].includes(node.tagName ?? '')) continue;
+        const columnSpan = span(node, 'colspan', 1000);
+        let fits = false;
+        while (!fits) {
+          fits = true;
+          for (let offset = 0; offset < columnSpan; offset++) if ((occupied.get(column + offset) ?? 0) > row) { fits = false; column++; break; }
+        }
+        let groupRows = 1;
+        while (row + groupRows < rows.length && rows[row + groupRows]!.group === entry.group) groupRows++;
+        const rowSpan = attr(node, 'rowspan')?.trim() === '0' ? groupRows : span(node, 'rowspan', Math.min(65534, groupRows));
+        const scope = node.tagName === 'th' ? attr(node, 'scope')?.toLowerCase() : undefined;
+        const cell: TableCell = { id: `t${index + 1}r${row + 1}c${column + 1}`, row, rowGroup: rowGroups.get(entry.group)!, column, rowSpan, columnSpan, kind: node.tagName === 'th' ? 'header' : 'data', ...(['row', 'col', 'rowgroup', 'colgroup'].includes(scope ?? '') ? { scope: scope as NonNullable<TableCell['scope']> } : {}), paragraphIds: paragraphNodes.get(node) ?? [], rowHeaderIds: [], columnHeaderIds: [], headerIds: [], source: location(node) };
+        cells.push(cell); nodes.set(node, cell);
+        for (let offset = 0; offset < columnSpan; offset++) occupied.set(column + offset, row + rowSpan);
+        column += columnSpan; columnCount = Math.max(columnCount, column);
+      }
+    }
+    const htmlIds = new Map<string, TableCell>();
+    const duplicateIds = new Set<string>();
+    for (const [node, cell] of nodes) {
+      const id = attr(node, 'id');
+      if (id) { if (htmlIds.has(id)) duplicateIds.add(id); else htmlIds.set(id, cell); }
+    }
+    for (const [node, cell] of nodes) {
+      const explicit = attr(node, 'headers');
+      if (explicit !== undefined) {
+        cell.headerIds = [...new Set(explicit.split(/\s+/).map((id) => duplicateIds.has(id) ? undefined : htmlIds.get(id)).filter((header): header is TableCell => !!header && header.kind === 'header' && header !== cell).map(({ id }) => id))];
+      }
+      for (const header of cells) {
+        if (header.kind !== 'header' || header === cell || (explicit !== undefined && !cell.headerIds.includes(header.id))) continue;
+        const rowOverlap = header.row < cell.row + cell.rowSpan && cell.row < header.row + header.rowSpan;
+        const columnOverlap = header.column < cell.column + cell.columnSpan && cell.column < header.column + header.columnSpan;
+        const sameGroup = rows[header.row]?.group === rows[cell.row]?.group;
+        if ((header.scope === 'rowgroup' && sameGroup) || ((header.scope === 'row' || !header.scope) && rowOverlap && header.column < cell.column)) cell.rowHeaderIds.push(header.id);
+        if (header.scope === 'colgroup' ? columnOverlap : (header.scope === 'col' || !header.scope) && columnOverlap && header.row < cell.row) cell.columnHeaderIds.push(header.id);
+      }
+      if (explicit === undefined) cell.headerIds = [...new Set([...cell.rowHeaderIds, ...cell.columnHeaderIds])];
+    }
+    const captionNode = (table.childNodes ?? []).find((node) => node.tagName === 'caption' && visible(node));
+    const captionText = captionNode ? normalizeText(textContent(captionNode)) : '';
+    const owner = containerNodes.get(table);
+    return { id: `t${index + 1}`, ...(owner ? { containerId: owner.id } : {}), ...(captionNode && captionText ? { caption: { text: captionText, paragraphIds: paragraphNodes.get(captionNode) ?? [], source: location(captionNode) } } : {}), rowCount: rows.length, columnCount, cells, paragraphIds: paragraphNodes.get(table) ?? [], source: location(table) };
+  });
+  return { paragraphs, containers, tables: structuredTables };
 }
 
 function collectImages(root: HtmlNode, pageUrl: string, maxImages: number): PageImage[] {
@@ -321,19 +423,20 @@ export async function fetchLimited(url: string, maxBytes: number, timeoutMs: num
   };
 }
 
-export async function extractPage(input: string, options: ExtractOptions = {}): Promise<Page> {
+export async function extractPage(input: string, options: ExtractOptions = {}, context: ExtractContext = {}): Promise<Page> {
   const maxHtmlBytes = options.maxHtmlBytes ?? defaultHtmlLimit;
   const maxImages = options.maxImages ?? defaultImageCount;
   const timeoutMs = options.timeoutMs ?? defaultTimeout;
   if (!Number.isSafeInteger(maxHtmlBytes) || maxHtmlBytes < 1) throw new RangeError('maxHtmlBytes must be a positive safe integer');
   if (!Number.isSafeInteger(maxImages) || maxImages < 0) throw new RangeError('maxImages must be a non-negative safe integer');
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new RangeError('timeoutMs must be between 1 and 2147483647');
+  if (options.content !== undefined && options.content !== 'full' && options.content !== 'main') throw new TypeError('content must be full or main');
   let html: string;
   let pageUrl = options.baseUrl ?? '';
   if (/^[a-z][a-z\d+.-]*:\/\//i.test(input.trim())) {
     const source = new URL(input);
     if (source.protocol !== 'http:' && source.protocol !== 'https:') throw new TypeError('Only http and https URLs are supported');
-    const destination = options._policy ? policyDestination(options._policy, 'page', options._offline, options.validateDestination, options.signal) : options.validateDestination;
+    const destination = context.policy ? policyDestination(context.policy, 'page', context.offline, options.validateDestination, options.signal) : options.validateDestination;
     const result = await fetchLimited(source.href, maxHtmlBytes, timeoutMs, options.signal, destination);
     if (!['text/html', 'application/xhtml+xml'].includes(result.contentType)) throw new TypeError(`Expected an HTML response, got ${result.contentType || 'unknown content type'}`);
     pageUrl = result.url;
@@ -352,9 +455,10 @@ export async function extractPage(input: string, options: ExtractOptions = {}): 
   const document = parse(html, { scriptingEnabled: false, sourceCodeLocationInfo: true }) as unknown as HtmlNode;
   const titleNode = findFirst(document, 'title');
   const title = titleNode ? normalizeText(textContent(titleNode)) : '';
-  const paragraphs = extractParagraphs(document);
-  const images = options.includeImages === false ? [] : collectImages(document, pageUrl, maxImages);
-  return { url: pageUrl || options.baseUrl || 'about:blank', ...(title ? { title } : {}), paragraphs, images };
+  const root = contentRoot(document, options.content ?? 'full');
+  const structure = extractStructure(root.node);
+  const images = options.includeImages === false ? [] : collectImages(root.extraction.root === 'body' ? document : root.node, pageUrl, maxImages);
+  return { url: pageUrl || options.baseUrl || 'about:blank', ...(title ? { title } : {}), ...structure, images, extraction: root.extraction };
 }
 
 function findFirst(node: HtmlNode, tag: string): HtmlNode | undefined {
