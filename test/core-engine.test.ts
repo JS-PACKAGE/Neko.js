@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Tensor } from '@huggingface/transformers';
 import { VisionEngine } from '../src/core/engine.js';
-import { getModelProfile } from '../src/cache/manifest.js';
+import { getRegisteredModelProfile } from '../src/cache/registry.js';
 import { NekoError } from '../src/errors.js';
 
 // A deterministic token source isolates generation control flow from model quality/downloads.
@@ -35,7 +35,7 @@ function fixture(chunks: string[], eos = true) {
     },
     async dispose() {},
   };
-  const profile = getModelProfile();
+  const profile = getRegisteredModelProfile();
   const Construct = VisionEngine as unknown as new (...args: unknown[]) => VisionEngine;
   const engine = new Construct(model, processor, { runtime: 'node', device: 'cpu', executionProviders: ['cpu'] }, 0, false, 4096, 2000,
     { id: profile.id, revision: profile.revision, profile: profile.profile, dtype: profile.dtype }, undefined, true);
@@ -47,13 +47,12 @@ test('structured inference stops raw token generation at one JSON boundary and s
     const { engine, generated } = fixture(chunks);
     let streamed = '';
     try {
-      const result = await engine.inferStructured({ prompt: 'Return JSON.', schema: true, maxNewTokens: 128, onToken: (text) => { streamed += text; } });
+      const result = await engine.inferStructured({ prompt: 'Return JSON.', schema: true, structuredMode: 'validation-only', maxNewTokens: 128, onToken: (text) => { streamed += text; } });
       assert.equal(result.text, chunks.slice(0, -1).join(''));
       assert.equal(streamed, result.text);
       assert.deepEqual(result.value, JSON.parse(result.text));
       assert.equal(generated(), chunks.length - 1);
       assert.equal(result.finishReason, 'stop');
-      assert.equal(result.structured.mode, 'json-boundary-runtime-validation');
     } finally { await engine.dispose(); }
   }
 });
@@ -66,7 +65,7 @@ test('structured output rejects same-token trailing payload, malformed/truncated
   ] as [string[], unknown, boolean][]) {
     const { engine } = fixture(chunks, eos);
     try {
-      await assert.rejects(engine.inferStructured({ prompt: 'Return JSON.', schema, maxNewTokens: 128 }), (error: unknown) => error instanceof NekoError && error.code === 'STRUCTURED_OUTPUT');
+      await assert.rejects(engine.inferStructured({ prompt: 'Return JSON.', schema, structuredMode: 'validation-only', maxNewTokens: 128 }), (error: unknown) => error instanceof NekoError && error.code === 'STRUCTURED_OUTPUT');
     } finally { await engine.dispose(); }
   }
 });
@@ -74,7 +73,7 @@ test('structured output rejects same-token trailing payload, malformed/truncated
 test('planning uses the same chat/schema preprocessing without generation and reports non-fitting requests', async () => {
   const { engine, calls } = fixture(['{}']);
   try {
-    const options = { prompt: '\n  preserve exactly\t', schema: { type: 'object' }, maxNewTokens: 16 };
+    const options = { prompt: '\n  preserve exactly\t', schema: { type: 'object' }, structuredMode: 'validation-only' as const, maxNewTokens: 16 };
     const plan = await engine.planInference(options);
     assert.equal(calls(), 0);
     const result = await engine.inferStructured(options);

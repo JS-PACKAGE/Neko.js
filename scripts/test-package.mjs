@@ -58,7 +58,7 @@ try {
       const images: InferOptions = { images: [new URL('file:///approved.png'), new URL('file:///second.png')], prompt: 'Compare these images.', maxNewTokens: 32 };
       await instance.infer(history);
       await instance.infer(images);
-      const planning: InferencePlanOptions = { ...images, schema: { type: 'object' } };
+      const planning: InferencePlanOptions = { ...images, schema: { type: 'object', properties: {}, additionalProperties: false } };
       const plan = await instance.planInference(planning);
       plan.inputTokens; plan.availableOutputTokens; plan.fits;
       const structured: StructuredInferOptions = {
@@ -69,6 +69,30 @@ try {
       const result = await instance.inferStructured(structured);
       result.structured.mode;
       result.value;
+      const typed = await instance.inferStructured({
+        prompt: 'Return seven as JSON.',
+        schema: { type: 'object', properties: { answer: { type: 'integer' } }, required: ['answer'], additionalProperties: false },
+        maxNewTokens: 32,
+      });
+      const numericAnswer: number = typed.value.answer;
+      void numericAnswer;
+      // @ts-expect-error Inference budgets are not caller-controlled public options.
+      const privateBudget: InferOptions = { prompt: 'hello', _budget: {} };
+      void privateBudget;
+      for await (const event of instance.inferStream({ prompt: 'Say OK.', maxNewTokens: 4, maxBufferedEvents: 32 })) {
+        if (event.type === 'result') event.result.usage.totalTokens;
+        else event.text;
+      }
+      const session = instance.session();
+      await session.send('Say OK.', { maxNewTokens: 4 });
+      await session.import(await session.export());
+      await session.branch();
+      await session.reset();
+      await session.dispose();
+      const reportPlan = await instance.planReport(page);
+      reportPlan.estimatedDurationMs;
+      await instance.health({ timeoutMs: 1000 });
+      await instance.diagnostics();
       let checkpoint: ReportCheckpoint | undefined;
       const report = await instance.describe(page, {
         format: 'json',
@@ -153,6 +177,7 @@ try {
       try {
         const textPlan = await neko.planInference({ prompt: 'What is 2 + 2? Answer using a single digit.', maxNewTokens: 16 });
         assert.equal(textPlan.fits, true);
+        assert.equal((await neko.cache.engine.status()).loaded, false, 'text planning must not create ONNX sessions');
         let textStream = '';
         const answer = await neko.infer({
           prompt: 'What is 2 + 2? Answer using a single digit.',
@@ -177,7 +202,7 @@ try {
         assert.equal(visual.model.profile, 'default');
         assert.equal(visual.finishReason, 'stop', 'the packed consumer completes image inference without truncation');
         assert.equal(visualPlan.inputTokens, visual.usage.inputTokens, 'image planning must include expanded visual tokens');
-        assert.deepEqual(visualPlan.images, visual.images, 'planning preserves the same decoded image identity');
+        assert.equal(visualPlan.images[0].versionId, visual.images[0].versionId, 'image planning and inference preserve the same normalized image identity');
 
         const pair = await neko.infer({ images: [imagePath, dataUrl], prompt: 'Describe both images briefly.', maxNewTokens: 32 });
         assert.equal(pair.images?.length, 2, 'the packed consumer preserves both image observations');

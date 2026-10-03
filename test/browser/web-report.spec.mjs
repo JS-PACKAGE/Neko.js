@@ -106,6 +106,65 @@ test('loads and normalizes a real browser-created PNG through fetch and canvas',
   expect(dimensions).toEqual([32, 16]);
 });
 
+test('browser source crops and tiles use real canvas pixels with bounded owned preprocessing reuse', async ({ page }) => {
+  await page.goto(origin);
+  const result = await page.evaluate(async () => {
+    const { prepareImage, prepareImageRegions, ImagePreprocessCache, validateImageObservation } = await import('/web.js');
+    const canvas = document.createElement('canvas'); canvas.width = 8; canvas.height = 4;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#ff0000'; context.fillRect(0, 0, 4, 4);
+    context.fillStyle = '#0000ff'; context.fillRect(4, 0, 4, 4);
+    const dataUrl = canvas.toDataURL('image/png');
+    const raw = { data: context.getImageData(0, 0, 8, 4).data, width: 8, height: 4, channels: 4 };
+    const results = [];
+    for (const source of [dataUrl, raw]) {
+      const cache = new ImagePreprocessCache({ maxBytes: 128, maxEntries: 4 });
+      const options = { region: { unit: 'normalized', x: 0.5, y: 0, width: 0.5, height: 1 }, maxDimension: 2 };
+      const first = await prepareImage(source, options, cache); validateImageObservation(first.observation);
+      const firstPixel = [...first.image.data.subarray(0, 4)];
+      first.image.data.fill(77);
+      const hit = await prepareImage(source, options, cache); validateImageObservation(hit.observation);
+      const tiles = await prepareImageRegions(source, { tiling: { tileWidth: 4, tileHeight: 4, overlap: 0, maxTiles: 2 } }, cache);
+      results.push({
+        firstPixel, hitPixel: [...hit.image.data.subarray(0, 4)],
+        sameIdentity: first.observation.versionId === hit.observation.versionId,
+        observation: hit.observation, diagnostics: cache.diagnostics(),
+        tiles: tiles.map(({ image, observation }) => ({ pixel: [...image.data.subarray(0, 4)], region: observation.region, sourceVersionId: observation.sourceVersionId, versionId: observation.versionId })),
+      });
+    }
+    let overflow;
+    try { await prepareImageRegions(dataUrl, { tiling: { tileWidth: 2, tileHeight: 2, overlap: 0, maxTiles: 1 } }); } catch (error) { overflow = error.name; }
+    return { results, overflow };
+  });
+  expect(result.overflow).toBe('RangeError');
+  for (const item of result.results) {
+    expect(item.firstPixel).toEqual([0, 0, 255, 255]); expect(item.hitPixel).toEqual(item.firstPixel);
+    expect(item.sameIdentity).toBe(true); expect(item.observation.preprocessing.cache).toBe('hit');
+    expect(item.observation.preprocessing.reused).toBe('normalized-pixels');
+    expect(item.observation.region).toEqual({ unit: 'pixels', x: 4, y: 0, width: 4, height: 4 });
+    expect(item.observation.sourceWidth).toBe(8); expect(item.observation.sourceHeight).toBe(4);
+    expect(item.tiles.map(({ pixel }) => pixel)).toEqual([[255, 0, 0, 255], [0, 0, 255, 255]]);
+    expect(item.tiles[0].sourceVersionId).toBe(item.tiles[1].sourceVersionId);
+    expect(item.tiles[0].versionId).not.toBe(item.tiles[1].versionId);
+    expect(item.diagnostics.bytes).toBeLessThanOrEqual(128); expect(item.diagnostics.entries).toBeLessThanOrEqual(4);
+  }
+  expect(result.results.map(({ observation }) => observation.preprocessing.pipeline)).toEqual(['canvas-raster', 'canvas-raw']);
+});
+
+test('browser raw pixels preserve grayscale, gray-alpha, RGB and RGBA channels', async ({ page }) => {
+  await page.goto(origin);
+  const pixels = await page.evaluate(async () => {
+    const { prepareImage } = await import('/web.js');
+    const result = [];
+    for (const [channels, data] of [[1, [77]], [2, [255, 128]], [3, [12, 34, 56]], [4, [255, 0, 0, 128]]]) {
+      const prepared = await prepareImage({ width: 1, height: 1, channels, data: new Uint8Array(data) });
+      result.push(Array.from(prepared.image.data));
+    }
+    return result;
+  });
+  expect(pixels).toEqual([[77, 77, 77, 255], [255, 255, 255, 128], [12, 34, 56, 255], [255, 0, 0, 128]]);
+});
+
 test('rejects HTML/image limit overflow and malformed or non-raster image payloads', async ({ page }) => {
   await page.goto(origin);
   const result = await page.evaluate(async () => {
@@ -124,7 +183,8 @@ test('renders untrusted model text as inert Markdown and only links HTTP(S) prov
   const markdown = await page.evaluate(async () => {
     const { renderMarkdown } = await import('/report.js');
     return renderMarkdown({
-      schemaVersion: 2,
+      schemaVersion: 3,
+      mode: 'generated', claims: [],
       language: 'en',
       imageFailurePolicy: 'error',
       page: { url: 'https://example.test', summary: '<img src=x onerror=alert(1)> [click](javascript:alert(1))' },

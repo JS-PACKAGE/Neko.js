@@ -26,17 +26,6 @@ export const ALL_MODEL_FILES = {
 } as const;
 export type ModelProfileId = 'default' | 'all-q4';
 export type ModelDtype = { embed_tokens: 'q4'; decoder_model_merged: 'q4'; vision_encoder: 'fp16' | 'q4' };
-const q4Files = { ...ALL_MODEL_FILES } as Omit<typeof ALL_MODEL_FILES, 'onnx/vision_encoder_fp16.onnx' | 'onnx/vision_encoder_fp16.onnx_data'>;
-Reflect.deleteProperty(q4Files, 'onnx/vision_encoder_fp16.onnx');
-Reflect.deleteProperty(q4Files, 'onnx/vision_encoder_fp16.onnx_data');
-export const MODEL_PROFILES = {
-  default: { id: MODEL_ID, revision: MODEL_REVISION, profile: 'default', dtype: MODEL_DTYPE, files: MODEL_FILES },
-  'all-q4': { id: MODEL_ID, revision: MODEL_REVISION, profile: 'all-q4', dtype: { embed_tokens: 'q4', decoder_model_merged: 'q4', vision_encoder: 'q4' }, files: q4Files },
-} as const;
-export function getModelProfile(id: ModelProfileId = 'default') {
-  if (!Object.hasOwn(MODEL_PROFILES, id)) throw new TypeError('Unknown registered model profile');
-  return MODEL_PROFILES[id];
-}
 
 export type ModelFileName = keyof typeof ALL_MODEL_FILES;
 export const MODEL_BASE_URL = `https://huggingface.co/${MODEL_ID}/resolve/${MODEL_REVISION}/`;

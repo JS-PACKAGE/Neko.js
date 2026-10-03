@@ -1,37 +1,53 @@
 import { env } from '@huggingface/transformers';
 import { EngineCache, type EngineCacheStatus } from './cache/engine.js';
-import { captureModelSource, installVerifiedCache, type VerifiedCacheInstallation, type ModelCacheStatus, type ModelSource } from './cache/model.js';
+import { captureModelSource, installVerifiedCache, type VerifiedCacheInstallation, type ModelCacheStatus, type ModelCacheDiagnostics, type ModelSource } from './cache/model.js';
 import { inspectBackend, type BackendInfo, type BackendDevice } from './backend/index.js';
 import { VisionEngine, type InferOptions, type InferenceResult, type InferencePlanOptions, type InferencePlan, type StructuredInferOptions, type StructuredInferenceResult, type RuntimeReadiness } from './core/engine.js';
-import { generateReport, validateDescribeOptions, ReportError, type DescribeOptions } from './report/generate.js';
-import type { Page, StructuredReport, ExecutionInfo } from './types.js';
+import { generateReport, planReport as generateReportPlan, validateDescribeOptions, ReportError, type DescribeOptions, type ReportPlan } from './report/generate.js';
+import type { Page, StructuredReport, ExecutionInfo, DocumentAnswer } from './types.js';
 import { atStage, NekoError, type ErrorStage } from './errors.js';
 import { RequestQueue, type QueueStatus } from './core-queue.js';
 import { authorizeNetwork, type ResourcePolicy } from './web/policy.js';
-import { getModelProfile, type ModelProfileId } from './cache/manifest.js';
+import type { ModelProfileId } from './cache/manifest.js';
+import { getRegisteredModelProfile, type ModelId } from './cache/registry.js';
 import { createWorkerClient } from './runtime/client.js';
 import { selectPage } from './web/source.js';
 import { extractPage } from './web/extract.js';
-import { compileStructuredSchema } from './core/structured.js';
+import { compileStructuredSchema, type SchemaValue } from './core/structured.js';
 import { setActiveRequest, workerExecution } from './runtime/context.js';
-import { validateInferenceOptions } from './core/preflight.js';
+import { inferenceChat, validateInferenceOptions } from './core/preflight.js';
+import { createInferenceStream, type InferStreamOptions, type InferenceStreamEvent } from './runtime/stream.js';
+import { planTextInference } from './core/tokenizer.js';
+import { createConversationSession, type ConversationSession, type SessionOptions } from './core/session.js';
+import { assertHardDeadlineUnsupported, createRuntimeDiagnostics, validateHealthOptions, type HealthOptions, type RuntimeHealth, type RuntimeDiagnostics } from './runtime/diagnostics.js';
+import { queuedReadable } from './queued-stream.js';
+import { askDocument, type AskOptions } from './web/query.js';
+import type { ModelBundleSource } from './cache/bundle.js';
+import { generateExtractiveReport, planExtractiveReport } from './report/extractive.js';
 
 export * from './types.js';
 export * from './web/index.js';
 export * from './report/index.js';
 export * from './cache/manifest.js';
+export * from './cache/registry.js';
 export * from './backend/index.js';
 export * from './errors.js';
 export { ReportError } from './report/generate.js';
 export type { InferOptions, InferenceResult, InferencePlanOptions, InferencePlan, StructuredInferOptions, StructuredInferenceResult, RuntimeReadiness, ChatContent, ChatMessage, ModelIdentity, ImageObservation } from './core/engine.js';
 export type { GenerationOptions } from './core/generation.js';
-export type { DescribeOptions, ReportCheckpoint, ReportEvent, ReportBudget } from './report/generate.js';
-export type { ModelCacheStatus, CacheProgress, ModelSource } from './cache/model.js';
+export type { DescribeOptions, ReportCheckpoint, ReportEvent, ReportBudget, ReportPlan, PartialReport } from './report/generate.js';
+export type { ModelCacheStatus, ModelCacheDiagnostics, CacheProgress, ModelSource } from './cache/model.js';
 export type { EngineCacheStatus } from './cache/engine.js';
 export type { QueueStatus } from './core-queue.js';
+export type { InferStreamOptions, InferenceStreamEvent } from './runtime/stream.js';
+export type { SchemaValue, StructuredMode } from './core/structured.js';
+export type { ConversationSession, SessionOptions, SessionSendOptions, SessionControlOptions, SessionSnapshot } from './core/session.js';
+export type { HealthOptions, RuntimeHealth, RuntimeDiagnostics } from './runtime/diagnostics.js';
+export type { ModelBundleSource } from './cache/bundle.js';
 
 export interface NekoOptions {
   device?: BackendDevice;
+  model?: ModelId;
   modelProfile?: ModelProfileId;
   modelSource?: ModelSource;
   execution?: 'inline' | 'worker';
@@ -45,16 +61,27 @@ export interface NekoOptions {
   wasmPaths?: { wasm: string; mjs: string };
   profilePrefix?: string;
 }
-type OwnedNekoOptions = NekoOptions & { policy: ResourcePolicy; modelProfile: ModelProfileId; localFilesOnly: boolean };
+type OwnedNekoOptions = NekoOptions & { policy: ResourcePolicy; model: ModelId; modelProfile: ModelProfileId; localFilesOnly: boolean };
 export interface Neko {
   readonly cache: {
-    model: { prefetch(signal?: AbortSignal): Promise<void>; status(signal?: AbortSignal): Promise<ModelCacheStatus>; clear(signal?: AbortSignal): Promise<void> };
+    model: {
+      prefetch(signal?: AbortSignal): Promise<void>;
+      status(signal?: AbortSignal): Promise<ModelCacheStatus>;
+      clear(signal?: AbortSignal): Promise<void>;
+      exportBundle(signal?: AbortSignal): ReadableStream<Uint8Array>;
+      importBundle(source: ModelBundleSource, signal?: AbortSignal): Promise<void>;
+      diagnostics(signal?: AbortSignal): Promise<ModelCacheDiagnostics>;
+    };
     engine: { status(): Promise<EngineCacheStatus>; release(): Promise<void> };
   };
   readonly backend: { current(): Promise<BackendInfo | null>; detect(device?: BackendDevice, signal?: AbortSignal): Promise<BackendInfo> };
   infer(options: InferOptions): Promise<InferenceResult>;
-  inferStructured(options: StructuredInferOptions): Promise<StructuredInferenceResult>;
+  inferStream(options: InferStreamOptions): AsyncIterable<InferenceStreamEvent>;
+  inferStructured<const S>(options: StructuredInferOptions<S>): Promise<StructuredInferenceResult<SchemaValue<S>>>;
   planInference(options: InferencePlanOptions): Promise<InferencePlan>;
+  planReport(input: string | Page, options?: DescribeOptions): Promise<ReportPlan>;
+  session(options?: SessionOptions): ConversationSession;
+  ask(input: string | Page, question: string, options?: AskOptions): Promise<DocumentAnswer>;
   describe(input: string | Page, options: DescribeOptions & { format: 'markdown' }): Promise<string>;
   describe(input: string | Page, options?: DescribeOptions & { format?: 'json' }): Promise<StructuredReport>;
   describe(input: string | Page, options: DescribeOptions): Promise<StructuredReport | string>;
@@ -62,6 +89,9 @@ export interface Neko {
   warmup(signal?: AbortSignal): Promise<RuntimeReadiness>;
   runtimeStatus(): Promise<RuntimeReadiness | null>;
   queueStatus(): Promise<QueueStatus>;
+  diagnostics(): Promise<RuntimeDiagnostics>;
+  health(options?: HealthOptions): Promise<RuntimeHealth>;
+  restart(): Promise<void>;
   dispose(): Promise<void>;
   [Symbol.asyncDispose](): Promise<void>;
 }
@@ -79,6 +109,12 @@ class LocalNeko implements Neko {
         prefetch: (signal) => this.run('cache', signal, (abort) => installation.prefetch(abort)),
         status: (signal) => this.run('cache', signal, (abort) => installation.status(abort)),
         clear: (signal) => this.run('cache', signal, async (abort) => { await engines.release(); this.readiness = null; abort.throwIfAborted(); await installation.clear(abort); }),
+        exportBundle: (signal) => {
+          this.checkRequest('cache', signal);
+          return queuedReadable((abort, operation) => this.run('cache', abort, operation), (abort) => installation.exportBundle(abort), signal);
+        },
+        importBundle: (source, signal) => this.run('cache', signal, (abort) => installation.importBundle(source, abort)),
+        diagnostics: (signal) => this.run('cache', signal, (abort) => installation.diagnostics(abort)),
       },
       engine: { status: async () => { if (this.closed) throw new NekoError('Neko is disposed', 'cache', 'DISPOSED'); return engines.status(); }, release: () => this.run('cache', undefined, async () => { await engines.release(); this.readiness = null; }) },
     };
@@ -101,27 +137,67 @@ class LocalNeko implements Neko {
     if (this.closed) throw new NekoError('Neko is disposed', stage, 'DISPOSED');
     if (signal instanceof AbortSignal && signal.aborted) throw new NekoError('Operation was cancelled', stage, 'ABORTED', { cause: signal.reason });
   }
+  private captureSource(input: string | Page): Promise<{ ok: true; value: string | Page } | { ok: false; error: unknown }> {
+    return typeof input === 'string' ? Promise.resolve({ ok: true, value: input }) : selectPage(input).then(
+      (value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+  }
   async infer(options: InferOptions): Promise<InferenceResult> {
     this.checkRequest('generate', options?.signal);
     validateInferenceOptions(options);
-    return this.run('generate', options.signal, (signal, queueWaitMs) => this.use(signal, async (engine) => { const result = await engine.infer({ ...options, signal, _budget: undefined, _preparedImages: undefined, _policy: this.options.policy, _offline: this.options.localFilesOnly }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; }));
+    assertHardDeadlineUnsupported(options.hardDeadlineMs);
+    return this.run('generate', options.signal, (signal, queueWaitMs) => this.use(signal, async (engine) => { const result = await engine.infer({ ...options, signal }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; }));
   }
-  async inferStructured(options: StructuredInferOptions): Promise<StructuredInferenceResult> {
+  inferStream(options: InferStreamOptions): AsyncIterable<InferenceStreamEvent> { return createInferenceStream(options, (request) => this.infer(request)); }
+  async inferStructured<const S>(options: StructuredInferOptions<S>): Promise<StructuredInferenceResult<SchemaValue<S>>> {
     this.checkRequest('generate', options?.signal);
     validateInferenceOptions(options);
-    const compiled = compileStructuredSchema(options.schema);
+    assertHardDeadlineUnsupported(options.hardDeadlineMs);
+    const compiled = compileStructuredSchema(options.schema, options.structuredMode);
     return this.run('generate', options.signal, (signal, queueWaitMs) => {
-      return this.use(signal, async (engine) => { const result = await engine.inferStructured({ ...options, signal, _structured: compiled, _budget: undefined, _preparedImages: undefined, _policy: this.options.policy, _offline: this.options.localFilesOnly }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; });
+      return this.use(signal, async (engine) => { const result = await engine.inferStructured({ ...options, signal }, { structured: compiled }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; });
     });
   }
   async planInference(options: InferencePlanOptions): Promise<InferencePlan> {
     this.checkRequest('preprocess', options?.signal);
     validateInferenceOptions(options, true);
-    const compiled = options.schema === undefined ? undefined : compileStructuredSchema(options.schema);
-    return this.run('preprocess', options.signal, (signal) => this.use(signal, async (engine) => ({
-      ...await engine.planInference({ ...options, schema: undefined, signal, _budget: undefined, _preparedImages: undefined, _policy: this.options.policy, _offline: this.options.localFilesOnly }, compiled),
-      execution: this.execution(),
-    })));
+    assertHardDeadlineUnsupported(options.hardDeadlineMs, 'preprocess');
+    const compiled = options.schema === undefined ? undefined : compileStructuredSchema(options.schema, options.structuredMode);
+    return this.run('preprocess', options.signal, async (signal) => {
+      const request = { ...options, signal };
+      const plan = inferenceChat(request).images.length
+        ? await this.use(signal, (engine) => engine.planInference(request, compiled))
+        : await planTextInference(request, { profile: this.options.modelProfile, model: this.options.model }, compiled);
+      return { ...plan, execution: this.execution() };
+    });
+  }
+  planReport(input: string | Page, options: DescribeOptions = {}): Promise<ReportPlan> {
+    this.checkRequest('preprocess', options?.signal);
+    validateDescribeOptions(options);
+    assertHardDeadlineUnsupported(options.hardDeadlineMs, 'preprocess');
+    const captured = this.captureSource(input);
+    return this.run('preprocess', options.signal, async (signal) => {
+      const source = await captured; if (!source.ok) throw source.error;
+      const extracted = typeof source.value === 'string' ? await extractPage(source.value, { ...options, signal }, { policy: this.options.policy, offline: this.options.localFilesOnly }) : source.value;
+      const page = await selectPage(extracted, options.sources, signal);
+      if (options.mode === 'extractive') return planExtractiveReport(page, { ...options, signal }, { selectionApplied: true });
+      return this.use(signal, (engine) => generateReportPlan(engine, page, { ...options, signal }, { selectionApplied: true }));
+    });
+  }
+  session(options: SessionOptions = {}): ConversationSession {
+    this.checkRequest('generate');
+    const profile = getRegisteredModelProfile(this.options.modelProfile, this.options.model);
+    return createConversationSession(this, { id: profile.id, revision: profile.revision, profile: profile.profile, dtype: profile.dtype }, options);
+  }
+  ask(input: string | Page, question: string, options: AskOptions = {}): Promise<DocumentAnswer> {
+    this.checkRequest('generate', options?.signal);
+    assertHardDeadlineUnsupported(options.hardDeadlineMs);
+    const captured = this.captureSource(input);
+    return this.run('generate', options.signal, async (signal) => {
+      const source = await captured; if (!source.ok) throw source.error;
+      return askDocument(source.value, question,
+        (request) => this.use(signal, (engine) => engine.inferStructured({ ...request, signal })),
+        { ...options, signal }, { policy: this.options.policy, offline: this.options.localFilesOnly });
+    });
   }
   describe(input: string | Page, options: DescribeOptions & { format: 'markdown' }): Promise<string>;
   describe(input: string | Page, options?: DescribeOptions & { format?: 'json' }): Promise<StructuredReport>;
@@ -129,8 +205,9 @@ class LocalNeko implements Neko {
   async describe(input: string | Page, options: DescribeOptions = {}): Promise<StructuredReport | string> {
     this.checkRequest('report', options?.signal);
     validateDescribeOptions(options);
+    assertHardDeadlineUnsupported(options.hardDeadlineMs, 'report');
     const started = performance.now();
-    const captured = typeof input === 'string' ? Promise.resolve({ ok: true as const, value: input }) : selectPage(input).then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+    const captured = this.captureSource(input);
     const deadline = new AbortController(); let timer: Parameters<typeof globalThis.clearTimeout>[0];
     const duration = options.budget?.maxDurationMs;
     if (duration !== undefined && Number.isSafeInteger(duration) && duration > 0 && duration <= 2_147_483_647) {
@@ -142,14 +219,21 @@ class LocalNeko implements Neko {
     return this.run('report', requestSignal, async (signal, queueWaitMs) => {
       const source = await captured; if (!source.ok) throw source.error;
       const sourceInput = source.value;
-      const extracted = typeof sourceInput === 'string' ? await atStage('extract', signal, () => extractPage(sourceInput, { ...options, signal, _policy: this.options.policy, _offline: this.options.localFilesOnly })) : sourceInput;
+      const extracted = typeof sourceInput === 'string' ? await atStage('extract', signal, () => extractPage(sourceInput, { ...options, signal }, { policy: this.options.policy, offline: this.options.localFilesOnly })) : sourceInput;
       const page = await atStage('extract', signal, () => selectPage(extracted, options.sources, signal));
+      if (options.mode === 'extractive') {
+        const profile = getRegisteredModelProfile(this.options.modelProfile, this.options.model);
+        return generateExtractiveReport(page, { ...options, signal }, {
+          model: { id: profile.id, revision: profile.revision, profile: profile.profile, dtype: profile.dtype },
+          execution: this.execution(), startedAt: started, queueWaitMs, selectionApplied: true,
+        });
+      }
       const loadStarted = performance.now();
-      return this.use(signal, (engine) => generateReport(engine, page, { ...options, signal, _policy: this.options.policy, _offline: this.options.localFilesOnly, _startedAt: started, _queueWaitMs: queueWaitMs, _execution: this.execution(), _selectionApplied: true, _requestLoadMs: performance.now() - loadStarted }));
+      return this.use(signal, (engine) => generateReport(engine, page, { ...options, signal }, { startedAt: started, queueWaitMs, execution: this.execution(), selectionApplied: true, requestLoadMs: performance.now() - loadStarted }));
     }, options.signal).catch((cause: unknown) => {
       if (deadline.signal.aborted && cause instanceof NekoError && cause.code === 'ABORTED') {
         const error = deadline.signal.reason as NekoError;
-        throw cause instanceof ReportError ? new ReportError(error, cause.checkpoint) : error;
+        throw cause instanceof ReportError ? new ReportError(error, cause.checkpoint, cause.partial) : error;
       }
       throw cause;
     }).finally(() => { clearTimeout(timer); });
@@ -158,6 +242,19 @@ class LocalNeko implements Neko {
   warmup(signal?: AbortSignal): Promise<RuntimeReadiness> { return this.run('load', signal, (abort) => this.use(abort, (engine) => engine.warmup(abort))); }
   async runtimeStatus(): Promise<RuntimeReadiness | null> { if (this.closed) throw new NekoError('Neko is disposed', 'load', 'DISPOSED'); return this.engines.status().loaded ? this.readiness : null; }
   async queueStatus(): Promise<QueueStatus> { if (this.closed) throw new NekoError('Neko is disposed', 'generate', 'DISPOSED'); return this.admission.status(); }
+  async diagnostics(): Promise<RuntimeDiagnostics> {
+    this.checkRequest('load');
+    return createRuntimeDiagnostics({ execution: this.execution(), readiness: await this.runtimeStatus(), backend: await this.backend.current(), engine: this.engines.status(), queue: this.admission.status() });
+  }
+  async health(options: HealthOptions = {}): Promise<RuntimeHealth> {
+    this.checkRequest('load', options.signal);
+    validateHealthOptions(options);
+    return { healthy: true, execution: this.execution(), roundTripMs: null, checkedAt: Date.now() };
+  }
+  async restart(): Promise<void> {
+    this.checkRequest('create');
+    throw new NekoError('Worker recreation requires execution: worker; inline owners must be disposed and created explicitly', 'create', 'UNSUPPORTED_BACKEND');
+  }
   dispose(): Promise<void> {
     if (!this.disposePromise) {
       this.closed = true; this.lifetime.abort(new Error('Neko disposed'));
@@ -187,18 +284,18 @@ function capturePolicy(policy?: ResourcePolicy): ResourcePolicy {
 /** Inline instances own process-global hooks; worker instances own independent runtime realms. */
 export async function createNeko(configuration: NekoOptions = {}): Promise<Neko> {
   return atStage('create', configuration.signal, async () => {
-    const profile = getModelProfile(configuration.modelProfile);
+    const profile = getRegisteredModelProfile(configuration.modelProfile, configuration.model);
     if (configuration.execution !== undefined && configuration.execution !== 'inline' && configuration.execution !== 'worker') throw new TypeError('execution must be inline or worker');
     const { policy, modelSource, ...settings } = configuration;
     const source = captureModelSource(modelSource);
-    const options: OwnedNekoOptions = { ...settings, modelProfile: profile.profile, ...(source === undefined ? {} : { modelSource: source }), policy: capturePolicy(policy), localFilesOnly: settings.localFilesOnly ?? false, cache: { ...settings.cache }, queue: { ...settings.queue } };
+    const options: OwnedNekoOptions = { ...settings, model: profile.id, modelProfile: profile.profile, ...(source === undefined ? {} : { modelSource: source }), policy: capturePolicy(policy), localFilesOnly: settings.localFilesOnly ?? false, cache: { ...settings.cache }, queue: { ...settings.queue } };
     if (options.execution === 'worker') return createWorkerClient(options);
     const admission = new RequestQueue(options.queue?.maxPending);
     const backend = await atStage('backend', options.signal, () => inspectBackend(options.device ?? 'webgpu', options.modelProfile));
     if (backend.runtime === 'browser' && backend.device === 'cpu') throw new NekoError('CPU/WASM cannot execute this pinned model: GatherBlockQuantized(1) is unavailable. Use a supported WebGPU browser; no automatic fallback is performed.', 'backend', 'UNSUPPORTED_BACKEND');
     let installation: VerifiedCacheInstallation | undefined; let restore: (() => void) | undefined;
     try {
-      installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly ?? false, profile: options.modelProfile, policy: options.policy, ...(options.progressCallback ? { onProgress: options.progressCallback } : {}) });
+      installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly, model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.progressCallback ? { onProgress: options.progressCallback } : {}) });
       const cache = installation; const previousWasmCache = env.useWasmCache; const wasm = env.backends.onnx.wasm;
       const previous = wasm && { paths: wasm.wasmPaths, binary: wasm.wasmBinary, threads: wasm.numThreads, proxy: wasm.proxy };
       let moduleUrl: string | undefined;
@@ -226,7 +323,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
       options.signal?.throwIfAborted();
       const engines = new EngineCache((signal) => cache.withSignal(signal, async () => {
         const started = performance.now(); await configureRuntime(signal); await atStage('load', signal, () => cache.prefetch(signal));
-        return VisionEngine.load(backend, options.localFilesOnly ?? false, signal, options.progressCallback, options.profilePrefix, started, { profile: options.modelProfile, policy: options.policy });
+        return VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy });
       }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000);
       return new LocalNeko(engines, cache, restore, backend, options, admission);
     } catch (error) { if (restore) restore(); else installation?.restore(); throw error; }
