@@ -1,5 +1,7 @@
 import { env } from '@huggingface/transformers';
-import { MODEL_BASE_URL, ALL_MODEL_FILES, MODEL_ID, MODEL_REVISION, modelFileUrl, getModelProfile, type ModelProfileId } from './manifest.js';
+import { type ModelProfileId } from './manifest.js';
+import { getRegisteredModelProfile, type ModelId, type RegisteredModelProfile } from './registry.js';
+import { exportModelBundle, importModelBundle, type BundleBacking, type ModelBundleSource } from './bundle.js';
 import type { ModelFileName } from './manifest.js';
 import { NekoError } from '../errors.js';
 import { authorizeNetwork, type ResourcePolicy } from '../web/policy.js';
@@ -38,15 +40,28 @@ export interface VerifiedCacheOptions {
   localFilesOnly?: boolean;
   onProgress?: (event: CacheProgress) => void;
   profile?: ModelProfileId;
+  model?: ModelId;
   policy?: ResourcePolicy;
   modelSource?: ModelSource;
 }
 export interface ModelCacheStatus { downloaded: boolean; verified: boolean; bytes: number; totalBytes: number; path: string; files: { name: ModelFileName; present: boolean; verified: boolean; bytes: number }[]; }
+export interface ModelCacheDiagnostics {
+  model: ModelId;
+  revision: string;
+  profile: ModelProfileId;
+  backend: 'filesystem' | 'cache-storage';
+  path: string;
+  requiredBytes: number;
+  storage: { usage: number | null; quota: number | null; available: number | null; persisted: boolean | null; source: 'browser-storage-estimate' | 'unavailable' };
+}
 export interface VerifiedCacheInstallation {
   restore(): void;
-  prefetch(signal?: AbortSignal): Promise<void>;
+  prefetch(signal?: AbortSignal, files?: readonly ModelFileName[]): Promise<void>;
   status(signal?: AbortSignal): Promise<ModelCacheStatus>;
   clear(signal?: AbortSignal): Promise<void>;
+  exportBundle(signal?: AbortSignal): ReadableStream<Uint8Array>;
+  importBundle(source: ModelBundleSource, signal?: AbortSignal): Promise<void>;
+  diagnostics(signal?: AbortSignal): Promise<ModelCacheDiagnostics>;
   withSignal<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T>;
 }
 
@@ -61,16 +76,16 @@ type NativeCache = {
 type NodeHash = { update(bytes: Uint8Array): NodeHash; digest(encoding: 'hex'): string };
 let nodeCrypto: Promise<{ createHash(algorithm: string): NodeHash }> | undefined;
 let installed = false;
-const verifiedResponses = new WeakMap<Response, ModelFileName>();
+const verifiedResponses = new WeakMap<Response, ResourceSpec>();
 
-function fileName(request: string, files: Partial<Record<ModelFileName, ResourceSpec>>): ModelFileName | undefined {
-  if (!request.startsWith(MODEL_BASE_URL)) return undefined;
-  const name = request.slice(MODEL_BASE_URL.length);
-  if (!Object.hasOwn(files, name)) throw new ModelIntegrityError(`Unpinned model resource for selected profile: ${request}`);
+function fileName(request: string, model: RegisteredModelProfile): ModelFileName | undefined {
+  if (!request.startsWith(model.baseUrl)) return undefined;
+  const name = request.slice(model.baseUrl.length);
+  if (!Object.hasOwn(model.files, name)) throw new ModelIntegrityError(`Unpinned model resource for selected profile: ${request}`);
   return name as ModelFileName;
 }
-function nativeKey(request: string, name?: ModelFileName): string {
-  return isNode && name ? `${MODEL_ID}/${MODEL_REVISION}/${name}` : request;
+function nativeKey(request: string, model: RegisteredModelProfile, name?: ModelFileName): string {
+  return isNode && name ? `${model.id}/${model.revision}/${name}` : request;
 }
 function isRuntimeAsset(request: string): boolean {
   if (isNode || typeof location === 'undefined') return false;
@@ -104,8 +119,7 @@ function verifiedResponse(bytes: ArrayBuffer, response: CachedResponse, spec: Re
   const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(bytes)); controller.close(); } });
   return new Response(body, { status: response.status, headers });
 }
-async function readVerified(response: CachedResponse, name: ModelFileName, options: VerifiedCacheOptions, phase: CacheProgress['phase'], signal?: AbortSignal): Promise<Response> {
-  const spec = ALL_MODEL_FILES[name];
+async function readVerified(response: CachedResponse, name: ModelFileName, spec: ResourceSpec, options: VerifiedCacheOptions, phase: CacheProgress['phase'], signal?: AbortSignal): Promise<Response> {
   checkLength(response, name, spec);
   signal?.throwIfAborted();
   const bytes = new Uint8Array(spec.size);
@@ -138,15 +152,14 @@ async function readVerified(response: CachedResponse, name: ModelFileName, optio
     signal?.throwIfAborted();
     if (digest !== spec.sha256) throw integrity(name, 'SHA-256');
     const verified = verifiedResponse(bytes.buffer, response, spec);
-    verifiedResponses.set(verified, name);
+    verifiedResponses.set(verified, spec);
     return verified;
   } catch (error) {
     await reader.cancel(error).catch(() => undefined);
     throw error;
   } finally { signal?.removeEventListener('abort', cancel); reader.releaseLock(); }
 }
-async function hashCachedFile(response: CachedResponse, name: ModelFileName, options: VerifiedCacheOptions, signal?: AbortSignal): Promise<void> {
-  const spec = ALL_MODEL_FILES[name];
+async function hashCachedFile(response: CachedResponse, name: ModelFileName, spec: ResourceSpec, options: VerifiedCacheOptions, signal?: AbortSignal): Promise<void> {
   checkLength(response, name, spec);
   const hash = await createNodeHash();
   const reader = response.body!.getReader();
@@ -179,6 +192,7 @@ function rejectedResponse(error: ModelIntegrityError): Response {
   return response;
 }
 async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> {
+  const model = getRegisteredModelProfile(options.profile, options.model);
   if (!isNode) {
     if (typeof caches === 'undefined') throw new Error('Verified model caching requires the browser Cache API in a secure context');
     const cache = await caches.open(env.cacheKey);
@@ -202,11 +216,16 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
   async function secureDirectory(): Promise<void> {
     const ancestors: string[] = [];
     for (let current = root; current !== path.dirname(current); current = path.dirname(current)) ancestors.push(current);
+    ancestors.push(path.parse(root).root);
     for (const current of ancestors.reverse()) {
       let info;
       try { info = await fs.lstat(current); }
       catch (error) { if (!missing(error)) throw error; await fs.mkdir(current, { mode: 0o700 }); info = await fs.lstat(current); }
       if (info.isSymbolicLink() || !info.isDirectory()) throw new ModelIntegrityError(`Unsafe cache directory: ${current}`);
+      // A private cache root is still renameable through an untrusted or non-sticky writable ancestor.
+      if (uid !== undefined && current !== root && (info.uid !== uid && info.uid !== 0 || (info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0)) {
+        throw new ModelIntegrityError(`Cache ancestor permits untrusted namespace replacement: ${current}`);
+      }
     }
     const info = await fs.lstat(root);
     if (!owned(info)) throw new ModelIntegrityError('Cache directory must belong to the current user');
@@ -214,8 +233,8 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
     await fs.chmod(root, 0o700);
   }
   async function secureEntry(request: string, createParents: boolean): Promise<string | undefined> {
-    const prefix = `${MODEL_ID}/${MODEL_REVISION}/`;
-    if (!request.startsWith(prefix) || !Object.hasOwn(ALL_MODEL_FILES, request.slice(prefix.length))) return undefined;
+    const prefix = `${model.id}/${model.revision}/`;
+    if (!request.startsWith(prefix) || !Object.hasOwn(model.allFiles, request.slice(prefix.length))) return undefined;
     await secureDirectory();
     const parts = request.split('/');
     let current = root;
@@ -290,7 +309,9 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
 export async function installVerifiedCache(options: VerifiedCacheOptions = {}): Promise<VerifiedCacheInstallation> {
   if (installed) throw new NekoError('Only one Neko runtime owner may be active; await its disposal before creating another', 'create', 'RUNTIME_BUSY');
   if (env.version !== '4.2.0') throw new Error('The verified model cache requires Transformers.js 4.2.0');
-  const selectedFiles = getModelProfile(options.profile).files;
+  const model = getRegisteredModelProfile(options.profile, options.model);
+  const selectedFiles = model.files;
+  const modelFileUrl = (name: ModelFileName) => `${model.baseUrl}${name}`;
   const modelSource = captureModelSource(options.modelSource);
   installed = true;
   let backing: NativeCache;
@@ -305,18 +326,18 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   const verifiedCache = {
     async match(request: string, signal = activeSignal): Promise<Response | string | undefined> {
       signal?.throwIfAborted();
-      const name = fileName(request, selectedFiles);
+      const name = fileName(request, model);
       if (!name && !isRuntimeAsset(request)) return undefined;
       if (!name) await authorizeNetwork(options.policy, new URL(request), 'runtime', !!options.localFilesOnly, undefined, signal);
       let response: CachedResponse | undefined;
       try {
-        response = await backing.match(nativeKey(request, name));
+        response = await backing.match(nativeKey(request, model, name));
         if (!response || !name) return response as Response | undefined;
         if (isNode && name.startsWith('onnx/') && response.filePath) {
-          await hashCachedFile(response, name, options, signal);
+          await hashCachedFile(response, name, model.allFiles[name], options, signal);
           return response.filePath;
         }
-        return await readVerified(response, name, options, 'verify', signal);
+        return await readVerified(response, name, model.allFiles[name], options, 'verify', signal);
       } catch (error) {
         if (error instanceof ModelIntegrityError) {
           await response?.body?.cancel(error).catch(() => undefined);
@@ -326,18 +347,18 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       }
     },
     async put(request: string, response: Response): Promise<void> {
-      const name = fileName(request, selectedFiles);
+      const name = fileName(request, model);
       if (!name && !isRuntimeAsset(request)) throw new ModelIntegrityError(`Unpinned cache resource: ${request}`);
       if (!name) await authorizeNetwork(options.policy, new URL(request), 'runtime', !!options.localFilesOnly, undefined, activeSignal);
       // Validate before the native writer opens a temporary file: 4.2.0 cannot reliably clean up an early stream error.
-      const verified = name && (verifiedResponses.get(response) !== name || response.bodyUsed) ? await readVerified(response, name, options, 'verify', activeSignal) : response;
-      await backing.put(nativeKey(request, name), verified);
+      const verified = name && (verifiedResponses.get(response) !== model.allFiles[name] || response.bodyUsed) ? await readVerified(response, name, model.allFiles[name], options, 'verify', activeSignal) : response;
+      await backing.put(nativeKey(request, model, name), verified);
     },
   };
   const fetchVerified = async (input: string | URL, init?: RequestInit): Promise<Response> => {
     activeSignal?.throwIfAborted();
     const request = String(input);
-    const name = fileName(request, selectedFiles);
+    const name = fileName(request, model);
     if (!name && !isRuntimeAsset(request)) throw new ModelIntegrityError(`Unpinned resource URL: ${request}`);
     const method = init?.method?.toUpperCase() ?? 'GET';
     const requestSignal = activeSignal && init?.signal && activeSignal !== init.signal
@@ -359,12 +380,12 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       const cached = await verifiedCache.match(request, requestSignal);
       if (cached !== undefined) {
         // A corrupt cache match is an errored Response, not a cache miss; never turn it into successful metadata.
-        if (typeof cached !== 'string' && verifiedResponses.get(cached) !== name) {
+        if (typeof cached !== 'string' && verifiedResponses.get(cached) !== model.allFiles[name]) {
           await cached.arrayBuffer();
           throw integrity(name, 'unverified metadata cache entry');
         }
         init?.signal?.throwIfAborted();
-        const spec = ALL_MODEL_FILES[name];
+        const spec = model.allFiles[name];
         const headers = typeof cached === 'string' ? new Headers({ 'content-type': 'application/octet-stream' }) : new Headers(cached.headers);
         if (method === 'HEAD') {
           if (typeof cached !== 'string') await cached.body?.cancel();
@@ -426,13 +447,13 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     if (!name || !response.ok) return response;
     // Metadata requests have no full body to hash. Remote metadata is not a verified cache entry.
     if (metadata) {
-      if (oneByteRange && response.status === 206 && response.headers.get('content-range') !== `bytes 0-0/${ALL_MODEL_FILES[name].size}`) {
+      if (oneByteRange && response.status === 206 && response.headers.get('content-range') !== `bytes 0-0/${model.allFiles[name].size}`) {
         await response.body?.cancel();
         throw integrity(name, 'metadata total size');
       }
       return response;
     }
-    return readVerified(response, name, options, 'download', signal);
+    return readVerified(response, name, model.allFiles[name], options, 'download', signal);
   };
   Object.assign(env, {
     customCache: verifiedCache, useCustomCache: true, useBrowserCache: false, useFSCache: false,
@@ -443,6 +464,18 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   });
   if (isNode) env.cacheDir = backing.path;
   let restored = false;
+  const bundleBacking: BundleBacking = {
+    path: backing.path,
+    async match(name) {
+      if (restored) throw new Error('Verified cache installation has been restored');
+      return (await backing.match(nativeKey(modelFileUrl(name), model, name)))?.body ?? undefined;
+    },
+    async put(name, body) {
+      if (restored) throw new Error('Verified cache installation has been restored');
+      await backing.put(nativeKey(modelFileUrl(name), model, name), new Response(body, { headers: { 'content-length': String(model.allFiles[name].size) } }));
+    },
+    async delete(name) { await backing.delete(nativeKey(modelFileUrl(name), model, name)); },
+  };
   return {
     restore() {
       if (restored) return;
@@ -455,6 +488,31 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       activeSignal = signal;
       try { signal?.throwIfAborted(); return await operation(); }
       finally { activeSignal = previousSignal; }
+    },
+    exportBundle(signal) {
+      if (restored) throw new Error('Verified cache installation has been restored');
+      return exportModelBundle(model, bundleBacking, signal);
+    },
+    async importBundle(source, signal) {
+      if (restored) throw new Error('Verified cache installation has been restored');
+      await importModelBundle(source, model, bundleBacking, signal);
+    },
+    async diagnostics(signal) {
+      if (restored) throw new Error('Verified cache installation has been restored');
+      signal?.throwIfAborted();
+      const storage: ModelCacheDiagnostics['storage'] = { usage: null, quota: null, available: null, persisted: null, source: 'unavailable' };
+      if (!isNode && typeof navigator !== 'undefined' && navigator.storage) {
+        const estimate = await navigator.storage.estimate?.();
+        signal?.throwIfAborted();
+        if (typeof estimate?.usage === 'number' && Number.isFinite(estimate.usage) && estimate.usage >= 0) storage.usage = estimate.usage;
+        if (typeof estimate?.quota === 'number' && Number.isFinite(estimate.quota) && estimate.quota >= 0) storage.quota = estimate.quota;
+        if (storage.usage !== null && storage.quota !== null) storage.available = Math.max(0, storage.quota - storage.usage);
+        if (estimate) storage.source = 'browser-storage-estimate';
+        if (navigator.storage.persisted) storage.persisted = await navigator.storage.persisted();
+        signal?.throwIfAborted();
+      }
+      return { model: model.id, revision: model.revision, profile: model.profile, backend: isNode ? 'filesystem' : 'cache-storage', path: backing.path,
+        requiredBytes: Object.values(selectedFiles).reduce((total, file) => total + file.size, 0), storage };
     },
     async status(signal) {
       if (restored) throw new Error('Verified cache installation has been restored');
@@ -469,24 +527,25 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
             if (!response.headers.has('content-length')) await response.arrayBuffer();
             await response.body?.cancel();
           }
-          files.push({ name, present: response !== undefined, verified: response !== undefined, bytes: response === undefined ? 0 : ALL_MODEL_FILES[name].size });
+          files.push({ name, present: response !== undefined, verified: response !== undefined, bytes: response === undefined ? 0 : model.allFiles[name].size });
         }
         return { downloaded: files.every((file) => file.present), verified: files.every((file) => file.verified), bytes: files.reduce((total, file) => total + file.bytes, 0), totalBytes: Object.values(selectedFiles).reduce((total, file) => total + file.size, 0), path: backing.path, files };
       } finally { activeSignal = previousSignal; }
     },
     async clear(signal) {
       if (restored) throw new Error('Verified cache installation has been restored');
-      for (const name of Object.keys(ALL_MODEL_FILES) as ModelFileName[]) {
+      for (const name of Object.keys(model.allFiles) as ModelFileName[]) {
         signal?.throwIfAborted();
-        await backing.delete(nativeKey(modelFileUrl(name), name));
+        await backing.delete(nativeKey(modelFileUrl(name), model, name));
       }
     },
-    async prefetch(signal?: AbortSignal) {
+    async prefetch(signal?: AbortSignal, files: readonly ModelFileName[] = Object.keys(selectedFiles) as ModelFileName[]) {
       if (restored) throw new Error('Verified cache installation has been restored');
+      if (files.some((name) => !Object.hasOwn(selectedFiles, name))) throw new ModelIntegrityError('Cannot prefetch an unpinned selected-model file');
       const previousSignal = activeSignal;
       activeSignal = signal;
       try {
-        for (const name of Object.keys(selectedFiles) as ModelFileName[]) {
+        for (const name of files) {
           signal?.throwIfAborted();
           const request = modelFileUrl(name);
           const cached = await verifiedCache.match(request);

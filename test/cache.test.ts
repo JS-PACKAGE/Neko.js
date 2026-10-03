@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import { installVerifiedCache, ModelIntegrityError } from '../src/cache/model.js
 import { MODEL_FILES, MODEL_ID, MODEL_REVISION, modelFileUrl } from '../src/cache/manifest.js';
 import { EngineCache } from '../src/cache/engine.js';
 import { NekoError } from '../src/errors.js';
+import { getRegisteredModelProfile } from '../src/cache/registry.js';
 
 test('corrupt native cache content cannot reach the Transformers config loader or trigger a replacement download', async () => {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-onnx-integrity-'));
@@ -57,6 +58,22 @@ test('native cache rejects symlink ancestors and model entries without reading o
       assert.equal((await stat(directory)).mode & 0o777, 0o700);
     } finally { installation.restore(); installation.restore(); }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('native cache rejects rename-capable non-sticky ancestors without modifying them', { skip: process.getuid === undefined }, async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-unsafe-parent-'));
+  const root = join(directory, 'private-cache');
+  await mkdir(root, { mode: 0o700 });
+  await writeFile(join(directory, 'unrelated'), 'preserve');
+  await chmod(directory, 0o777);
+  try {
+    await assert.rejects(async () => {
+      const installation = await installVerifiedCache({ cacheDir: root });
+      installation.restore();
+    }, ModelIntegrityError);
+    assert.equal((await stat(directory)).mode & 0o777, 0o777);
+    assert.equal(await readFile(join(directory, 'unrelated'), 'utf8'), 'preserve');
+  } finally { await chmod(directory, 0o700); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('metadata ranges and HEAD require verified cached bytes without promoting partial responses or fetching offline misses', async () => {
@@ -240,4 +257,21 @@ test('idle TTL renews on use and expires only after the renewed boundary', async
   assert.equal(disposals, 1);
   assert.equal(cache.status().loaded, false);
   await cache.release();
+});
+
+test('verified responses from a different model cannot bypass selected-model hashing after restoration', async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-cross-model-integrity-'));
+  const originalFetch = env.fetch;
+  const graph = new Uint8Array(Buffer.from('CAoSC2h1Z2dpbmdmYWNlOq4GCowCCh9tb2RlbF9lbWJlZF90b2tlbnNfd2VpZ2h0X3F1YW50CglpbnB1dF9pZHMKIG1vZGVsX2VtYmVkX3Rva2Vuc193ZWlnaHRfc2NhbGVzChxtb2RlbF9lbWJlZF90b2tlbnNfd2VpZ2h0X3pwEg1pbnB1dHNfZW1iZWRzGiAvbW9kZWwvZW1iZWRfdG9rZW5zL0dhdGhlcl9RdWFudCIUR2F0aGVyQmxvY2tRdWFudGl6ZWQqCwoEYml0cxgEoAECKhEKCmJsb2NrX3NpemUYIKABAioSCgtnYXRoZXJfYXhpcxgAoAECKhQKDXF1YW50aXplX2F4aXMYAaABAjoNY29tLm1pY3Jvc29mdBIKbWFpbl9ncmFwaCp1CICUDwiACBACQh9tb2RlbF9lbWJlZF90b2tlbnNfd2VpZ2h0X3F1YW50aiUKCGxvY2F0aW9uEhllbWJlZF90b2tlbnNfcTQub25ueF9kYXRhagsKBm9mZnNldBIBMGoTCgZsZW5ndGgSCTI1NDI3OTY4MHABKnwIgJQPCEAQAUIgbW9kZWxfZW1iZWRfdG9rZW5zX3dlaWdodF9zY2FsZXNqJQoIbG9jYXRpb24SGWVtYmVkX3Rva2Vuc19xNC5vbm54X2RhdGFqEwoGb2Zmc2V0EgkyNTQyNzk2ODBqEgoGbGVuZ3RoEgg2MzU2OTkyMHABKncIgJQPCCAQAkIcbW9kZWxfZW1iZWRfdG9rZW5zX3dlaWdodF96cGolCghsb2NhdGlvbhIZZW1iZWRfdG9rZW5zX3E0Lm9ubnhfZGF0YWoTCgZvZmZzZXQSCTMxNzg0OTYwMGoRCgZsZW5ndGgSBzc5NDYyNDBwAVo0CglpbnB1dF9pZHMSJwolCAcSIQoMEgpiYXRjaF9zaXplChESD3NlcXVlbmNlX2xlbmd0aGI9Cg1pbnB1dHNfZW1iZWRzEiwKKggBEiYKDBIKYmF0Y2hfc2l6ZQoREg9zZXF1ZW5jZV9sZW5ndGgKAwiAEGouChltb2RlbC5lbWJlZF90b2tlbnMud2VpZ2h0EhEKDwgBEgsKBAiAlA8KAwiAEEIECgAQFUIRCg1jb20ubWljcm9zb2Z0EAE=', 'base64'));
+  env.fetch = async () => new Response(graph);
+  let installation;
+  try {
+    const alternative = getRegisteredModelProfile('default', 'onnx-community/Qwen3.5-2B-ONNX-OPT');
+    installation = await installVerifiedCache({ cacheDir: directory, model: alternative.id });
+    const verified = await env.fetch(`${alternative.baseUrl}onnx/embed_tokens_q4.onnx`) as Response;
+    installation.restore();
+    installation = await installVerifiedCache({ cacheDir: directory });
+    await assert.rejects(env.customCache!.put(modelFileUrl('onnx/embed_tokens_q4.onnx'), verified), ModelIntegrityError);
+    assert.deepEqual(await readdir(directory), []);
+  } finally { installation?.restore(); env.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });
