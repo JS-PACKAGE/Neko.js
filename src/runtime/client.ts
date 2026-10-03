@@ -15,6 +15,7 @@ import { createConversationSession } from '../core/session.js';
 import { deferredReadableStream } from './readable.js';
 import type { StructuredInferOptions, StructuredInferenceResult } from '../core/engine.js';
 import type { SchemaValue } from '../core/structured.js';
+import { inferTools } from '../core/tools.js';
 import { attachGenerationDiagnostic, getGenerationDiagnostic } from '../core/diagnostics.js';
 
 export type WorkerClient = Neko;
@@ -353,6 +354,7 @@ export async function createWorkerClient(options: NekoOptions = {}): Promise<Wor
       const { signal, hardDeadlineMs, ...configuration } = options;
       return connection.request('inferStructured', [configuration], signal, hardDeadlineMs);
     },
+    inferTools: (options) => inferTools(client, options),
     releaseGenerationState: (handle) => connection.request('releaseGenerationState', [handle]),
     reuseCacheInfo: () => connection.request('reuseCacheInfo', []),
     clearReuseCaches: () => connection.request('clearReuseCaches', []),

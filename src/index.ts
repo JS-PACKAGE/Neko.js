@@ -24,6 +24,7 @@ import { queuedReadable } from './queued-stream.js';
 import { askDocument, type AskOptions } from './web/query.js';
 import type { ModelBundleSource } from './cache/bundle.js';
 import { generateExtractiveReport, planExtractiveReport } from './report/extractive.js';
+import { inferTools, type ToolDefinitions, type ToolInferOptions, type ToolInferenceResult } from './core/tools.js';
 import type { GenerationStateHandle, ReuseCacheInfo, ReuseCacheLimits } from './types.js';
 import { attachGenerationDiagnostic, getGenerationDiagnostic } from './core/diagnostics.js';
 
@@ -34,6 +35,7 @@ export * from './cache/manifest.js';
 export * from './cache/registry.js';
 export * from './backend/index.js';
 export * from './errors.js';
+export * from './core/tools.js';
 export { getGenerationDiagnostic } from './core/diagnostics.js';
 export type { GenerationDiagnostic, GenerationDiagnosticOptions, DiagnosticCapture } from './core/diagnostics.js';
 export { ReportError } from './report/generate.js';
@@ -86,6 +88,7 @@ export interface Neko {
   infer(options: InferOptions): Promise<InferenceResult>;
   inferStream(options: InferStreamOptions): AsyncIterable<InferenceStreamEvent>;
   inferStructured<const S>(options: StructuredInferOptions<S>): Promise<StructuredInferenceResult<SchemaValue<S>>>;
+  inferTools<const T extends ToolDefinitions>(options: ToolInferOptions<T>): Promise<ToolInferenceResult<T>>;
   releaseGenerationState(handle: GenerationStateHandle): Promise<void>;
   reuseCacheInfo(): Promise<ReuseCacheInfo | null>;
   clearReuseCaches(): Promise<void>;
@@ -168,6 +171,7 @@ class LocalNeko implements Neko {
       return this.use(signal, async (engine) => { const result = await engine.inferStructured({ ...options, signal }, { structured: compiled }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; });
     });
   }
+  inferTools<const T extends ToolDefinitions>(options: ToolInferOptions<T>): Promise<ToolInferenceResult<T>> { return inferTools(this, options); }
   releaseGenerationState(handle: GenerationStateHandle): Promise<void> {
     return this.run('cache', undefined, async () => this.engines.inspect((engine) => {
       if (!engine) throw new NekoError('Generation state is unavailable', 'cache', 'INVALID_INPUT');
