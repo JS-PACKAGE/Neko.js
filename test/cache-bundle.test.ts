@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { exportModelBundle, importModelBundle, type BundleBacking } from '../src/cache/bundle.js';
-import { getRegisteredModelProfile, isRegisteredModelUrl } from '../src/cache/registry.js';
+import { getRegisteredModelProfile, isRegisteredModelUrl, isRegisteredResolveCacheUrl } from '../src/cache/registry.js';
 import { StreamingSha256 } from '../src/cache/sha256.js';
 import { installVerifiedCache } from '../src/cache/model.js';
 
@@ -143,6 +143,18 @@ test('alternative model is distinct, immutable, architecturally compatible, and 
   assert.equal(isRegisteredModelUrl(new URL(`${alternative.baseUrl.replace(alternative.revision, 'main')}config.json`), alternative.files), false);
   assert.equal(isRegisteredModelUrl(new URL(`${alternative.baseUrl}../unregistered.bin`), alternative.files), false);
   assert.throws(() => getRegisteredModelProfile('default', 'arbitrary/model' as typeof selected.id));
+});
+
+test('Hub resolve-cache redirects are trusted only for the exact pinned model, revision and file', () => {
+  const profile = getRegisteredModelProfile();
+  const path = `/api/resolve-cache/models/${profile.id}/${profile.revision}/config.json`;
+  assert.equal(isRegisteredResolveCacheUrl(new URL(`https://huggingface.co${path}?%2Frouting=data`), profile.files), true);
+  assert.equal(isRegisteredResolveCacheUrl(new URL(`https://huggingface.co${path.replace(profile.revision, 'main')}`), profile.files), false);
+  assert.equal(isRegisteredResolveCacheUrl(new URL(`https://huggingface.co${path.replace('config.json', 'unpinned.bin')}`), profile.files), false);
+  assert.equal(isRegisteredResolveCacheUrl(new URL(`https://huggingface.co${path.replace('config.json', '../config.json')}`), profile.files), false);
+  assert.equal(isRegisteredResolveCacheUrl(new URL(`https://example.com${path}`), profile.files), false);
+  assert.equal(isRegisteredResolveCacheUrl(new URL(`http://huggingface.co${path}`), profile.files), false);
+  assert.equal(isRegisteredResolveCacheUrl(new URL(`https://user@huggingface.co${path}`), profile.files), false);
 });
 
 test('corrupt installed assets are neither exportable nor replaced by bundle import', async () => {

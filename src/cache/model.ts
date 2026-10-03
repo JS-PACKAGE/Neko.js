@@ -449,7 +449,8 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       destination = new URL(location, destination);
       if (!['http:', 'https:'].includes(destination.protocol) || destination.username || destination.password) throw new ModelIntegrityError('Unsafe model redirect');
     }
-    return { response, destination: destination.href };
+    // CDN redirects carry per-request signed query parameters. Resume compares the stable object location only.
+    return { response, destination: destination.origin + destination.pathname };
   };
   const downloadFile = async (name: ModelFileName, signal: AbortSignal, init?: RequestInit): Promise<void> => {
     const request = modelFileUrl(name);

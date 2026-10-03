@@ -55,16 +55,29 @@ export function getRegisteredModelProfile(profile: ModelProfileId = 'default', m
   if (!selected) throw new TypeError('Unknown registered model or profile');
   return selected;
 }
+function pinnedSpecMatches(model: (typeof MODEL_REGISTRY)[ModelId], name: string, files: Readonly<Record<string, unknown>>): boolean {
+  if (!Object.hasOwn(model.files, name) || !Object.hasOwn(files, name)) return false;
+  const expected = model.files[name as ModelFileName];
+  const supplied = files[name];
+  return !!supplied && typeof supplied === 'object' && 'size' in supplied && 'sha256' in supplied && supplied.size === expected.size && supplied.sha256 === expected.sha256;
+}
 export function isRegisteredModelUrl(url: URL, files: Readonly<Record<string, unknown>>): boolean {
   for (const model of Object.values(MODEL_REGISTRY)) {
     const base = `https://huggingface.co/${model.id}/resolve/${model.revision}/`;
-    if (url.href.startsWith(base)) {
-      const name = url.href.slice(base.length);
-      if (!Object.hasOwn(model.files, name) || !Object.hasOwn(files, name)) return false;
-      const expected = model.files[name as ModelFileName];
-      const supplied = files[name];
-      return !!supplied && typeof supplied === 'object' && 'size' in supplied && 'sha256' in supplied && supplied.size === expected.size && supplied.sha256 === expected.sha256;
-    }
+    if (url.href.startsWith(base)) return pinnedSpecMatches(model, url.href.slice(base.length), files);
+  }
+  return false;
+}
+/**
+ * The Hub redirects non-LFS files to a same-origin `/api/resolve-cache/` path for the same immutable revision.
+ * Only the exact pinned model, revision and file path is accepted; the query string is Hub-owned routing data.
+ * Content is still size/SHA-256 verified before it is installed.
+ */
+export function isRegisteredResolveCacheUrl(url: URL, files: Readonly<Record<string, unknown>>): boolean {
+  if (url.origin !== 'https://huggingface.co' || url.username || url.password) return false;
+  for (const model of Object.values(MODEL_REGISTRY)) {
+    const base = `/api/resolve-cache/models/${model.id}/${model.revision}/`;
+    if (url.pathname.startsWith(base)) return pinnedSpecMatches(model, url.pathname.slice(base.length), files);
   }
   return false;
 }

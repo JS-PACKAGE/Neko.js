@@ -43,6 +43,14 @@ function validator(response: Response): string | null {
   const modified = response.headers.get('last-modified');
   return modified && Number.isFinite(Date.parse(modified)) ? modified : null;
 }
+/**
+ * Redirect targets carry signed, per-request query strings. Only origin and path identify the object being resumed;
+ * this also accepts staging written by earlier versions that stored the complete signed URL.
+ */
+function sameLocation(left: string, right: string): boolean {
+  const stable = (value: string): string => { try { const url = new URL(value); return url.origin + url.pathname; } catch { return value; } };
+  return stable(left) === stable(right);
+}
 function validIdentity(identity: DownloadIdentity, options: ResumableDownloadOptions): boolean {
   return !!identity && identity.version === 1 && identity.source === options.source && identity.size === options.size
     && identity.sha256 === options.sha256 && typeof identity.destination === 'string'
@@ -85,14 +93,14 @@ export async function downloadResumable(options: ResumableDownloadOptions): Prom
     }
     const currentValidator = validator(response);
     if (loaded && response.status === 200) {
-      await reset(destination !== partial.identity?.destination ? 'source-changed' : 'validator-changed');
+      await reset(!sameLocation(destination, partial.identity?.destination ?? '') ? 'source-changed' : 'validator-changed');
       loaded = 0;
     } else if (loaded) {
       const expectedRange = `bytes ${loaded}-${options.size - 1}/${options.size}`;
       if (response.status !== 206 || response.headers.get('content-range') !== expectedRange
-        || destination !== partial.identity!.destination || currentValidator !== partial.identity!.validator) {
+        || !sameLocation(destination, partial.identity!.destination) || currentValidator !== partial.identity!.validator) {
         await cancel();
-        await reset(destination !== partial.identity?.destination ? 'source-changed' : currentValidator !== partial.identity?.validator ? 'validator-changed' : 'range-rejected');
+        await reset(!sameLocation(destination, partial.identity!.destination) ? 'source-changed' : currentValidator !== partial.identity?.validator ? 'validator-changed' : 'range-rejected');
         throw failure('invalid resume response');
       }
       const encoding = response.headers.get('content-encoding');

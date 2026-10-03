@@ -98,6 +98,24 @@ test('interrupted real HTTP large downloads resume with Range and If-Range and a
   } finally { await fixture.close(); }
 });
 
+test('resume matches an interrupted partial by object path, not by a changing signed query', async () => {
+  const fixture = await localFixture();
+  try {
+    let signature = 0;
+    fixture.options.fetch = async (headers, signal) => ({
+      response: await fetch(fixture.options.source, { headers, ...(signal ? { signal } : {}) }),
+      destination: `${fixture.options.source}?signature=${++signature}`,
+    });
+    await assert.rejects(downloadResumable(fixture.options));
+    const partial = await fixture.stage.inspect();
+    fixture.setMode('range');
+    await downloadResumable(fixture.options);
+    assert.equal(fixture.requests[1]?.range, `bytes=${partial.size}-`);
+    assert.deepEqual(await readFile(fixture.destination), largeFixture);
+    assert.ok(!fixture.events.some((event) => event.resetReason === 'source-changed'));
+  } finally { await fixture.close(); }
+});
+
 test('changed validator consumes one full 200 response and source changes never append old bytes', async () => {
   const fixture = await localFixture();
   try {
@@ -208,6 +226,48 @@ test('verified installation preserves interrupted staging across owners and clea
   }
 });
 
+test('resume survives signed CDN redirects whose query changes on every request', async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-signed-resume-'));
+  const ranges: (string | undefined)[] = []; const signatures: (string | null)[] = [];
+  let interrupt = true; let counter = 0;
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    if (url.pathname !== '/object') { response.writeHead(302, { location: `/object?signature=${++counter}&expires=${Date.now()}` }); response.end(); return; }
+    ranges.push(request.headers.range); signatures.push(url.searchParams.get('signature'));
+    const offset = Number(/^bytes=(\d+)-$/.exec(request.headers.range ?? '')?.[1] ?? 0);
+    response.writeHead(offset ? 206 : 200, {
+      'content-length': String(Buffer.byteLength(generationFixture) - offset), etag: '"generation"',
+      ...(offset ? { 'content-range': `bytes ${offset}-${Buffer.byteLength(generationFixture) - 1}/${Buffer.byteLength(generationFixture)}` } : {}),
+    });
+    if (interrupt) response.write(generationFixture.slice(0, 64)); else response.end(generationFixture.slice(offset));
+  });
+  const listening = Promise.withResolvers<void>();
+  server.listen(0, '127.0.0.1', () => listening.resolve()); await listening.promise;
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const baseUrl = `http://127.0.0.1:${address.port}/`;
+  const originalFetch = env.fetch;
+  env.fetch = globalThis.fetch;
+  let installation: VerifiedCacheInstallation | undefined;
+  try {
+    const controller = new AbortController();
+    const policy = { network: () => true };
+    installation = await installVerifiedCache({ cacheDir: directory, modelSource: { baseUrl }, policy, onProgress(event) { if (event.phase === 'download' && event.loaded >= 64) controller.abort(new Error('interrupt fixture')); } });
+    await assert.rejects(installation.prefetch(controller.signal, ['generation_config.json']), /interrupt fixture/);
+    installation.restore();
+    interrupt = false;
+    installation = await installVerifiedCache({ cacheDir: directory, modelSource: { baseUrl }, policy });
+    await installation.prefetch(undefined, ['generation_config.json']);
+    assert.deepEqual(ranges, [undefined, 'bytes=64-']);
+    assert.notEqual(signatures[0], signatures[1]);
+    assert.equal(await readFile(join(directory, MODEL_ID, MODEL_REVISION, 'generation_config.json'), 'utf8'), generationFixture);
+  } finally {
+    installation?.restore(); env.fetch = originalFetch;
+    server.closeAllConnections();
+    const closed = Promise.withResolvers<void>(); server.close(() => closed.resolve()); await closed.promise;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('hard-terminated worker lock owners are recoverable while the same Node process remains alive', async () => {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-terminated-lock-'));
   const worker = new Worker(new URL('./fixtures/cache-lock-worker.js', import.meta.url), { workerData: { directory } });
@@ -277,4 +337,3 @@ test('parallel Node signal scopes do not exchange cancellation and nested scopes
     resume.resolve(); await pending;
   } finally { resume.resolve(); installation.restore(); await rm(directory, { recursive: true, force: true }); }
 });
-
