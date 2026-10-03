@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta name="description" content="Neko.js: local multimodal inference for Node.js and WebGPU browsers. Documentation in English and Traditional Chinese.">
+  <title>Neko.js — Local multimodal inference / 本機多模態推理</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }
+    body { max-width: 58rem; margin: 0 auto; padding: 2rem 1.25rem; }
+    h1 { font-size: clamp(2.5rem, 8vw, 4rem); line-height: 1.1; margin-bottom: .5rem; }
+    h2 { margin-top: 2rem; }
+    a { color: #1267be; text-underline-offset: .2em; }
+    nav, .links { display: flex; flex-wrap: wrap; gap: .6rem 1.4rem; }
+    section { border-top: 1px solid #888; margin-top: 2rem; }
+    pre { padding: 1rem; border: 1px solid #888; border-radius: .5rem; overflow-x: auto; }
+    code { font-family: ui-monospace, monospace; }
+    footer { margin-top: 3rem; border-top: 1px solid #888; padding-top: 1rem; }
+    @media (prefers-color-scheme: dark) { a { color: #8dc4ff; } }
+    a:focus-visible { outline: 3px solid currentColor; outline-offset: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Neko.js</h1>
+    <p>Local multimodal inference. Your inputs stay with your runtime.</p>
+    <p lang="zh-Hant">本機多模態推理。輸入資料留在您的執行環境。</p>
+    <nav aria-label="Language and source navigation">
+      <a href="#english">English</a>
+      <a href="#traditional-chinese" lang="zh-Hant">繁體中文</a>
+      <a href="https://github.com/JS-PACKAGE/Neko.js">Source / 原始碼</a>
+      <a href="https://github.com/JS-PACKAGE/Neko.js/releases">Releases / 版本</a>
+    </nav>
+  </header>
+  <main>
+    <section id="english" aria-labelledby="english-heading">
+      <h2 id="english-heading">English</h2>
+      <p>A TypeScript SDK for local text/image inference, document questions and structured website reports using pinned Qwen3.5 ONNX models. Requires Node.js 22.13+ or a supported WebGPU browser. Explicit device selection; no unsupported CPU/WASM browser fallback.</p>
+      <div class="links">
+        <a href="https://github.com/JS-PACKAGE/Neko.js/blob/main/doc/en/usage.md">Usage and API guide</a>
+        <a href="https://github.com/JS-PACKAGE/Neko.js/blob/main/doc/en/quality.md">Quality and measured limitations</a>
+        <a href="https://github.com/JS-PACKAGE/Neko.js/blob/main/SECURITY.md">Security and privacy</a>
+      </div>
+      <h3>Build the current source</h3>
+      <pre><code>git clone https://github.com/JS-PACKAGE/Neko.js.git
+cd Neko.js
+npm ci
+npm run build
+npm pack</code></pre>
+      <p>This project is not published to npm. Install the tarball printed by <code>npm pack</code> with <code>npm install /absolute/path/to/package.tgz</code>. Review native install-script approvals and model licenses in the guide. Initial setup downloads pinned, integrity-checked assets; remote URL inputs cause explicit network requests.</p>
+      <p>Model output is untrusted and may be wrong. Contract tests and configured providers do not prove inference quality or hardware execution. This static page performs no inference, collects no input and loads no third-party scripts.</p>
+    </section>
+    <section id="traditional-chinese" lang="zh-Hant" aria-labelledby="chinese-heading">
+      <h2 id="chinese-heading">繁體中文</h2>
+      <p>以固定版本的 Qwen3.5 ONNX 模型提供本機文字／圖片推理、文件問答及結構化網頁報告的 TypeScript SDK。需要 Node.js 22.13 以上或受支援的 WebGPU 瀏覽器。裝置須明確選擇；不會 fallback 至不支援的瀏覽器 CPU/WASM。</p>
+      <div class="links">
+        <a href="https://github.com/JS-PACKAGE/Neko.js/blob/main/doc/zh/usage.md">使用說明與 API</a>
+        <a href="https://github.com/JS-PACKAGE/Neko.js/blob/main/doc/zh/quality.md">品質與實測限制</a>
+        <a href="https://github.com/JS-PACKAGE/Neko.js/blob/main/SECURITY.md">安全與隱私</a>
+      </div>
+      <h3>取得套件</h3>
+      <p>本專案不發佈至 npm。請依上方指令 clone 並建置目前原始碼，以 <code>npm pack</code> 產生 tarball，再使用 <code>npm install /absolute/path/to/package.tgz</code> 安裝印出的檔案。原生安裝腳本核准與模型授權請參閱使用說明。首次設定會下載並驗證固定模型檔案；遠端網址輸入會發出明確的網路請求。</p>
+      <p>模型輸出是不可信資料，可能不正確。契約測試或 provider 設定不代表推理品質及硬體執行證據。本靜態頁面不執行推理、不收集輸入，也不載入第三方腳本。</p>
+    </section>
+    <section aria-labelledby="package-heading">
+      <h2 id="package-heading">Package and release links / 套件與版本連結</h2>
+      <ul>
+        <li><a href="https://github.com/JS-PACKAGE/Neko.js/blob/main/package.json">Current package manifest / 目前套件資訊</a></li>
+        <li><a href="https://github.com/JS-PACKAGE/Neko.js/releases/tag/v1.4">Existing v1.4 release / 既有 v1.4 版本</a></li>
+        <li><a href="https://github.com/JS-PACKAGE/Neko.js/releases/download/v1.4/Neko.js-1.4.0.tgz">Released v1.4.0 package archive / 已發佈套件封存</a></li>
+        <li><a href="https://github.com/JS-PACKAGE/Neko.js/releases/download/v1.4/SHA256">Release SHA-256 checksums / 版本校驗值</a></li>
+        <li><a href="https://github.com/JS-PACKAGE/Neko.js/blob/main/CHANGELOG.md">Changelog / 變更紀錄</a></li>
+      </ul>
+      <p>The existing release archive may differ from current source. / 既有版本封存可能與目前原始碼不同。</p>
+    </section>
+  </main>
+  <footer>Apache-2.0 · Model and runtime dependencies have separate licenses. <span lang="zh-Hant">模型與執行環境相依套件另有各自授權。</span></footer>
+</body>
+</html>
