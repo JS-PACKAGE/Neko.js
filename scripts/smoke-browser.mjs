@@ -18,10 +18,11 @@ const profileOptions = allOptions.filter((argument) => argument.startsWith('--mo
 if (profileOptions.length > 1) throw new TypeError('Provide --model-profile only once');
 const modelProfile = profileOptions[0]?.slice('--model-profile='.length) ?? 'default';
 const launchArgs = allOptions.filter((argument) => !argument.startsWith('--model-profile='));
-if (device !== 'webgpu') throw new TypeError('Usage: node scripts/smoke-browser.mjs [webgpu] [maxNewTokens] [--model-profile=default|all-q4] [--enable-unsafe-webgpu] [--preflight-only] [--headed] [--offline-reload]');
+if (device !== 'webgpu') throw new TypeError('Usage: node scripts/smoke-browser.mjs [webgpu] [maxNewTokens] [--model-profile=default|all-q4] [--require-hardware] [--enable-unsafe-webgpu] [--preflight-only] [--headed] [--offline-reload]');
 if (!['default', 'all-q4'].includes(modelProfile)) throw new TypeError('--model-profile must be default or all-q4');
 if (!Number.isSafeInteger(maxNewTokens) || maxNewTokens < 1 || maxNewTokens > 2048) throw new RangeError('maxNewTokens must be from 1 through 2048');
-if (launchArgs.some((argument) => !['--enable-unsafe-webgpu', '--preflight-only', '--headed', '--offline-reload'].includes(argument))) throw new TypeError('Only --model-profile=default|all-q4, --enable-unsafe-webgpu, --preflight-only, --headed, and --offline-reload are supported as optional arguments');
+if (launchArgs.some((argument) => !['--require-hardware', '--enable-unsafe-webgpu', '--preflight-only', '--headed', '--offline-reload'].includes(argument))) throw new TypeError('Only --model-profile=default|all-q4, --require-hardware, --enable-unsafe-webgpu, --preflight-only, --headed, and --offline-reload are supported as optional arguments');
+const requireHardware = launchArgs.includes('--require-hardware');
 const modelCacheDir = process.env.NEKO_MODEL_CACHE;
 const modelCacheRoot = modelCacheDir ? resolve(modelCacheDir, '../../..') : undefined;
 if (modelCacheDir && resolve(modelCacheRoot, MODEL_ID, MODEL_REVISION) !== resolve(modelCacheDir)) {
@@ -66,7 +67,7 @@ let offlineMode = false;
 try {
   profileDir = await mkdtemp(join(tmpdir(), 'neko-browser-smoke-'));
   const chromiumArgs = launchArgs.filter((argument) => argument === '--enable-unsafe-webgpu');
-  context = await chromium.launchPersistentContext(profileDir, { args: chromiumArgs, headless: !launchArgs.includes('--headed') });
+  context = await chromium.launchPersistentContext(profileDir, { channel: 'chromium', args: chromiumArgs, headless: !launchArgs.includes('--headed') });
   browser = context.browser();
   await context.route('**/*', async (route) => {
     const requested = new URL(route.request().url());
@@ -83,7 +84,15 @@ try {
     return route.continue();
   });
   const page = await context.newPage();
-  await page.addInitScript(() => {
+  await page.addInitScript((settings) => {
+    if (settings.requireHardware && navigator.gpu) {
+      const nativeRequestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
+      navigator.gpu.requestAdapter = async (options) => {
+        const adapter = await nativeRequestAdapter(options);
+        if (!adapter || adapter.info?.isFallbackAdapter !== false) throw new Error('Hardware WebGPU verification requires a non-fallback adapter');
+        return adapter;
+      };
+    }
     globalThis.__cachePutErrors = [];
     globalThis.__webgpuComputeEvidence = { dispatchWorkgroups: 0, dispatchWorkgroupsIndirect: 0, queueSubmit: 0 };
     const nativeCachePut = Cache.prototype.put;
@@ -116,7 +125,7 @@ try {
         return original.apply(this, args);
       };
     }
-  });
+  }, { requireHardware });
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto(`http://127.0.0.1:${address.port}/examples/browser-prototype.html`);
@@ -127,7 +136,12 @@ try {
     return {
       apiAvailable: !!gpu,
       adapter: result ? {
-        info: result.info ?? null,
+        info: {
+          vendor: result.info?.vendor ?? '',
+          architecture: result.info?.architecture ?? '',
+          device: result.info?.device ?? '',
+          description: result.info?.description ?? '',
+        },
         shaderF16: result.features.has('shader-f16'),
         fallback: result.info?.isFallbackAdapter ?? null,
       } : null,
@@ -135,6 +149,9 @@ try {
     };
   });
   console.log(JSON.stringify({ chromiumVersion: browser?.version() ?? 'unknown', chromiumHeadless: !launchArgs.includes('--headed'), chromiumLaunchArgs: chromiumArgs, sharedModelCache: !!modelCacheDir, requestedDevice: device, requestedProfile: modelProfile, adapterPreflight: adapter }));
+  if (!launchArgs.includes('--preflight-only') && (!adapter.adapter || !adapter.adapter.shaderF16)) {
+    throw new Error('Actual WebGPU inference requires an available shader-f16 adapter; no CPU/WASM fallback is supported');
+  }
   const requestsBeforeConsentChecks = untrustedExternalRequests.length;
   await page.locator('#mode').selectOption('report');
   await page.locator('#html').fill('https://example.invalid/private-page');
@@ -256,6 +273,7 @@ try {
         } else if (testCase.mode === 'image') {
           await page.locator('#image').setInputFiles({ name: 'red-square.png', mimeType: 'image/png', buffer: imageBuffer });
         }
+        const computeBefore = await page.evaluate(() => ({ ...globalThis.__webgpuComputeEvidence }));
         await page.locator('#run').click();
         await page.waitForFunction(
           () => ['complete', 'error'].includes(document.querySelector('#status')?.dataset.state ?? ''),
@@ -276,7 +294,7 @@ try {
           webgpuComputeEvidence: globalThis.__webgpuComputeEvidence,
           storageAfter: navigator.storage?.estimate ? await navigator.storage.estimate() : null,
         }));
-        console.log(JSON.stringify({ fixture: 'synthetic blue canvas with red square', phase, requestedDevice: device, requestedProfile: modelProfile, expectedMode: testCase.mode, maxNewTokens: testCase.maxNewTokens, seededModelFiles: cacheSeed?.files.map(({ name }) => name) ?? [], offlineNetworkRequests, ...observed, pageErrors }, null, 2));
+        console.log(JSON.stringify({ fixture: testCase.mode, phase, requestedDevice: device, requestedProfile: modelProfile, maxNewTokens: testCase.maxNewTokens, state: observed.state, webgpuComputeEvidence: observed.webgpuComputeEvidence, offlineNetworkRequests: offlineNetworkRequests.length, cachePutErrors: observed.cachePutErrors.length, pageErrors }, null, 2));
         if (observed.mode !== testCase.mode || observed.modelProfile !== modelProfile) throw new Error(`Browser UI did not select ${testCase.mode} mode and ${modelProfile} profile`);
         if (observed.state === 'error') {
           if (device === 'webgpu' && !/WebGPU API is not present|WebGPU adapter is unavailable|shader-f16/i.test(observed.status)) {
@@ -287,8 +305,10 @@ try {
           return false;
         }
         if (observed.cachePutErrors.length) throw new Error(`Browser model cache writes failed: ${JSON.stringify(observed.cachePutErrors)}`);
-        if (device === 'webgpu' && !Object.values(observed.webgpuComputeEvidence).some((count) => count > 0)) {
-          throw new Error('Browser inference produced no observable WebGPU compute submission');
+        const dispatches = observed.webgpuComputeEvidence.dispatchWorkgroups + observed.webgpuComputeEvidence.dispatchWorkgroupsIndirect;
+        const priorDispatches = computeBefore.dispatchWorkgroups + computeBefore.dispatchWorkgroupsIndirect;
+        if (dispatches <= priorDispatches || observed.webgpuComputeEvidence.queueSubmit <= computeBefore.queueSubmit) {
+          throw new Error('This fixture produced no observable WebGPU compute dispatch and queue submission');
         }
         if (testCase.mode === 'report') {
           if (observed.html !== reportHtml) throw new Error('Browser UI changed the report HTML fixture');

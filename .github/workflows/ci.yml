@@ -3,11 +3,50 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      real_cpu:
+        description: Run costly native CPU inference across OS, Node and model profiles
+        type: boolean
+        default: false
+      real_webgpu:
+        description: Run actual Chromium WebGPU inference on the labeled hardware runner
+        type: boolean
+        default: false
+      real_quality:
+        description: Run costly versioned real-model quality gates
+        type: boolean
+        default: false
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    name: Contracts and packed artifact (${{ matrix.os }}, Node ${{ matrix.node }}, CPU)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+        node: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      # npm ci runs the package prepare build, including native dependency install hooks.
+      - run: npm ci
+      - run: npm run test:quality
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: node --test dist/test/*.test.js dist/test/*/*.test.js
+      - name: Verify packed exports, declarations and native dependency without a model download
+        run: npm run test:package:artifact
+  browser-contracts:
+    name: Browser contracts (${{ matrix.browser }}, Node ${{ matrix.node }}; not inference)
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -20,47 +59,94 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npm run test:quality
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run build
-      - run: node --test dist/test/*.test.js dist/test/*/*.test.js
       - run: npx playwright install --with-deps ${{ matrix.browser }}
       - run: npm run test:browser -- --project=${{ matrix.browser }}
-  packed-consumer:
-    runs-on: ubuntu-latest
+  site-artifact:
+    name: Static website build and HTTP smoke (no deployment)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run test:package:artifact
+      - run: node scripts/build-site.mjs
+      - run: node --test scripts/site.test.mjs
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/site
+          retention-days: 7
   real-model-consumer:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-15
-    env:
-      NEKO_MODEL_CACHE: ${{ runner.temp }}/neko-consumer-cache
+    name: Actual inference (${{ matrix.os }}, Node ${{ matrix.node }}, ${{ matrix.device }}, ${{ matrix.profile }})
+    if: github.event_name == 'workflow_dispatch' && inputs.real_cpu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+        node: [22, 24, 26]
+        device: [cpu]
+        profile: [default, all-q4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - name: Prefetch pinned assets for the offline packed consumer
-        run: |
-          node --input-type=module -e '
-            import { createNeko } from "./dist/node/index.js";
-            const neko = await createNeko({ device: "cpu", modelProfile: "default", cacheDir: process.env.NEKO_MODEL_CACHE });
-            try { await neko.cache.model.prefetch(); } finally { await neko.dispose(); }
-          '
-      - run: npm run test:package
+      - name: Prefetch pinned assets for offline packed inference
+        # runner.temp is valid in step env, not in job env (which prevents all jobs from starting).
+        env:
+          NEKO_MODEL_CACHE: ${{ runner.temp }}/neko-consumer-cache
+        run: node scripts/prefetch-model.mjs --model-profile=${{ matrix.profile }}
+      - name: Perform real text, image, structured and report inference in the packed consumer
+        env:
+          NEKO_MODEL_CACHE: ${{ runner.temp }}/neko-consumer-cache
+        run: npm run test:package -- --model-profile=${{ matrix.profile }}
+  real-browser-webgpu:
+    name: Actual inference (macOS ARM64, ${{ matrix.browser }}, Node ${{ matrix.node }}, ${{ matrix.device }}, ${{ matrix.profile }})
+    if: github.event_name == 'workflow_dispatch' && inputs.real_webgpu
+    # Hosted runners do not promise a physical WebGPU adapter. This lane never uses a software/CPU fallback.
+    runs-on: [self-hosted, macOS, ARM64, neko-webgpu]
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        node: [22, 24, 26]
+        browser: [chromium]
+        device: [webgpu]
+        profile: [default, all-q4]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --no-shell chromium
+      - name: Verify the runner platform
+        run: node --input-type=module -e 'if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("This lane requires macOS ARM64 hardware")'
+      - name: Prefetch pinned assets for the browser's verified local mirror
+        env:
+          NEKO_MODEL_CACHE: ${{ runner.temp }}/neko-browser-cache
+        run: node scripts/prefetch-model.mjs --model-profile=${{ matrix.profile }}
+      - name: Perform hardware WebGPU text, image and report inference, then repeat offline
+        env:
+          NEKO_MODEL_CACHE: ${{ runner.temp }}/neko-browser-cache/onnx-community/Qwen3.5-0.8B-ONNX-OPT/fafab72d87a9e6be3925b38caf48286d2838f2d0
+        run: npm run smoke:browser -- webgpu 48 --model-profile=${{ matrix.profile }} --require-hardware --offline-reload
   real-model-quality:
-    if: github.event_name == 'workflow_dispatch'
+    name: Real-model quality (macOS ARM64, Node 22, CPU, ${{ matrix.profile }})
+    if: github.event_name == 'workflow_dispatch' && inputs.real_quality
     runs-on: macos-15
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [default, all-q4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -68,16 +154,15 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run build
       - name: Run pinned real-model CPU quality fixtures
-        run: npm run quality:benchmark -- --runtime node --device cpu --model-profile default --allow-network --cache-dir "${{ runner.temp }}/neko-quality-cache" --output artifacts/quality-raw.json
+        run: npm run quality:benchmark -- --runtime node --device cpu --model-profile ${{ matrix.profile }} --allow-network --cache-dir "${{ runner.temp }}/neko-quality-cache" --output artifacts/quality-raw.json
       - name: Enforce versioned quality policy
         if: always()
         run: npm run quality:gate -- --input artifacts/quality-raw.json --output artifacts/quality-diagnostics.json
-      - name: Preserve raw model outputs and gate diagnostics
+      - name: Preserve explicit synthetic fixture outputs and gate diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: real-model-quality
+          name: real-model-quality-${{ matrix.profile }}
           path: artifacts/quality-*.json
           if-no-files-found: error

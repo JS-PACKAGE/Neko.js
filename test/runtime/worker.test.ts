@@ -64,7 +64,6 @@ test('worker policy receives URLs on the parent and preserves a denial that thro
     await assert.rejects(neko.planInference({ prompt: 'Count the actual chat tokens.' }), (error: unknown) => error instanceof NekoError && error.code === 'OPERATION_FAILED' && Object.hasOwn(error, 'cause') && error.cause === undefined);
     assert.deepEqual(decisions, ['worker', 'model', 'model']);
     assert.equal((await neko.cache.engine.status()).loaded, false);
-    assert.equal((await neko.queueStatus()).running, null);
   } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
 });
 

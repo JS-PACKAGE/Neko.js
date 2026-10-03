@@ -1,14 +1,30 @@
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const run = promisify(execFile);
-const root = resolve(new URL('../', import.meta.url).pathname);
+const require = createRequire(import.meta.url);
+const root = fileURLToPath(new URL('../', import.meta.url));
+const arguments_ = process.argv.slice(2);
+const profileArguments = arguments_.filter((argument) => argument.startsWith('--model-profile='));
+if (profileArguments.length > 1 || arguments_.some((argument) => argument !== '--artifact-only' && !argument.startsWith('--model-profile='))) {
+  throw new TypeError('Usage: npm run test:package -- [--artifact-only] [--model-profile=default|all-q4]');
+}
+const modelProfile = profileArguments[0]?.slice('--model-profile='.length) ?? 'default';
+if (!['default', 'all-q4'].includes(modelProfile)) throw new TypeError('--model-profile must be default or all-q4');
+const runNpm = (args, options) => {
+  // npm.cmd cannot be execFile'd on Windows; execute npm's own CLI without a shell.
+  if (process.env.npm_execpath) return run(process.execPath, [process.env.npm_execpath, ...args], options);
+  if (process.platform === 'win32') throw new Error('On Windows invoke this script through npm run test:package or test:package:artifact');
+  return run('npm', args, options);
+};
 const temporary = await mkdtemp(join(tmpdir(), 'neko-package-consumer-'));
 try {
-  const packed = await run('npm', ['pack', '--json', '--pack-destination', temporary], { cwd: root, maxBuffer: 4 * 1024 * 1024 });
+  const packed = await runNpm(['pack', '--json', '--pack-destination', temporary], { cwd: root, maxBuffer: 4 * 1024 * 1024 });
   const [{ filename, files }] = JSON.parse(packed.stdout);
   const listed = new Set(files.map(({ path }) => path));
 
@@ -20,7 +36,7 @@ try {
     type: 'module',
     allowScripts: { 'onnxruntime-node@1.30.0': true, 'sharp@0.35.4': true },
   }, null, 2));
-  await run('npm', ['install', '--no-audit', '--no-fund', join(temporary, filename)], {
+  await runNpm(['install', '--no-audit', '--no-fund', join(temporary, filename)], {
     cwd: consumer,
     maxBuffer: 16 * 1024 * 1024,
   });
@@ -38,9 +54,10 @@ try {
   if (typeof pkg.dependencies?.['onnxruntime-node'] !== 'string') throw new Error('Packed consumer is missing its native ONNX Runtime dependency');
   const typeFixture = join(consumer, 'consumer.ts');
   await writeFile(typeFixture, `
-    import { createNeko, type InferOptions, type InferencePlanOptions, type ModelSource, type Neko, type NekoOptions, type Page, type ReportCheckpoint, type StructuredInferOptions } from 'neko.js';
+    import { createNeko, createNekoPool, defineTool, executeToolCalls, type InferOptions, type InferencePlanOptions, type ModelSource, type Neko, type NekoOptions, type Page, type ReportCheckpoint, type StructuredInferOptions } from 'neko.js';
     import * as web from 'neko.js/web';
     import { parseStructuredReport, serializeStructuredReport, parseReportCheckpoint, serializeReportCheckpoint } from 'neko.js/report';
+    import { createDocumentIndex, documentForIndex } from 'neko.js/documents';
     const policy: NonNullable<NekoOptions['policy']> = {
       network(url, kind) { return kind === 'model' || kind === 'runtime' || kind === 'worker' || (kind === 'image' && url.protocol === 'https:'); },
       localFiles(path) { return path.endsWith('/approved.png'); },
@@ -89,6 +106,29 @@ try {
       await session.branch();
       await session.reset();
       await session.dispose();
+      for await (const event of instance.inferStructuredStream({ ...structured })) {
+        if (event.type === 'result') event.result.value;
+        else event.text;
+      }
+      for await (const event of session.sendStream('Say OK.', { maxNewTokens: 8 })) event.type;
+      const retained = await instance.infer({ prompt: 'Say OK.', reuse: { retainState: true, vision: true }, diagnostics: { capture: { maxCharacters: 100 } } });
+      if (retained.reuse?.state) await instance.releaseGenerationState(retained.reuse.state);
+      await instance.reuseCacheInfo(); await instance.clearReuseCaches();
+      const pdf = await instance.extractPdf(new Uint8Array(), { ocr: 'scanned' });
+      const ocr = await instance.ocr(new Uint8Array());
+      const index = await createDocumentIndex([documentForIndex(pdf), documentForIndex(ocr)]);
+      const answer = await instance.askDocuments(index, 'What does the document say?');
+      answer.retrieval.exhaustive; answer.usage;
+      for await (const event of instance.askDocumentsStream(index, 'What does it say?')) event.type;
+      for await (const event of instance.askStream(page, 'What does it say?')) event.type;
+      for await (const event of instance.describeStream(page)) event.type;
+      const add = defineTool({ name: 'add', parameters: { type: 'object', properties: { a: { type: 'integer' }, b: { type: 'integer' } }, required: ['a', 'b'], additionalProperties: false }, result: { type: 'integer' } } as const);
+      const tools = [add] as const;
+      const selected = await instance.inferTools({ tools, messages: [{ role: 'user', content: 'Add 17 and 25.' }] });
+      const outputs = await executeToolCalls(tools, selected.toolCalls, { approve: () => true, handlers: { add: ({ a, b }) => a + b } });
+      void outputs;
+      const pool = await createNekoPool({ workers: [{ memoryBytes: 2000000000, options: { device: 'cpu' } }], budget: { memoryBytes: 2000000000 } });
+      await pool.inferBatch([{ prompt: 'Say OK.' }]); await pool.dispose();
       const reportPlan = await instance.planReport(page);
       reportPlan.estimatedDurationMs;
       await instance.health({ timeoutMs: 1000 });
@@ -121,7 +161,7 @@ try {
     void construct;
     void web.extractPage;
   `);
-  await run(join(root, 'node_modules/.bin/tsc'), [
+  await run(process.execPath, [require.resolve('typescript/bin/tsc'),
     '--noEmit', '--strict', '--skipLibCheck', 'false', '--module', 'NodeNext',
     '--moduleResolution', 'NodeNext', '--target', 'ES2022', '--lib', 'DOM,ESNext',
     typeFixture,
@@ -163,6 +203,7 @@ try {
       import { createNeko } from 'neko.js';
       import * as web from 'neko.js/web';
       import { parseStructuredReport, serializeStructuredReport, parseReportCheckpoint, serializeReportCheckpoint } from 'neko.js/report';
+      const modelProfile = ${JSON.stringify(modelProfile)};
       const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="224" height="224"><rect width="224" height="224" fill="#0000ff"/><rect x="56" y="56" width="112" height="112" fill="#ff0000"/></svg>');
       const imageBuffer = await sharp(svg).png().toBuffer();
       const imagePath = path.join(process.cwd(), 'quality-fixture.png');
@@ -173,7 +214,7 @@ try {
         network(_url, kind) { return kind === 'model' || kind === 'worker'; },
         localFiles(filePath) { return filePath === canonicalImagePath; },
       };
-      const neko = await createNeko({ device: 'cpu', modelProfile: 'default', execution: 'worker', localFilesOnly: true, policy, ...(process.env.NEKO_MODEL_CACHE ? { cacheDir: process.env.NEKO_MODEL_CACHE } : {}) });
+      const neko = await createNeko({ device: 'cpu', modelProfile, execution: 'worker', localFilesOnly: true, policy, ...(process.env.NEKO_MODEL_CACHE ? { cacheDir: process.env.NEKO_MODEL_CACHE } : {}) });
       try {
         const textPlan = await neko.planInference({ prompt: 'What is 2 + 2? Answer using a single digit.', maxNewTokens: 16 });
         assert.equal(textPlan.fits, true);
@@ -189,7 +230,8 @@ try {
         assert.ok(answer.usage.inputTokens > 0 && answer.usage.outputTokens > 0, 'the packed consumer reports generated token usage');
         assert.equal(answer.finishReason, 'stop', 'the packed consumer completes the single-token answer without truncation');
         assert.equal(textPlan.inputTokens, answer.usage.inputTokens, 'planned tokens must match actual chat preprocessing');
-        assert.equal(answer.model.profile, 'default');
+        assert.equal(answer.model.profile, modelProfile);
+        assert.equal(answer.backend.device, 'cpu');
         assert.equal(answer.execution?.mode, 'worker', 'the packed consumer runs inference in a worker');
 
         const visualPlan = await neko.planInference({ image: imagePath, prompt: 'Name the main geometric shape in this image in one word.', maxNewTokens: 16 });
@@ -199,7 +241,8 @@ try {
           maxNewTokens: 16,
         });
         assert.match(visual.text.toLowerCase(), /square/, 'the packed consumer identifies a visible square');
-        assert.equal(visual.model.profile, 'default');
+        assert.equal(visual.model.profile, modelProfile);
+        assert.equal(visual.backend.device, 'cpu');
         assert.equal(visual.finishReason, 'stop', 'the packed consumer completes image inference without truncation');
         assert.equal(visualPlan.inputTokens, visual.usage.inputTokens, 'image planning must include expanded visual tokens');
         assert.equal(visualPlan.images[0].versionId, visual.images[0].versionId, 'image planning and inference preserve the same normalized image identity');
@@ -233,7 +276,8 @@ try {
         assert.equal(report.images[0].source.imageId, report.images[0].imageId, 'the report preserves image provenance');
         assert.ok(report.sections.length > 0 && report.sections.some((section) => /red/i.test(section.keyPoints.join(' ')) && /blue/i.test(section.keyPoints.join(' '))), 'the report captures the page facts');
         assert.match(report.images[0].description.toLowerCase(), /square/);
-        assert.equal(report.metadata.model.profile, 'default');
+        assert.equal(report.metadata.model.profile, modelProfile);
+        assert.equal(report.metadata.backend.device, 'cpu');
         assert.equal(report.metadata.execution.mode, 'worker');
         const restored = await parseStructuredReport(await serializeStructuredReport(report), page);
         assert.deepEqual(restored, report, 'the packed report survives validated JSON persistence');
@@ -251,7 +295,7 @@ try {
           neko.cache.engine.status(),
           neko.backend.current(),
         ]);
-        console.log(JSON.stringify({ text: answer.text, image: visual.text, report: { title: report.page.title, imageDescription: report.images[0].description, facts: report.sections.map((section) => section.keyPoints) }, backend: { ...backend, execution: answer.execution }, cache: { model: modelCache, engine: engineCache }, usage: answer.usage }));
+        console.log(JSON.stringify({ platform: process.platform, architecture: process.arch, node: process.version, modelProfile, fixtures: ['text', 'path-image', 'multi-image', 'structured', 'report', 'checkpoint-resume'], backend: { ...backend, execution: answer.execution }, cache: { model: modelCache, engine: engineCache }, usage: answer.usage }));
       } finally {
         await neko.dispose();
       }
