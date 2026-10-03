@@ -8,7 +8,7 @@ Neko.js 是供 Node.js 與受支援 WebGPU 瀏覽器使用的本機多模態 SDK
 
 ## 安裝與建置
 
-- 需要 Node.js 22 以上，套件使用 ESM，且不發佈至 npm。
+- 需要 Node.js 22.13 以上，套件使用 ESM，且不發佈至 npm。
 - Git 倉庫支援方式：clone 專案後執行 `npm ci` 和 `npm run build`。這種明確本機建置可配合 npm 11 的生命週期腳本核准機制；若 Git 相依套件的 `prepare` 尚未核准，請勿直接安裝尚未建置的 Git dependency。
 - 請從目前工作樹本機建置後執行 `npm pack`；即使 `dist/` 被 Git 忽略，它仍會包含於套件。使用 `npm pack` 印出的檔名，在其他專案執行 `npm install /absolute/path/to/<printed-filename>.tgz`。檔名／版本取自當前 `package.json`，不是本說明的固定值；本專案不發佈至 npm。Node bundle 已包含 Transformers.js，僅將固定版本 `onnxruntime-node`、`sharp`、`parse5` 保留為直接執行依賴。npm 11 若封鎖原生 postinstall，僅核准 `onnxruntime-node@1.30.0` 和 `sharp@0.35.4`，勿對所有套件一律核准腳本。
 - `npm test`、`npm run typecheck`、`npm run lint` 分別執行 Node 測試、型別檢查和 ESLint。`npm run test:package:artifact` 會在隔離的 consumer 中實際安裝 packed artifact，檢查公開匯入與 TypeScript 宣告。`npm run test:package` 會額外以該 consumer 執行文字、圖片和報告推理；冷快取時可能下載約 871 MB。
@@ -180,6 +180,125 @@ try {
 
 Session 的 `send(content, options?)`／`plan(content, options?)` 接受文字或 chat content array。操作序列化；只有成功完成的 user／assistant turn 才交易式寫入 history，規劃不提交。`contextPolicy: 'error'` 是預設；`'drop-oldest'` 只移除完整最舊 turn，保留 system。`maxHistoryMessages` 包含 system 且至多 128。同步 `history()` 提供擁有副本；branch 有獨立 history，但共用 host。`reset()` 保留 system；`export()`／`import(snapshot)` 使用 model-bound `version: 1` snapshot。圖片匯出只接受可攜 raster data URL／擁有 raw pixels；外部 URL／path 被拒絕，匯出不為此讀檔或 fetch。Snapshot 可能含敏感對話／像素，須安全保存。Dispose session 不 dispose host。每次生成仍處理整段對話；只可能重用 plan/send 的完全相同 tokenization，並非 KV／跨 turn prefix 重用。
 
+### 結構化、報告與問答串流
+
+`inferStructuredStream(options)`、`describeStream(input, options?)`、`askStream(input, question, options?)` 和 `askDocumentsStream(index, question, options?)` 使用對應非串流 API 的選項，另加 `StreamBufferOptions`。它們先提供尚未驗證的 `{ type: 'provisional', text }` 片段，再提供最後的 `{ type: 'result', result, usage }`。只有最後結果完成 schema／引用驗證；provisional JSON 不是答案或證據。報告片段另有 `phase`，並以 `{ type: 'stage', event }` 回報進度。`format: 'markdown'` 的最後結果是渲染完成的 Markdown，不是逐片 Markdown。
+
+```ts
+for await (const event of neko.inferStructuredStream({
+  prompt: 'Return a greeting.', schema, maxNewTokens: 64,
+  maxBufferedEvents: 64, maxBufferedCharacters: 1_048_576,
+})) {
+  if (event.type === 'result') console.log(event.result.value);
+}
+for await (const event of session.sendStream('Hello.')) {
+  if (event.type === 'token') process.stdout.write(event.text);
+}
+```
+
+Buffer 預設為 64 個事件及 1,048,576 個 UTF-16 字元；可設範圍分別為 1–10,000 和 1–16,777,216。佇列中的最後結果也計入限制。溢位以 `STREAM_OVERFLOW` 失敗並取消操作；提前 `break`、iterator return 或取消不會提供成功的最後結果。
+
+`session.sendStream(content, options?)` 提供 `token`／`result`，不是 `provisional`。History **只有在讀取 result 後繼續迭代至正常結束時才提交**。收到 result 就 break 仍會回滾，請完整使用 `for await`。失敗、溢位或取消均不寫入 user turn 或部分 assistant 輸出；session 操作所有權保留至正常結束或取消。
+
+### 工具選取與明確核准執行
+
+```ts
+import { defineTool, executeToolCalls, runToolLoop } from 'neko.js';
+
+const tools = [defineTool({
+  name: 'openingHours',
+  description: 'Read the application-owned opening hours.',
+  parameters: { type: 'object', properties: {}, additionalProperties: false } as const,
+  result: { type: 'string' } as const,
+})] as const;
+const messages = [{ role: 'user' as const, content: 'What are the opening hours?' }];
+const execution = {
+  approve: (call: { name: string }) => call.name === 'openingHours',
+  handlers: { openingHours: () => 'Monday 09:00–17:00' },
+};
+const selected = await neko.inferTools({ tools, messages, maxNewTokens: 256 });
+const results = await executeToolCalls(tools, selected.toolCalls, execution);
+const completed = await runToolLoop(neko, tools, {
+  messages, ...execution, maxRounds: 4, maxNewTokens: 256,
+});
+console.log(results, completed.stopReason, completed.message);
+```
+
+`defineTool({ name, description?, parameters, result?, structuredMode? })` 驗證 schema 並持有定義。`neko.inferTools({ tools, messages, maxToolCalls?, ...inferenceOptions })` 透過結構化模型推理選取，回傳已驗證的 `toolCalls` 與 assistant `message`，不執行 handler。`maxToolCalls` 預設 8（0–64）。工具對話使用獨立的 `ToolConversationMessage` 契約，包含 `role: 'tool'` 結果，不是一般推理 chat messages。
+
+`executeToolCalls(tools, calls, { approve, handlers, signal? })` 驗證 calls，依序核准及執行 handler。只有應用程式核准函式回傳字面值 `true` 才可執行；**模型永遠不能授權**。結果 `status` 為 `'ok' | 'denied' | 'error' | 'cancelled'`；成功輸出必須可表示為 JSON，並符合選填 result schema。Handler 自行負責副作用，且須觀察取消 signal。
+
+`runToolLoop(neko, tools, options)` 將工具結果當作**不可信資料**送回模型。`maxRounds` 限制已執行回合（1–16，預設 4），不是推理次數。除非較早選取已無 calls，最後一個執行回合後仍會做一次終止選取。`stopReason` 為 `'no-calls'` 或 `'max-rounds'`；`rounds`、`roundResults`、`messages` 和合計 `usage` 記錄工作。最後 `message.toolCalls` 的 calls 會回傳，但**絕不執行**；不能在沒有新的應用程式明確決策下執行它們。
+
+### 獨立 worker pool
+
+```ts
+import { createNekoPool } from 'neko.js';
+
+const reservation = 3 * 1024 ** 3; // 應用程式估算，不是量測記憶體。
+const pool = await createNekoPool({
+  workers: [
+    { options: { device: 'cpu' }, memoryBytes: reservation },
+    { options: { device: 'cpu' }, memoryBytes: reservation },
+  ],
+  budget: { memoryBytes: 2 * reservation }, maxPending: 8,
+});
+try {
+  const results = await pool.inferBatch([
+    { prompt: 'Write a greeting.', maxNewTokens: 32 },
+    { prompt: 'Write a farewell.', maxNewTokens: 32 },
+  ]);
+  console.log(results, pool.status());
+} finally { await pool.dispose(); }
+```
+
+每個設定擁有獨立 worker／runtime，各 owner 可能各自載入模型。FIFO 等候請求分派給可用 owner；這**不是 tensor batching**，也不共用模型記憶體。`maxWorkers` 預設 4（1–32），非空 `workers` 陣列不能超過它。`maxPending` 預設 8（0–10,000），超額 admission 以 `QUEUE_FULL` 失敗。正整數 `memoryBytes` 預留合計須符合 `budget.memoryBytes`；這是應用程式宣告的 accounting，不是實測或 OS 強制的記憶體上限。
+
+`pool.infer(request)` 回傳結果 promise；`pool.submit(request)` 回傳 `{ id, result, cancel, dispose }`。Item 取消／dispose 只取消該請求，不 dispose owner 或 pool。`inferBatch(requests, { signal? })` 按輸入順序回傳含 ID 的 fulfilled／rejected records，保留個別錯誤。Pool disposal 取消未完成工作並 dispose 全部 owner，務必 await。
+
+### Decoder state 與 vision 重用
+
+`infer`／`inferStructured` 接受 `reuse: { retainState?, state?, vision? }`。`retainState: true` 的成功結果可提供 `result.reuse.state`；將不透明 handle 作為 `state` 傳入相容且 token prefix 精確延伸的請求。`vision: true` 啟用處理後的 vision encoder features 重用。這和 normalized pixels／rendered prompt tokenization 快取不同，也不是 session 自動 KV 重用。
+
+```ts
+const retained = await neko.infer({
+  prompt: 'Write a greeting.', maxNewTokens: 32,
+  reuse: { retainState: true, vision: true },
+});
+try {
+  console.log(retained.reuse, await neko.reuseCacheInfo());
+  // 後續請求須符合精確 token prefix 與 compatibility key。
+} finally {
+  if (retained.reuse?.state) await neko.releaseGenerationState(retained.reuse.state);
+}
+await neko.clearReuseCaches();
+```
+
+Handle 屬於 engine，不是可攜 snapshot；已釋放、淘汰或其他 engine 的 handle 不能延續生成。相容性綁定 model／profile、schema／constraint mode、instructions、處理後圖片身分及 stop settings；文字相似不夠。結果提供 `reusedDecoderTokens`、`visionEncoderHits` 和 `visionEncoderMisses`，不保證加速。
+
+以 `createNeko({ reuseCache: { stateEntries, stateBytes, visionEntries, visionBytes } })` 限制 entries／bytes（正 safe integers）。預設 4 個 state／512 MiB、8 個 vision entries／64 MiB。過大的 state／features 會失敗，已保留 entries 可被淘汰。`reuseCacheInfo()` 提供 accounting，engine 尚未取得時為 `null`；`releaseGenerationState(handle)` 釋放單一 state，`clearReuseCaches()` 清除兩種快取。釋放／dispose engine 會使 handle 失效。`scripts/smoke-reuse.mjs` 是明確執行的真實模型重用 exercise；檔案存在不代表已在你的後端通過。
+
+### 生成診斷與生命週期事件
+
+```ts
+import { getGenerationDiagnostic } from 'neko.js';
+
+try {
+  await neko.inferStructured({
+    prompt: 'Return a greeting.', schema, maxNewTokens: 64,
+    diagnostics: { capture: { maxCharacters: 2048 } },
+  });
+} catch (error) {
+  const diagnostic = getGenerationDiagnostic(error);
+  console.log(diagnostic?.code, diagnostic?.usage);
+  throw error;
+}
+```
+
+`infer`、`inferStructured` 和 `describe` 的 `diagnostics` 啟用錯誤 metadata：stage／attempt、finish reason、usage、輸出長度，以及可用的 JSON／schema 資訊。`true` 不擷取原始文字；`{ capture: { maxCharacters } }` 明確擷取最多 1–65,536 個字元。`getGenerationDiagnostic(error)` 回傳 metadata 或 `undefined`，不替換原錯誤。擷取的模型輸出不可信且可能含使用者／來源內容，不要無差別記錄、上傳或保存。
+
+`createNeko({ onEvent: (event) => { /* 記錄不含內容的 metrics */ } })` 觀察 `NekoEvent`：request start／end ID、`operation`、queue／duration timing、outcome／error code、token usage、model／execution 身分，或 engine loaded timing。`NekoOperation` 包含 `infer`、`inferStructured`、`planInference`、`ask`、`describe`、`load`、`warmup`；不保證每個組合 helper 都有獨立外層事件。事件不含 prompt、生成文字或來源文件。Observer throw／reject 不影響結果，SDK 不 await observer，worker 轉送為 best-effort。Factory observer 與逐報告的 `DescribeOptions.onEvent` 不同；後者回報報告 stages。
+
 ### 報告模式、規劃、稽核與續跑
 
 ```js
@@ -265,6 +384,85 @@ console.log(answer.status, answer.claims);
 
 `ask(input, question, options?)` 的模型受 grammar 限制選取 paragraph IDs 與 extractive claims；SDK 建立整段精確引用及 UTF-16 offsets。未知／重複 ID 或不受引用支持的 claims 被拒絕，或結果為 `insufficient-evidence`。選取文字不會為了塞進 context 而暗中截斷；超過容量須由呼叫端明確縮小 sources。引用精確不代表答案相關、語意正確或世界事實已查核。
 
+### 本機文件索引與精確子字串問答
+
+```ts
+import {
+  createDocumentIndex, importDocumentIndex, documentFromPage, askDocuments,
+} from 'neko.js';
+
+const page = await extractPage('<main><p>The park opened in 1987.</p></main>');
+const index = await createDocumentIndex([
+  documentFromPage(page, 'park'),
+  { id: 'hours', text: 'Monday opening hours are 09:00–17:00.' },
+], { chunkSize: 1200, maxDocuments: 1000 });
+const found = index.search('opening hours', { topK: 4 });
+const answer = await neko.askDocuments(index, 'When did the park open?');
+// 明確提供推理／規劃 host 的等價 helper：
+const other = await askDocuments(neko, index, 'What are Monday opening hours?');
+const restored = await importDocumentIndex(JSON.parse(JSON.stringify(index.exportSnapshot())));
+console.log(found.coverage, answer.claims, other.retrieval, restored.id);
+```
+
+`createDocumentIndex(documents?, options?)` 非同步持有 `{ id, text, title?, url?, blocks? }` 文件並建立有界 BM25／CJK chunks。預設為 `chunkSize: 1200`、`maxDocuments: 1000`、`maxCharacters: 8_000_000`、`maxChunks: 100_000`。`documentFromPage(page, id?)` 串接段落文字並保留 paragraph provenance，預設 ID 為 `page.url`。`search(question, { topK?, documentIds?, maxScoredChunks? })` 回傳 hits、quotes 和明確 coverage，永遠為 `exhaustive: false`。檢索不證明整份文件缺少某資訊、相關性或完整性。
+
+`updateDocument(document)`、`replaceDocuments(documents)` 和 `removeDocument(id)` 原子更新索引；成功 mutation 改變索引身分，舊答案因而過時。`exportSnapshot()` 回傳 version-1 immutable snapshot，可由呼叫端以 JSON 保存；`importDocumentIndex(snapshot)` 驗證身分並重建檢索結構。Snapshot 含來源文字，不含 embedding vectors，也不是身分驗證；敏感內容須安全保存。
+
+`askDocuments(host, indexOrSnapshot, question, options?)`／`neko.askDocuments(...)` 在結構化生成前，以實際 tokenizer／context budget 規劃完整檢索 chunks。選項包含 `search`、`maxNewTokens`（預設 512，1–2048）、`contextWindowTokens`、`generation`、`signal`、`hardDeadlineMs` 和 provisional `onToken`。`retrieval` 記錄選取／context 排除 chunk IDs 和規劃 coverage，不會 fallback 提交完整文件。每個 claim 必須是**每個**引用 chunk 的精確連續子字串。SDK 引用提供 document／chunk version IDs、來源 provenance，及 canonical document text 的 UTF-16 offsets，不是原始 PDF／HTML bytes 的位置。`status` 為 `'answered'` 或 `'insufficient-evidence'`。精確引用不是事實查核、OCR 驗證或相關性保證。
+
+### 呼叫端提供的 hybrid retrieval
+
+Neko.js **不內建 embedding model**；固定 Qwen 生成模型不是 embedder。應用程式自行負責 embedding model 的來源、授權與完整性驗證。請提供真正由應用程式持有的 `DocumentEmbedder`；下例接收該相依物件，不捏造向量：
+
+```ts
+import type { DocumentEmbedder, DocumentIndex, Neko } from 'neko.js';
+
+async function queryWithEmbeddings(
+  neko: Neko, index: DocumentIndex, embedder: DocumentEmbedder,
+) {
+  const found = await index.searchHybrid('opening hours', {
+    embedder, topK: 4, batchSize: 32, maxEmbeddedChunks: 4096,
+  });
+  const answer = await neko.askDocuments(index, 'What are the opening hours?', {
+    embedder, embedding: { batchSize: 32, maxEmbeddedChunks: 4096 },
+    search: { topK: 4 },
+  });
+  return { found, answer };
+}
+```
+
+`DocumentEmbedder` 有 readonly `id`、`dimensions`（1–8192），及 `embed(texts, { kind: 'query' | 'document', signal? }): Promise<readonly ArrayLike<number>[]>`。每個輸入須依原順序回傳一個符合宣告維度、有限且非零的向量；asymmetric model 可自行套用 query／passage prefix。模型、prompt format 或任何可能改變向量的設定變更時，**必須更換 `embedder.id`**。
+
+`DocumentIndex.searchHybrid(question, { embedder, ...searchOptions, batchSize?, maxEmbeddedChunks?, minSimilarity?, signal? })` 以 reciprocal-rank fusion（RRF）融合 lexical BM25 與 cosine 排序候選。回傳 `score` 是**融合排名分數，不是相似度**。`batchSize` 為 1–256（預設 32）；`maxEmbeddedChunks` 為 1–100,000（預設 4096），限制本次新嵌入 chunks，超額會拒絕而非暗中省略。`minSimilarity` 是 [-1, 1] 的選填 cosine 門檻，只影響 semantic candidates。Coverage 包含 semantic embedded／cached／scored counts，仍為 `exhaustive: false`。
+
+`AskDocumentsOptions.embedder` 啟用相同 hybrid 路徑；`embedding` 提供上述 semantic settings，須同時提供 embedder。向量依 embedder ID 與內容衍生的 chunk version，快取於各 `DocumentIndex` 實例的有界 128 MiB cache；mutation 後未變 chunks 可重用。每次傳 snapshot 都會重新 import 新索引；要重用快取，須傳 **DocumentIndex 物件**而非 snapshot。每次 search 都重新嵌入 query。Hybrid retrieval 仍不保證證據完整性或 semantic recall。
+
+### PDF 擷取與圖片 OCR
+
+```ts
+import { extractPdf, documentForIndex, ocrImage } from 'neko.js';
+import { readFile } from 'node:fs/promises';
+
+const pdfBytes = new Uint8Array(await readFile('./article.pdf'));
+const native = await extractPdf(pdfBytes, { id: 'article', ocr: 'none', maxPages: 20 });
+const withOcr = await neko.extractPdf(pdfBytes, { id: 'article-ocr', ocr: 'scanned' });
+const imageBytes = new Uint8Array(await readFile('./scan.png'));
+const scan = await neko.ocr(imageBytes, { id: 'scan', maxNewTokens: 2048 });
+const sameApi = await ocrImage(imageBytes, (request) => neko.inferStructured(request));
+const documents = await createDocumentIndex([
+  documentForIndex(native), documentForIndex(scan),
+]);
+console.log(withOcr.pages, sameApi.provenance, documents.id);
+```
+
+這些 helpers 接受擁有的 `Uint8Array`、`ArrayBuffer` 或 `Blob` 資料，不接受路徑／URL；`ocrImage`／`neko.ocr` 另接受 decoded raster pixels。範例的讀檔屬應用程式 IO。`extractPdf(bytes, options?)` 惰性解析 PDF，不啟動 scripts、links、attachments 或 XFA。預設 `ocr: 'none'` 擷取原生文字，推理 usage 為零。`'scanned'` 只對沒有 native layout blocks 的頁面 OCR；`'all'` 以 OCR 結果取代每頁 native blocks。獨立 PDF OCR 須提供 `infer: (request) => neko.inferStructured(request)`；`neko.extractPdf` 自動提供 host。
+
+PDF 預設（括號為上限）：`maxBytes` 32 MiB（256 MiB）、`maxPages` 100（1000）、`maxPagePixels` 800 萬（4000 萬）、`maxTotalPixels` 4000 萬（4 億）、`maxItems` 100,000（100 萬）、`maxTextCharacters` 200 萬（1000 萬）、`maxCells` 4096（16,384）。超額會拒絕，不暗中截斷。`renderScale` 預設 1.5（0.25–4）；可提供 `password`、`id`、`title`、`signal`。OCR 另接受 `maxBlocks`、`maxNewTokens`、`contextWindowTokens`、`hardDeadlineMs`；推理 host 的 worker hard-deadline 限制仍適用。
+
+圖片 OCR 預設：`maxBytes` 64 MiB（最多 256 MiB）、`maxPixels` 4000 萬（硬上限）、`maxBlocks` 128（2048）、`maxCells` 512（4096）、`maxTextCharacters` 100,000（200 萬）、`maxNewTokens` 2048（最多 2048）。Raster decoding 拒絕 SVG。轉錄以實際傳入 pixels 和結構化推理執行；**不宣稱真實模型 OCR 準確度**。文字、幾何、閱讀順序與表格分組仍不可信。Native PDF blocks 為 `provenance: 'native-text'`；OCR 為 `'model-ocr-untrusted'` 和 `accuracy: 'not-verified'`。Native provenance 不保證真實性。PDF 幾何使用左上原點的 PDF points，圖片 OCR 使用 pixels。`documentForIndex(pdfOrOcr)` 建立擁有的 index payload，保留 canonical text spans 與來源 provenance。
+
+Node 懶載入本機 `pdfjs-dist` assets 和 native canvas；自訂 `assetBase` 須為本機 `file:` 目錄 URL。Browser `assetBase` 是應用程式控制、以斜線結尾的目錄，包含 `pdf.mjs`、`pdf.worker.mjs`、`cmaps/`、`standard_fonts/`、`wasm/`、`iccs/`（預設相對 module 的 `./assets/pdf/`）。Browser raster rendering 需要**主執行緒 document／2D canvas**：在主執行緒組合 `extractPdf(bytes, { ocr: 'scanned', infer: request => worker.inferStructured(request) })`，不要在 worker 內渲染。Browser CPU/WASM 推理仍不支援；browser OCR 須有受支援的 WebGPU 推理 host。
+
 ### ROI、切片與前處理快取
 
 ```js
@@ -324,6 +522,25 @@ Checkpoint 的 `sectionPlan` 記錄依序排列的 source-fact ID 群組，每�
 ## 快取與後端
 
 模型 manifest 固定 Hugging Face revision、必要檔案大小與 SHA-256。每次使用快取前都會驗證；不符時會失敗，不會靜默當作 cache miss。`neko.cache.model.prefetch/status/clear` 僅操作這些固定檔案。瀏覽器 Cache Storage 仍受使用者操作與瀏覽器淘汰策略影響。
+
+### 並行下載與 validator-bound 續傳
+
+```ts
+const downloading = await createNeko({
+  device: 'cpu', downloadConcurrency: 3, resumeDownloads: true,
+  onCacheProgress: (event) => {
+    console.log(event.file, event.phase, event.loaded, event.total, event.resetReason);
+  },
+});
+try { await downloading.cache.model.prefetch(); }
+finally { await downloading.dispose(); }
+```
+
+`NekoOptions.downloadConcurrency` 限制同時下載的固定檔案數（1–16，預設 3）。`resumeDownloads` 預設 `true`，保存中斷 staging 供下次明確安裝續傳，不自動 retry 失敗請求。`onCacheProgress` 接收 `CacheProgress`：`file`、byte `loaded`／`total`、phase `'download' | 'verify' | 'resume'`、選填 `resumedFrom`／`resetReason`。Reset 原因可為 `'source-changed'`、`'resume-disabled'`、`'validator-unavailable'`、`'invalid-partial'`、`'range-rejected'`、`'validator-changed'` 或 `'integrity'`。
+
+續傳將 partial bytes 綁定固定 source／size／hash，以及 strong ETag 或可用 Last-Modified validator，送出 `Range` 和 `If-Range`。Validator 無效、object 改變或 range 拒絕時重設 staging；完整內容仍須重新驗證大小和 SHA-256 才可正式安裝。Signed CDN query strings 只在以 object location（origin + path）匹配 partial destination 時忽略，不會略過內容驗證或授權任意目的地。同源 Hub `/api/resolve-cache/` redirect 只接受精確已註冊的固定 model／revision／file。
+
+Node install locks 跨 process 協調；browser 安裝使用 Web Locks API，須有該 API。Locks 協調快取安裝，不協調推理 owner 或取代應用程式 network policy。Local-only 缺少／損壞資產仍會失敗，不使用未驗證 partial data。
 
 ### 離線 bundle 與診斷
 

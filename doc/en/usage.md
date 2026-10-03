@@ -10,7 +10,7 @@ Select either registered model with `createNeko({ model: 'onnx-community/Qwen3.5
 
 ## Install and build
 
-- Requires Node.js 22 or newer; the package is ESM and is not published to npm.
+- Requires Node.js 22.13 or newer; the package is ESM and is not published to npm.
 - For Git repository use, clone the repository, then run `npm ci` and `npm run build`. This explicit local build also works with npm 11's approval of lifecycle scripts; avoid installing an unbuilt Git dependency when its `prepare` script has not been approved.
 - Build the archive locally from the current working tree with `npm pack`; it includes `dist/` even though generated output is git-ignored. Use the filename printed by `npm pack`, then install it in another project with `npm install /absolute/path/to/<printed-filename>.tgz`. The archive name/version derives from the current `package.json`, not this guide. This project is not published to npm. Node bundles Transformers.js but keeps pinned `onnxruntime-node`, `sharp`, and `parse5` as direct runtime dependencies. If npm 11 blocks native postinstall scripts, approve only `onnxruntime-node@1.30.0` and `sharp@0.35.4`; do not grant blanket script approval.
 - `npm test`, `npm run typecheck`, and `npm run lint` run the Node tests, typecheck, and ESLint. `npm run test:package:artifact` exercises the actual packed artifact in an isolated consumer, including public imports and TypeScript declarations. `npm run test:package` additionally runs text, image, and report inference using the packed consumer and may download about 871 MB on a cold cache.
@@ -182,6 +182,125 @@ Generation schemas are phase-specific: sections and intermediate reduction reque
 
 `budget: { maxTotalTokens, maxDurationMs }` bounds aggregate input/output usage and elapsed request time, including queue wait, load, extraction, preprocessing, generation, and supported asynchronous source predicates, resource approvals, `onEvent`, and `onCheckpoint`. A deadline cancels pending user awaits; it does not terminate caller-owned side effects or forcibly preempt a native ORT/OS call. `onEvent` reports stage transitions; `onCheckpoint` receives cloneable saved state. `resume: checkpoint` reuses only compatible completed stages, preserves spent budget, and verifies source/model/settings/checksum and image content versions. After a report checkpoint exists, failures expose its final accounting through `ReportError.checkpoint`; earlier extraction/selection/load failures may be plain `NekoError`. Checkpoints contain selected source text/metadata, not image pixels; treat persisted data as potentially sensitive.
 
+### Structured, report and question streams
+
+`inferStructuredStream(options)`, `describeStream(input, options?)`, `askStream(input, question, options?)`, and `askDocumentsStream(index, question, options?)` use the corresponding non-streaming request options plus `StreamBufferOptions`. All expose unvalidated `{ type: 'provisional', text }` deltas before a terminal `{ type: 'result', result, usage }`. Only the final result has completed schema/citation validation; provisional JSON is not an answer or evidence. Report deltas also carry `phase`, and reports emit `{ type: 'stage', event }` progress. With `format: 'markdown'`, the terminal report is rendered Markdown, not streamed Markdown fragments.
+
+```ts
+for await (const event of neko.inferStructuredStream({
+  prompt: 'Return a greeting.', schema, maxNewTokens: 64,
+  maxBufferedEvents: 64, maxBufferedCharacters: 1_048_576,
+})) {
+  if (event.type === 'result') console.log(event.result.value);
+}
+for await (const event of conversation.sendStream('Hello.')) {
+  if (event.type === 'token') process.stdout.write(event.text);
+}
+```
+
+Buffer defaults are 64 events and 1,048,576 UTF-16 characters; accepted limits are 1–10,000 events and 1–16,777,216 characters. Queued terminal results also count toward the bounds. Overflow fails with `STREAM_OVERFLOW` and cancels the operation; early `break`, iterator return, or cancellation does not yield a successful terminal result.
+
+`session.sendStream(content, options?)` emits `token` and `result`, rather than `provisional`. History commits **only when iteration reaches normal exhaustion after the result**. Receiving the result then breaking still rolls back; use a complete `for await` loop. Failure, overflow and cancellation append neither the user turn nor partial assistant output. Session ownership remains held until exhaustion or cancellation.
+
+### Tool selection and approved execution
+
+```ts
+import { defineTool, executeToolCalls, runToolLoop } from 'neko.js';
+
+const tools = [defineTool({
+  name: 'openingHours',
+  description: 'Read the application-owned opening hours.',
+  parameters: { type: 'object', properties: {}, additionalProperties: false } as const,
+  result: { type: 'string' } as const,
+})] as const;
+const messages = [{ role: 'user' as const, content: 'What are the opening hours?' }];
+const execution = {
+  approve: (call: { name: string }) => call.name === 'openingHours',
+  handlers: { openingHours: () => 'Monday 09:00–17:00' },
+};
+const selected = await neko.inferTools({ tools, messages, maxNewTokens: 256 });
+const results = await executeToolCalls(tools, selected.toolCalls, execution);
+const completed = await runToolLoop(neko, tools, {
+  messages, ...execution, maxRounds: 4, maxNewTokens: 256,
+});
+console.log(results, completed.stopReason, completed.message);
+```
+
+`defineTool({ name, description?, parameters, result?, structuredMode? })` validates schemas and owns the definition. `neko.inferTools({ tools, messages, maxToolCalls?, ...inferenceOptions })` performs structured model selection and returns validated `toolCalls` and an assistant `message`; it executes no handlers. `maxToolCalls` defaults to 8 (0–64). Tool conversations use their separate `ToolConversationMessage` contract, including `role: 'tool'` results, not ordinary inference chat messages.
+
+`executeToolCalls(tools, calls, { approve, handlers, signal? })` validates calls and processes approval/handlers sequentially. Only literal `true` from application approval authorizes execution; the model never authorizes anything. Results have `status: 'ok' | 'denied' | 'error' | 'cancelled'`; successful outputs must be JSON-compatible and satisfy an optional result schema. Handlers own their side effects and must observe their cancellation signal.
+
+`runToolLoop(neko, tools, options)` feeds tool results back as **untrusted data**. `maxRounds` bounds executed rounds (1–16, default 4), not inference count. It makes one terminal selection after the last executed round, unless an earlier selection has no calls. `stopReason` is `'no-calls'` or `'max-rounds'`; `rounds`, `roundResults`, `messages` and aggregate `usage` record the work. Calls in the terminal `message.toolCalls` are returned but **never executed**. Do not execute them without a new explicit application decision.
+
+### Independent worker pool
+
+```ts
+import { createNekoPool } from 'neko.js';
+
+const reservation = 3 * 1024 ** 3; // Application estimate, not measured memory.
+const pool = await createNekoPool({
+  workers: [
+    { options: { device: 'cpu' }, memoryBytes: reservation },
+    { options: { device: 'cpu' }, memoryBytes: reservation },
+  ],
+  budget: { memoryBytes: 2 * reservation }, maxPending: 8,
+});
+try {
+  const results = await pool.inferBatch([
+    { prompt: 'Write a greeting.', maxNewTokens: 32 },
+    { prompt: 'Write a farewell.', maxNewTokens: 32 },
+  ]);
+  console.log(results, pool.status());
+} finally { await pool.dispose(); }
+```
+
+Each configuration owns an independent worker/runtime; concurrent owners may each load a model. FIFO pending requests are scheduled across available owners. This is **not tensor batching** or shared model memory. `maxWorkers` defaults to 4 (1–32); the nonempty `workers` list cannot exceed it. `maxPending` defaults to 8 (0–10,000), and excess admission fails with `QUEUE_FULL`. Positive `memoryBytes` reservations must fit `budget.memoryBytes`; this is application-declared accounting, not a measured or OS-enforced memory cap.
+
+`pool.infer(request)` returns a result promise; `pool.submit(request)` returns `{ id, result, cancel, dispose }`. Item cancellation/disposal cancels only that request, not its owner or the pool. `inferBatch(requests, { signal? })` returns input-ordered fulfilled/rejected records with IDs, retaining per-item errors. Pool disposal cancels outstanding work and disposes all owners; it should always be awaited.
+
+### Decoder state and vision reuse
+
+`infer`/`inferStructured` accept `reuse: { retainState?, state?, vision? }`. With `retainState: true`, a successful result may expose `result.reuse.state`; pass that opaque handle as `state` with a compatible, exactly extending token prefix. `vision: true` opts into processed vision-encoder feature reuse. This is separate from normalized-pixel and rendered-prompt tokenization caches, and is not automatic session KV reuse.
+
+```ts
+const retained = await neko.infer({
+  prompt: 'Write a greeting.', maxNewTokens: 32,
+  reuse: { retainState: true, vision: true },
+});
+try {
+  console.log(retained.reuse, await neko.reuseCacheInfo());
+  // A continuation must match the exact token prefix and compatibility key.
+} finally {
+  if (retained.reuse?.state) await neko.releaseGenerationState(retained.reuse.state);
+}
+await neko.clearReuseCaches();
+```
+
+Handles are engine-owned, not portable snapshots; released, evicted or foreign handles cannot continue generation. Compatibility binds model/profile, schema/constraint mode, instructions, processed image identity and stop settings. Similar text is insufficient. Results report `reusedDecoderTokens`, `visionEncoderHits` and `visionEncoderMisses`, not a speed guarantee.
+
+Set `createNeko({ reuseCache: { stateEntries, stateBytes, visionEntries, visionBytes } })` to bound entries and bytes (positive safe integers). Defaults are 4 states / 512 MiB and 8 vision entries / 64 MiB. Oversized states/features fail; retained entries can be evicted. `reuseCacheInfo()` returns cache accounting or `null` before engine acquisition; `releaseGenerationState(handle)` releases one state and `clearReuseCaches()` clears both caches. Engine release/disposal invalidates handles. `scripts/smoke-reuse.mjs` is an explicit real-model reuse exercise; its presence is not a claim that it passed on your backend.
+
+### Generation diagnostics and lifecycle events
+
+```ts
+import { getGenerationDiagnostic } from 'neko.js';
+
+try {
+  await neko.inferStructured({
+    prompt: 'Return a greeting.', schema, maxNewTokens: 64,
+    diagnostics: { capture: { maxCharacters: 2048 } },
+  });
+} catch (error) {
+  const diagnostic = getGenerationDiagnostic(error);
+  console.log(diagnostic?.code, diagnostic?.usage);
+  throw error;
+}
+```
+
+`diagnostics` on `infer`, `inferStructured` and `describe` enables error metadata: stage/attempt, finish reason, usage, output length, and available JSON/schema details. `true` captures metadata without raw text; `{ capture: { maxCharacters } }` opts into at most 1–65,536 characters. `getGenerationDiagnostic(error)` returns metadata or `undefined` without replacing the original error. Captured model output is untrusted and can contain user/source content: do not indiscriminately log, upload or persist it.
+
+`createNeko({ onEvent: (event) => { /* record content-free metrics */ } })` observes `NekoEvent`: request start/end IDs, `operation`, queue/duration timings, outcome/error code, token usage, model/execution identity, or engine-loaded timing. `NekoOperation` covers `infer`, `inferStructured`, `planInference`, `ask`, `describe`, `load`, and `warmup`; it is not a promise of a distinct outer event for every composed helper. Events contain no prompts, generated text or source documents. Observer exceptions/rejections never affect results, observers are not awaited, and worker forwarding is best-effort. This factory observer differs from per-report `DescribeOptions.onEvent`, which reports report stages.
+
 ### Report modes, planning and recovery
 
 ```js
@@ -273,6 +392,85 @@ Default extraction is full content. Opt-in `content: 'main'` selects a conservat
 
 `ask(input, question, options?)` uses constrained model selection of known paragraph IDs and extractive claim text. SDK citations quote exact whole paragraphs with UTF-16 offsets, not model-computed offsets. Unknown/duplicate IDs and invalid output are rejected; unsupported claims return `insufficient-evidence`. Selected evidence is not silently omitted/truncated to fit context. Supported quotes guarantee neither truth nor question relevance; images are not visual evidence in QA.
 
+### Local document indexes and exact-substring answers
+
+```ts
+import {
+  createDocumentIndex, importDocumentIndex, documentFromPage, askDocuments,
+} from 'neko.js';
+
+const page = await extractPage('<main><p>The park opened in 1987.</p></main>');
+const index = await createDocumentIndex([
+  documentFromPage(page, 'park'),
+  { id: 'hours', text: 'Monday opening hours are 09:00–17:00.' },
+], { chunkSize: 1200, maxDocuments: 1000 });
+const found = index.search('opening hours', { topK: 4 });
+const answer = await neko.askDocuments(index, 'When did the park open?');
+// Equivalent helper with an explicit inference/planning host:
+const other = await askDocuments(neko, index, 'What are Monday opening hours?');
+const restored = await importDocumentIndex(JSON.parse(JSON.stringify(index.exportSnapshot())));
+console.log(found.coverage, answer.claims, other.retrieval, restored.id);
+```
+
+`createDocumentIndex(documents?, options?)` asynchronously owns `{ id, text, title?, url?, blocks? }` documents and creates bounded BM25/CJK chunks. Defaults: `chunkSize: 1200`, `maxDocuments: 1000`, `maxCharacters: 8_000_000`, `maxChunks: 100_000`. `documentFromPage(page, id?)` joins paragraph text and retains paragraph provenance; its default ID is `page.url`. `search(question, { topK?, documentIds?, maxScoredChunks? })` returns hits, quotes and explicit coverage, always `exhaustive: false`. Retrieval does not establish document-wide absence, relevance or completeness.
+
+`updateDocument(document)`, `replaceDocuments(documents)` and `removeDocument(id)` atomically update the index; successful mutations change its identity and make old answers stale. `exportSnapshot()` returns a version-1 immutable snapshot suitable for caller-managed JSON persistence; `importDocumentIndex(snapshot)` validates identities and rebuilds retrieval structures. Snapshots contain source text, not authentication or embedding vectors; protect sensitive persisted content.
+
+`askDocuments(host, indexOrSnapshot, question, options?)` / `neko.askDocuments(...)` plan whole retrieved chunks against the actual tokenizer/context budget before structured generation. Options include `search`, `maxNewTokens` (default 512, 1–2048), `contextWindowTokens`, `generation`, `signal`, `hardDeadlineMs`, and provisional `onToken`. `retrieval` records selected/context-omitted chunk IDs and planning coverage; no full-document fallback is submitted. Claims must be exact contiguous substrings of **every** cited chunk. SDK citations carry document/chunk version IDs, source provenance and UTF-16 offsets into canonical document text; offsets do not refer to original PDF/HTML bytes. `status` is `'answered'` or `'insufficient-evidence'`. Exact quotes are not fact-checking, OCR verification or a relevance guarantee.
+
+### Caller-owned hybrid retrieval
+
+Neko.js bundles **no embedding model**; the pinned Qwen generation model is not an embedder. Applications own the embedding model's provenance, licensing and integrity checks. Supply a real application-owned `DocumentEmbedder`; the following function receives that dependency rather than inventing vectors:
+
+```ts
+import type { DocumentEmbedder, DocumentIndex, Neko } from 'neko.js';
+
+async function queryWithEmbeddings(
+  neko: Neko, index: DocumentIndex, embedder: DocumentEmbedder,
+) {
+  const found = await index.searchHybrid('opening hours', {
+    embedder, topK: 4, batchSize: 32, maxEmbeddedChunks: 4096,
+  });
+  const answer = await neko.askDocuments(index, 'What are the opening hours?', {
+    embedder, embedding: { batchSize: 32, maxEmbeddedChunks: 4096 },
+    search: { topK: 4 },
+  });
+  return { found, answer };
+}
+```
+
+`DocumentEmbedder` has readonly `id`, `dimensions` (1–8192), and `embed(texts, { kind: 'query' | 'document', signal? }): Promise<readonly ArrayLike<number>[]>`. Return one finite, nonzero vector of the declared dimensions per input, in order; asymmetric models can apply their own query/passage prefixes. Change `embedder.id` whenever the model, prompt format or anything else could change vectors.
+
+`DocumentIndex.searchHybrid(question, { embedder, ...searchOptions, batchSize?, maxEmbeddedChunks?, minSimilarity?, signal? })` combines lexical BM25 and cosine-ranked candidates using reciprocal-rank fusion (RRF). Returned `score` values are **rank-based fusion scores, not similarities**. `batchSize` is 1–256 (default 32); `maxEmbeddedChunks` is 1–100,000 (default 4096) and limits newly embedded chunks, rejecting excess rather than silently omitting them. `minSimilarity` is an optional cosine floor in [-1, 1] for semantic candidates only. Coverage includes semantic embedded/cached/scored counts and still reports `exhaustive: false`.
+
+`AskDocumentsOptions.embedder` enables the same hybrid path; `embedding` supplies those semantic settings and requires an embedder. Vectors are cached per `DocumentIndex` instance by embedder ID and content-derived chunk version in a bounded 128 MiB cache; unchanged chunks can reuse them after mutation. Passing a snapshot re-imports a fresh index each call, so reuse requires passing the **DocumentIndex object**, not its snapshot. Queries are embedded each search. Hybrid retrieval still does not promise exhaustive evidence or semantic recall.
+
+### PDF extraction and image OCR
+
+```ts
+import { extractPdf, documentForIndex, ocrImage } from 'neko.js';
+import { readFile } from 'node:fs/promises';
+
+const pdfBytes = new Uint8Array(await readFile('./article.pdf'));
+const native = await extractPdf(pdfBytes, { id: 'article', ocr: 'none', maxPages: 20 });
+const withOcr = await neko.extractPdf(pdfBytes, { id: 'article-ocr', ocr: 'scanned' });
+const imageBytes = new Uint8Array(await readFile('./scan.png'));
+const scan = await neko.ocr(imageBytes, { id: 'scan', maxNewTokens: 2048 });
+const sameApi = await ocrImage(imageBytes, (request) => neko.inferStructured(request));
+const documents = await createDocumentIndex([
+  documentForIndex(native), documentForIndex(scan),
+]);
+console.log(withOcr.pages, sameApi.provenance, documents.id);
+```
+
+These helpers accept owned `Uint8Array`, `ArrayBuffer` or `Blob` data, not paths or URLs; `ocrImage` / `neko.ocr` also accept decoded raster pixels. The example's file reading is application IO. `extractPdf(bytes, options?)` parses inert PDF data without activating scripts, links, attachments or XFA. Default `ocr: 'none'` extracts native text with zero inference usage. `'scanned'` performs OCR only on pages with no native layout blocks; `'all'` replaces each page's native blocks with OCR output. Standalone PDF OCR requires `infer: (request) => neko.inferStructured(request)`; `neko.extractPdf` supplies the host automatically.
+
+PDF defaults (upper bounds in parentheses): `maxBytes` 32 MiB (256 MiB), `maxPages` 100 (1000), `maxPagePixels` 8 million (40 million), `maxTotalPixels` 40 million (400 million), `maxItems` 100,000 (1 million), `maxTextCharacters` 2 million (10 million), `maxCells` 4096 (16,384). Limits reject excess; they do not silently truncate. `renderScale` defaults to 1.5 (0.25–4); `password`, `id`, `title` and `signal` are available. OCR additionally accepts `maxBlocks`, `maxNewTokens`, `contextWindowTokens` and `hardDeadlineMs`. Worker hard-deadline restrictions of the inference host still apply.
+
+Image OCR defaults: `maxBytes` 64 MiB (maximum 256 MiB), `maxPixels` 40 million (hard ceiling), `maxBlocks` 128 (2048), `maxCells` 512 (4096), `maxTextCharacters` 100,000 (2 million), `maxNewTokens` 2048 (maximum 2048). Raster decoding rejects SVG. Transcription uses actual supplied pixels and structured inference; **no real-model OCR accuracy is asserted**. Text, geometry, reading order and table grouping remain untrusted. Native PDF blocks use `provenance: 'native-text'`; OCR uses `'model-ocr-untrusted'` and `accuracy: 'not-verified'`. Native provenance is not a truth guarantee. PDF geometry uses top-left PDF points; image OCR uses top-left pixels. `documentForIndex(pdfOrOcr)` preserves canonical text spans and source provenance while creating an owned index payload.
+
+Node loads local `pdfjs-dist` assets and native canvas lazily; a custom `assetBase` must be a local `file:` directory URL. Browser `assetBase` is an application-controlled, trailing-slash directory containing `pdf.mjs`, `pdf.worker.mjs`, `cmaps/`, `standard_fonts/`, `wasm/` and `iccs/` (default `./assets/pdf/` relative to the module). Browser raster rendering requires a **main-thread document/2D canvas**: compose `extractPdf(bytes, { ocr: 'scanned', infer: request => worker.inferStructured(request) })` on the main thread instead of rendering inside a worker. Browser CPU/WASM inference remains unsupported; browser OCR needs a supported WebGPU inference host.
+
 ### Image regions and preprocessing reuse
 
 ```js
@@ -332,6 +530,25 @@ Checkpoint `sectionPlan` records ordered groups of one to four source-fact IDs c
 ## Cache and backend notes
 
 The model manifest fixes the Hugging Face revision and SHA-256/size of required files. Every cache hit is verified before use; mismatches fail instead of silently becoming misses. `neko.cache.model.prefetch/status/clear` operate on only these pinned files. Browser Cache Storage remains subject to browser user actions and eviction.
+
+### Concurrent downloads and validator-bound resume
+
+```ts
+const downloading = await createNeko({
+  device: 'cpu', downloadConcurrency: 3, resumeDownloads: true,
+  onCacheProgress: (event) => {
+    console.log(event.file, event.phase, event.loaded, event.total, event.resetReason);
+  },
+});
+try { await downloading.cache.model.prefetch(); }
+finally { await downloading.dispose(); }
+```
+
+`NekoOptions.downloadConcurrency` bounds simultaneous pinned-file downloads (1–16, default 3). `resumeDownloads` defaults to `true`, preserving interrupted staging for the next explicit installation; it does not automatically retry a failed request. `onCacheProgress` receives `CacheProgress` with `file`, byte `loaded`/`total`, phase `'download' | 'verify' | 'resume'`, optional `resumedFrom` and `resetReason`. Resets may report `'source-changed'`, `'resume-disabled'`, `'validator-unavailable'`, `'invalid-partial'`, `'range-rejected'`, `'validator-changed'` or `'integrity'`.
+
+Resume binds partial bytes to the pinned source/size/hash and a strong ETag or usable Last-Modified validator, sending `Range` with `If-Range`. Invalid validators, changed objects or rejected ranges reset staging; complete content is still freshly size- and SHA-256-verified before promotion. Signed CDN query strings are ignored only when matching a partial's destination by object location (origin + path), not when validating content or authorizing arbitrary destinations. Same-origin Hub `/api/resolve-cache/` redirects are accepted only for the exact registered pinned model/revision/file.
+
+Node install locks coordinate across processes; browser installation uses the Web Locks API and requires its availability. Locks coordinate cache installation, not inference ownership or application network policy. Local-only mode still fails on missing/corrupt assets rather than using unverified partial data.
 
 ### Portable offline bundles and diagnostics
 
