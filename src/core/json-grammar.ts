@@ -214,35 +214,72 @@ export class JsonGrammarState {
   }
 }
 const utfLeadBytes = [0, 0xc2, 0xe1, 0xf1, 0xe0, 0xed, 0xf0, 0xf4] as const;
-interface TrieNode { children: Map<number, TrieNode>; ids: number[]; }
-export class TokenByteTrie {
-  readonly root: TrieNode = { children: new Map(), ids: [] };
-  readonly pieces = new Map<number, Uint8Array>();
-  private readonly structuralRoot: TrieNode = { children: new Map(), ids: [] };
-  private readonly structuralIds = new Set<number>();
-  private readonly continuations = new Map<number, number[]>();
-  constructor(pieces: Iterable<readonly [number, Uint8Array]>) {
-    for (const [id, bytes] of pieces) {
-      if (!bytes.length) continue;
-      this.pieces.set(id, bytes);
-      let structural = false;
-      for (const byte of bytes) if (byte < 32 || byte === 34 || byte === 92) { structural = true; break; }
-      if (structural) this.structuralIds.add(id);
-      let structuralNode = structural ? this.structuralRoot : undefined;
-      let node = this.root;
-      for (const byte of bytes) {
-        let child = node.children.get(byte);
-        if (!child) { child = { children: new Map(), ids: [] }; node.children.set(byte, child); }
-        node = child;
-        if (structuralNode) {
-          let child = structuralNode.children.get(byte);
-          if (!child) { child = { children: new Map(), ids: [] }; structuralNode.children.set(byte, child); }
-          structuralNode = child;
-        }
-      }
-      node.ids.push(id);
-      structuralNode?.ids.push(id);
+/** Child/sibling trie in typed arrays: one object per vocabulary entry would cost hundreds of MB for a 248k-token vocabulary. */
+class FlatTrie {
+  private first: Int32Array;
+  private sibling: Int32Array;
+  private edge: Uint8Array;
+  private head: Int32Array;
+  private readonly link: Int32Array;
+  private nodes = 1;
+  constructor(capacity: number, entries: number) {
+    this.first = new Int32Array(capacity).fill(-1); this.sibling = new Int32Array(capacity).fill(-1);
+    this.edge = new Uint8Array(capacity); this.head = new Int32Array(capacity).fill(-1);
+    this.link = new Int32Array(entries).fill(-1);
+  }
+  insert(bytes: Uint8Array, entry: number): void {
+    let node = 0;
+    for (const byte of bytes) {
+      let child = this.first[node]!;
+      while (child !== -1 && this.edge[child] !== byte) child = this.sibling[child]!;
+      if (child === -1) { child = this.nodes++; this.edge[child] = byte; this.sibling[child] = this.first[node]!; this.first[node] = child; }
+      node = child;
     }
+    this.link[entry] = this.head[node]!; this.head[node] = entry;
+  }
+  /** Release the worst-case capacity once every piece is inserted. */
+  trim(): void {
+    this.first = this.first.slice(0, this.nodes); this.sibling = this.sibling.slice(0, this.nodes);
+    this.edge = this.edge.slice(0, this.nodes); this.head = this.head.slice(0, this.nodes);
+  }
+  walk(state: JsonGrammarState, ids: Int32Array, deliver: (id: number) => void): void {
+    const visit = (node: number, current: JsonGrammarState) => {
+      for (let entry = this.head[node]!; entry !== -1; entry = this.link[entry]!) deliver(ids[entry]!);
+      for (let child = this.first[node]!; child !== -1; child = this.sibling[child]!) { const next = current.clone(); if (next.pushByte(this.edge[child]!)) visit(child, next); }
+    };
+    visit(0, state);
+  }
+}
+export class TokenByteTrie {
+  /** Token bytes by ID; entries are views into one shared buffer. */
+  readonly pieces: { get(id: number): Uint8Array | undefined; readonly size: number };
+  private readonly ids: Int32Array;
+  private readonly root: FlatTrie;
+  private readonly structuralRoot: FlatTrie;
+  private readonly structural: Uint8Array;
+  private readonly offsets: Uint32Array;
+  private readonly data: Uint8Array;
+  private readonly continuations = new Map<number, number[]>();
+  constructor(input: Iterable<readonly [number, Uint8Array]>) {
+    const pieces = Array.from(input).filter(([, bytes]) => bytes.length);
+    let total = 0; let maxId = -1;
+    for (const [id, bytes] of pieces) { total += bytes.length; if (id > maxId) maxId = id; }
+    this.ids = new Int32Array(pieces.length); this.offsets = new Uint32Array(pieces.length + 1);
+    this.data = new Uint8Array(total); this.structural = new Uint8Array(pieces.length);
+    const slots = new Int32Array(maxId + 1).fill(-1);
+    let structuralBytes = 0;
+    pieces.forEach(([id, bytes], entry) => {
+      this.ids[entry] = id; slots[id] = entry; this.data.set(bytes, this.offsets[entry]!); this.offsets[entry + 1] = this.offsets[entry]! + bytes.length;
+      for (const byte of bytes) if (byte < 32 || byte === 34 || byte === 92) { this.structural[entry] = 1; structuralBytes += bytes.length; break; }
+    });
+    const view = (entry: number) => this.data.subarray(this.offsets[entry]!, this.offsets[entry + 1]!);
+    this.pieces = { size: pieces.length, get: (id) => { const entry = id >= 0 && id < slots.length ? slots[id]! : -1; return entry < 0 ? undefined : view(entry); } };
+    this.root = new FlatTrie(total + 1, pieces.length); this.structuralRoot = new FlatTrie(structuralBytes + 1, pieces.length);
+    for (let entry = 0; entry < pieces.length; entry++) {
+      this.root.insert(view(entry), entry);
+      if (this.structural[entry]) this.structuralRoot.insert(view(entry), entry);
+    }
+    this.root.trim(); this.structuralRoot.trim();
   }
   allowed(state: JsonGrammarState, deliver: (id: number) => void): void {
     const continuation = state.freeStringClass;
@@ -253,16 +290,14 @@ export class TokenByteTrie {
         seed.pushByte(34);
         if (continuation) seed.pushByte(utfLeadBytes[continuation]!);
         allowed = [];
-        for (const [id, bytes] of this.pieces) if (!this.structuralIds.has(id) && seed.clone().push(bytes)) allowed.push(id);
+        for (let entry = 0; entry < this.ids.length; entry++) {
+          if (!this.structural[entry] && seed.clone().push(this.data.subarray(this.offsets[entry]!, this.offsets[entry + 1]!))) allowed.push(this.ids[entry]!);
+        }
         this.continuations.set(continuation, allowed);
       }
       for (const id of allowed) deliver(id);
     }
-    const visit = (node: TrieNode, current: JsonGrammarState) => {
-      for (const id of node.ids) deliver(id);
-      for (const [byte, child] of node.children) { const next = current.clone(); if (next.pushByte(byte)) visit(child, next); }
-    };
-    visit(continuation === null ? this.root : this.structuralRoot, state);
+    (continuation === null ? this.root : this.structuralRoot).walk(state, this.ids, deliver);
   }
 }
 export interface ByteLevelTokenizer {

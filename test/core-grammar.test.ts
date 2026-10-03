@@ -158,3 +158,21 @@ test('region marker expansion preserves exact text and ordered multimodal messag
   assert.throws(() => renderInferenceChat(processor, { messages }, undefined, [0]), TypeError);
   assert.throws(() => renderInferenceChat(processor, { messages }, undefined, [65]), TypeError);
 });
+
+test('flat token trie exposes exact bytes for sparse IDs, skips empty pieces and shares prefixes without losing siblings', () => {
+  const trie = new TokenByteTrie([[900, encoder.encode('ab')], [3, encoder.encode('a')], [7, new Uint8Array()], [12, encoder.encode('ac')], [13, encoder.encode('ab')]]);
+  assert.equal(trie.pieces.size, 4);
+  assert.deepEqual(Array.from(trie.pieces.get(900)!), [97, 98]);
+  assert.deepEqual(Array.from(trie.pieces.get(13)!), [97, 98]);
+  for (const missing of [7, 8, 1000, -1]) assert.equal(trie.pieces.get(missing), undefined);
+  const state = new JsonGrammarState({ type: 'any' });
+  const allowed: number[] = [];
+  trie.allowed(state, (id) => allowed.push(id));
+  // A top-level value cannot begin with a letter, so no letter-led piece may be offered.
+  assert.deepEqual(allowed, []);
+  const string = new JsonGrammarState({ type: 'string' });
+  string.pushByte(34);
+  const inString: number[] = [];
+  trie.allowed(string, (id) => inString.push(id));
+  assert.deepEqual(inString.sort((a, b) => a - b), [3, 12, 13, 900]);
+});
