@@ -183,7 +183,7 @@ async function prepareRegions(source: ImageInput, options: InternalImageOptions,
     } else if (typeof input !== 'string' && !(input instanceof URL)) throw new TypeError('Image input must be a URL, path, Blob, or decoded pixels');
     else if (/^data:/i.test(String(input))) {
       const result = dataBytes(String(input), maxBytes); bytes = result.bytes; declared = result.type;
-    } else if (isNode && (input instanceof URL ? input.protocol === 'file:' : !/^[a-z][a-z\d+.-]*:/i.test(input))) {
+    } else if (isNode && (input instanceof URL ? input.protocol === 'file:' : !/^[a-z][a-z\d+.-]+:/i.test(input))) {
       bytes = await localBytes(input, maxBytes, signal, policy, offline !== undefined);
     } else {
       const url = new URL(input, typeof location === 'object' ? location.href : undefined);

@@ -55,7 +55,7 @@ test('native cache rejects symlink ancestors and model entries without reading o
     try {
       await assert.rejects(AutoConfig.from_pretrained(MODEL_ID, { revision: MODEL_REVISION, local_files_only: true }), ModelIntegrityError);
       assert.equal(await readFile(target, 'utf8'), 'user data');
-      assert.equal((await stat(directory)).mode & 0o777, 0o700);
+      if (process.platform !== 'win32') assert.equal((await stat(directory)).mode & 0o777, 0o700);
     } finally { installation.restore(); installation.restore(); }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
