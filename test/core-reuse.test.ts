@@ -96,3 +96,34 @@ test('vision feature entries own encoder results, publish transactionally and ev
   await assert.rejects(cache.snapshotFeature(new Tensor('float32', new Float32Array(5), [1, 5])), /byte limit/);
   cache.clear(); features.dispose(); assert.equal(cache.info().visionBytes, 0);
 });
+
+test('engine-private prefixes extend only by exact tokens, hand out isolated clones and stay within byte and entry limits', async () => {
+  const cache = new InferenceReuseCache({ stateBytes: 100 });
+  const stored = hybrid(2);
+  const first = await cache.snapshot(stored, [1n, 2n], '');
+  const firstBytes = first.bytes;
+  cache.commitPrefix('1,2', first);
+  assert.equal(cache.checkoutPrefix('1,2', [1n, 2n]), undefined, 'a prefix must be strictly shorter than the prompt');
+  assert.equal(cache.checkoutPrefix('1,2', [1n, 9n, 3n]), undefined, 'a different token must not reuse the state');
+  const hit = cache.checkoutPrefix('1,2', [1n, 2n, 3n])!;
+  assert.equal(hit.tokens, 2);
+  (hit.cache['past_recurrent.0']!.data as Float32Array)[0] = 99;
+  const again = cache.checkoutPrefix('1,2', [1n, 2n, 4n])!;
+  assert.equal((again.cache['past_recurrent.0']!.data as Float32Array)[0], 3, 'the stored state must not change when a continuation mutates its clone');
+  let info = cache.info();
+  assert.deepEqual([info.prefixEntries, info.prefixBytes, info.prefixHits, info.prefixMisses], [1, firstBytes, 2, 2]);
+  assert.equal(info.stateEntries, 0, 'private prefixes never occupy caller-visible handle slots');
+  // Two 48-byte entries fit in 100 bytes; a third evicts the least recently used one.
+  const second = await cache.snapshot(hybrid(2), [5n, 6n], '');
+  const third = await cache.snapshot(hybrid(2), [7n, 8n], '');
+  cache.commitPrefix('5,6', second);
+  cache.commitPrefix('7,8', third);
+  info = cache.info();
+  assert.equal(info.prefixEntries, 2);
+  assert.ok(info.prefixBytes <= 100);
+  assert.equal(info.evictions, 1);
+  assert.equal(cache.checkoutPrefix('1,2', [1n, 2n, 3n]), undefined, 'the least recently used prefix was evicted');
+  cache.clear();
+  assert.deepEqual([cache.info().prefixEntries, cache.info().prefixBytes], [0, 0]);
+  for (const tensor of [...Object.values(stored), ...Object.values(hit.cache), ...Object.values(again.cache)]) tensor.dispose();
+});

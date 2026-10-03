@@ -20,6 +20,7 @@ export async function inputVisionIdentity(inputs: Record<string, unknown>): Prom
 }
 function disposeTensors(cache: DynamicCache): void { for (const tensor of new Set(Object.values(cache))) tensor.dispose(); }
 function limit(value: number | undefined, fallback: number): number { const result = value ?? fallback; if (!Number.isSafeInteger(result) || result < 1) throw new RangeError('Reuse limits must be positive safe integers'); return result; }
+const PREFIX_ENTRIES = 4;
 
 /** Engine-local, bounded caches. Handles never expose tensors; each continuation owns a full hybrid-cache clone. */
 export class InferenceReuseCache {
@@ -32,10 +33,14 @@ export class InferenceReuseCache {
   private hits = 0;
   private misses = 0;
   private evictions = 0;
+  private readonly prefixes = new Map<string, GenerationStateSnapshot>();
+  private prefixBytes = 0;
+  private prefixHits = 0;
+  private prefixMisses = 0;
   constructor(limits: ReuseCacheLimits = {}) {
     this.limits = { stateEntries: limit(limits.stateEntries, 4), stateBytes: limit(limits.stateBytes, 512 * 1024 * 1024), visionEntries: limit(limits.visionEntries, 8), visionBytes: limit(limits.visionBytes, 64 * 1024 * 1024) };
   }
-  info(): ReuseCacheInfo { return { stateEntries: this.states.size, stateBytes: this.stateBytes, visionEntries: this.features.size, visionBytes: this.visionBytes, visionEncoderHits: this.hits, visionEncoderMisses: this.misses, evictions: this.evictions, limits: { ...this.limits } }; }
+  info(): ReuseCacheInfo { return { stateEntries: this.states.size, stateBytes: this.stateBytes, visionEntries: this.features.size, visionBytes: this.visionBytes, visionEncoderHits: this.hits, visionEncoderMisses: this.misses, prefixEntries: this.prefixes.size, prefixBytes: this.prefixBytes, prefixHits: this.prefixHits, prefixMisses: this.prefixMisses, evictions: this.evictions, limits: { ...this.limits } }; }
   checkout(handle: GenerationStateHandle, tokens: readonly bigint[], compatibility: string): { cache: DynamicCache; tokens: number } {
     const state = this.states.get(handle.id);
     if (!state) throw new TypeError('Generation state is not owned by this engine, has been released, or was evicted');
@@ -96,5 +101,33 @@ export class InferenceReuseCache {
     }
     staged.clear();
   }
-  clear(): void { for (const id of this.states.keys()) this.release({ id }); for (const feature of this.features.values()) feature.tensor.dispose(); this.features.clear(); this.visionBytes = 0; }
+  /** Engine-private text prefixes (for example a fixed structured-output instruction); never exposed as handles. */
+  checkoutPrefix(key: string, tokens: readonly bigint[]): { cache: DynamicCache; tokens: number } | undefined {
+    const entry = this.prefixes.get(key);
+    if (!entry || entry.tokens.length >= tokens.length || !entry.tokens.every((token, index) => token === tokens[index])) { this.prefixMisses++; return undefined; }
+    const entries: Record<string, Tensor> = {};
+    try { for (const [name, tensor] of Object.entries(entry.cache)) entries[name] = tensor.clone(); }
+    catch (error) { for (const tensor of Object.values(entries)) tensor.dispose(); throw error; }
+    this.prefixes.delete(key); this.prefixes.set(key, entry); this.prefixHits++;
+    return { cache: new DynamicCache(entries), tokens: entry.tokens.length };
+  }
+  commitPrefix(key: string, snapshot: GenerationStateSnapshot): void {
+    const previous = this.prefixes.get(key);
+    if (previous) { this.prefixes.delete(key); this.prefixBytes -= previous.bytes; this.discardState(previous); }
+    while (this.prefixes.size >= PREFIX_ENTRIES || this.prefixBytes + snapshot.bytes > this.limits.stateBytes) {
+      const oldest = this.prefixes.keys().next().value; if (oldest === undefined) break;
+      this.dropPrefix(oldest); this.evictions++;
+    }
+    this.prefixes.set(key, snapshot); this.prefixBytes += snapshot.bytes;
+  }
+  private dropPrefix(key: string): void {
+    const entry = this.prefixes.get(key); if (!entry) return;
+    this.prefixes.delete(key); this.prefixBytes -= entry.bytes; this.discardState(entry);
+  }
+  clear(): void {
+    for (const id of this.states.keys()) this.release({ id });
+    for (const key of [...this.prefixes.keys()]) this.dropPrefix(key);
+    for (const feature of this.features.values()) feature.tensor.dispose();
+    this.features.clear(); this.visionBytes = 0;
+  }
 }

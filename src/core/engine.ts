@@ -73,6 +73,7 @@ async function availableThreads(): Promise<number> {
   const os: typeof NodeOs = await import(`${protocol}os`);
   return os.availableParallelism();
 }
+const MIN_PREFIX_TOKENS = 32;
 function disposeInputs(inputs: Record<string, unknown>): void { for (const value of Object.values(inputs)) if (value instanceof Tensor) value.dispose(); }
 
 export class VisionEngine {
@@ -257,6 +258,15 @@ export class VisionEngine {
         if (prefixLength < 1 || suffix.some((token, index) => token !== tokens[prefixLength + index])) throw new Error('Pinned generation prompt does not align with processed token boundaries');
         checkpointTokens = prefixLength;
       }
+      let prefixTokens: bigint[] | undefined;
+      // Fixed system turns (the structured-output instruction) are re-prefilled by every call; decoder state for them can be reused.
+      if (chat.systemPrefix !== undefined && !planning && !decoded.length && options.reuse === undefined) {
+        const head = this.processor.tokenizer!.encode(chat.systemPrefix, { add_special_tokens: false }).map(BigInt);
+        if (head.length >= MIN_PREFIX_TOKENS && head.length < inputTokens) {
+          const tokens = Array.from(ids.data, BigInt);
+          if (head.every((token, index) => token === tokens[index])) prefixTokens = head;
+        }
+      }
       if (budget) {
         if (performance.now() >= budget.deadline) throw new NekoError('Report duration budget exhausted', 'preprocess', 'BUDGET_EXCEEDED');
         if (inputTokens + 1 > budget.remainingTokens) throw new NekoError('Report total token budget exhausted before generation', 'preprocess', 'BUDGET_EXCEEDED');
@@ -264,7 +274,7 @@ export class VisionEngine {
       }
       const contextLimit = this.contextLimit(options.contextWindowTokens);
       if (!planning && inputTokens + maxNewTokens > contextLimit) throw new NekoError(`Input (${inputTokens}) plus output budget (${maxNewTokens}) exceeds context limit (${contextLimit})`, 'preprocess', 'CONTEXT_LIMIT');
-      return { inputs, inputTokens, checkpointTokens, maxNewTokens, contextLimit, settings, images: decoded.map(({ observation }) => observation), preprocessing: cached?.reuse };
+      return { inputs, inputTokens, checkpointTokens, prefixTokens, maxNewTokens, contextLimit, settings, images: decoded.map(({ observation }) => observation), preprocessing: cached?.reuse };
     }).catch((error: unknown) => { if (allocatedInputs) disposeInputs(allocatedInputs); throw error; })
       .finally(() => { if (budget?.timings) budget.timings.preprocessMs += performance.now() - started; });
   }
@@ -285,7 +295,11 @@ export class VisionEngine {
       if (options.diagnostics) attachGenerationDiagnostic(error, { version: 1, stageId: context.diagnosticStage?.id ?? (structured ? 'structured' : 'inference'), attempt: context.diagnosticStage?.attempt ?? 1, stage: error instanceof NekoError ? error.stage : 'preprocess', code: error instanceof NekoError ? error.code : 'OPERATION_FAILED', finishReason: signal?.aborted ? 'aborted' : 'not-started', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, outputCharacters: 0 });
       throw error;
     });
-    const { inputs, inputTokens, checkpointTokens, maxNewTokens, settings, images } = prepared;
+    const { inputs, inputTokens, checkpointTokens, prefixTokens, maxNewTokens, settings, images } = prepared;
+    const prefixKey = prefixTokens?.join(',');
+    // Best-effort internal prefix reuse: it must never fail or change the shape of an ordinary request.
+    const reuseActive = options.reuse !== undefined || prefixTokens !== undefined;
+    let captureTokens = checkpointTokens;
     const generationStarted = performance.now();
     const incrementalDecoder = constrainedTrie ? new TextDecoder('utf-8', { fatal: true }) : undefined;
     const stopping = new InterruptableStoppingCriteria();
@@ -361,14 +375,22 @@ export class VisionEngine {
       this.generating = true; ownsGeneration = true;
       const visionIdentity = options.reuse ? await inputVisionIdentity(inputs) : 'text';
       const compatibility = options.reuse ? await hashValue({ model: this.identity, schema: validationSchema?.json ?? null, constraint: compiled?.json ?? null, mode: compiled?.mode ?? null, instruction: instruction ?? null, vision: visionIdentity, stop: settings.stop, stopTokenIds: settings.stopTokenIds }) : '';
+      // Caller-requested retention must fail loudly; the internal prefix cache is only an optimisation and is skipped on any snapshot failure.
+      const checkpoint = async (cache: DynamicCache, tokens: bigint[]): Promise<GenerationStateSnapshot | undefined> => {
+        if (options.reuse) return this.reuseCache.snapshot(cache, tokens, compatibility);
+        try { return await this.reuseCache.snapshot(cache, tokens, compatibility); } catch { return undefined; }
+      };
       if (options.reuse?.state) {
         const ids = Array.from((inputs.input_ids as Tensor).data, BigInt);
         const checked = this.reuseCache.checkout(options.reuse.state, ids, compatibility);
         workingCache = checked.cache; reuse.reusedDecoderTokens = checked.tokens;
         const imageToken = (this.model.config as unknown as Record<string, unknown>).image_token_id;
         if (typeof imageToken === 'number' && ids.slice(checked.tokens).includes(BigInt(imageToken))) throw new TypeError('Decoder state cannot bypass new vision tokens');
+      } else if (prefixTokens && prefixKey !== undefined) {
+        const checked = this.reuseCache.checkoutPrefix(prefixKey, Array.from((inputs.input_ids as Tensor).data, BigInt));
+        if (checked) { workingCache = checked.cache; reuse.reusedDecoderTokens = checked.tokens; } else captureTokens = prefixTokens.length;
       }
-      if (options.reuse) {
+      if (reuseActive) {
         let firstForward = true;
         this.model.forward = async (modelInputs: Record<string, unknown>) => {
           // Upstream marks consumed vision with null; multi-token cached prefill must omit that sentinel.
@@ -378,10 +400,10 @@ export class VisionEngine {
             const ids = modelInputs.input_ids;
             if (!(ids instanceof Tensor) || ids.dims[1] !== inputTokens - reuse.reusedDecoderTokens) throw new Error('Pinned decoder did not skip the compatible processed prefix');
           }
-          if (firstForward && checkpointTokens !== undefined) {
+          if (firstForward && captureTokens !== undefined) {
             const cachedTokens = workingCache?.get_seq_length() ?? 0;
-            const split = checkpointTokens - cachedTokens;
-            if (split === 0 && workingCache) stagedCheckpoint = await this.reuseCache.snapshot(workingCache, Array.from((inputs.input_ids as Tensor).data, BigInt).slice(0, checkpointTokens), compatibility);
+            const split = captureTokens - cachedTokens;
+            if (split === 0 && workingCache) stagedCheckpoint = await checkpoint(workingCache, Array.from((inputs.input_ids as Tensor).data, BigInt).slice(0, captureTokens));
             if (split > 0) {
               const ids = modelInputs.input_ids; const positions = modelInputs.position_ids; const mask = modelInputs.attention_mask;
               if (!(ids instanceof Tensor) || !(positions instanceof Tensor) || !(mask instanceof Tensor) || split >= ids.dims[1]!) throw new Error('Pinned decoder cannot split the retained conversation prefill safely');
@@ -389,7 +411,7 @@ export class VisionEngine {
               // Hybrid recurrent state cannot be truncated after the thinking-only generation prompt.
               const prefixIds = ids.slice(null, [0, split]);
               const prefixPositions = positions.slice(null, null, [0, split]);
-              const prefixMask = mask.slice(null, [0, checkpointTokens]);
+              const prefixMask = mask.slice(null, [0, captureTokens]);
               const suffixIds = ids.slice(null, [split, ids.dims[1]!]);
               const suffixPositions = positions.slice(null, null, [split, positions.dims[2]!]);
               try {
@@ -399,7 +421,7 @@ export class VisionEngine {
                 const entries: Record<string, Tensor> = {};
                 for (const [name, tensor] of Object.entries(latestOutputs)) if (name.startsWith('present') && tensor instanceof Tensor) entries[name.replace('present_conv', 'past_conv').replace('present_recurrent', 'past_recurrent').replace('present', 'past_key_values')] = tensor;
                 if (workingCache) workingCache.update(entries); else workingCache = new DynamicCache(entries);
-                stagedCheckpoint = await this.reuseCache.snapshot(workingCache, Array.from((inputs.input_ids as Tensor).data, BigInt).slice(0, checkpointTokens), compatibility);
+                stagedCheckpoint = await checkpoint(workingCache, Array.from((inputs.input_ids as Tensor).data, BigInt).slice(0, captureTokens));
                 signal?.throwIfAborted(); checkDeadline();
                 const suffixInputs: Record<string, unknown> = { ...modelInputs, input_ids: suffixIds, position_ids: suffixPositions, past_key_values: workingCache };
                 // Vision tokens have all been consumed in the conversation prefix.
@@ -419,7 +441,7 @@ export class VisionEngine {
           latestOutputs = result as unknown as Record<string, unknown>;
           return result;
         };
-        if (options.reuse.vision) this.model.encode_image = async (imageInputs: Record<string, unknown>) => {
+        if (options.reuse?.vision) this.model.encode_image = async (imageInputs: Record<string, unknown>) => {
           const key = await inputVisionIdentity(imageInputs);
           const cached = stagedFeatures.get(key) ?? this.reuseCache.feature(key);
           if (cached) { reuse.visionEncoderHits++; return cached; }
@@ -476,6 +498,7 @@ export class VisionEngine {
       });
       signal?.throwIfAborted(); checkDeadline();
       if (stagedState) { reuse.state = this.reuseCache.commitState(stagedState, stagedCheckpoint); stagedState = undefined; stagedCheckpoint = undefined; }
+      else if (prefixKey !== undefined && stagedCheckpoint) { this.reuseCache.commitPrefix(prefixKey, stagedCheckpoint); stagedCheckpoint = undefined; }
       this.reuseCache.commitFeatures(stagedFeatures);
       return result;
     } catch (error) {
@@ -499,7 +522,7 @@ export class VisionEngine {
       if (stagedState) this.reuseCache.discardState(stagedState);
       if (stagedCheckpoint) this.reuseCache.discardState(stagedCheckpoint);
       for (const tensor of stagedFeatures.values()) tensor.dispose();
-      if (options.reuse) {
+      if (reuseActive) {
         const tensors = new Set<Tensor>(workingCache ? Object.values(workingCache) : []);
         for (const value of Object.values(latestOutputs ?? {})) if (value instanceof Tensor) tensors.add(value);
         for (const tensor of tensors) if (tensor.location !== 'none') tensor.dispose();
