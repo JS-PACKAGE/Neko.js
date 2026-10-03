@@ -23,7 +23,7 @@ export function validateSourceFacts(value: unknown, snapshot: PageSnapshot): ass
   if (index !== value.length) throw new TypeError('Source fact ledger contains extra quotes');
 }
 
-export function sourceCoverage(snapshot: PageSnapshot, facts: ReportSourceFact[], claims: ReportClaim[], conclusionBasis: ReportCoverage['conclusionBasis']): ReportCoverage {
+export function sourceCoverage(snapshot: PageSnapshot, facts: ReportSourceFact[], claims: ReportClaim[], conclusionBasis: ReportCoverage['conclusionBasis'], mode: 'generated' | 'extractive' = 'generated'): ReportCoverage {
   const cited = (predicate: (claim: ReportClaim) => boolean) => {
     const keys = new Set(claims.filter(predicate).flatMap((claim) => claim.citations.filter((citation) => citation.kind === 'quote').map((quote) => `${quote.paragraphId}:${quote.startOffset}:${quote.endOffset}`)));
     return facts.filter(({ citation }) => keys.has(`${citation.paragraphId}:${citation.startOffset}:${citation.endOffset}`)).map(({ id }) => id);
@@ -33,7 +33,7 @@ export function sourceCoverage(snapshot: PageSnapshot, facts: ReportSourceFact[]
     selectedTextCharacters: snapshot.source.paragraphs.reduce((sum, paragraph) => sum + paragraph.text.length, 0),
     retainedQuoteCount: facts.length,
     retainedTextCharacters: facts.reduce((sum, fact) => sum + fact.citation.quote.length, 0),
-    modelCitedFactIds: cited(() => true),
+    modelCitedFactIds: mode === 'generated' ? cited(() => true) : [],
     summaryCitedFactIds: cited((claim) => claim.target === 'page.summary'),
     conclusionBasis,
     semanticRetention: 'not-measured',

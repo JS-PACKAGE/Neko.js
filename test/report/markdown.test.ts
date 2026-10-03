@@ -2,30 +2,35 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { renderMarkdown, validateStructuredReport, serializeStructuredReport, parseStructuredReport } from '../../src/report/index.js';
 import { snapshotPage } from '../../src/web/source.js';
-import { getModelProfile } from '../../src/cache/manifest.js';
+import { getRegisteredModelProfile } from '../../src/cache/registry.js';
 import { NekoError } from '../../src/errors.js';
 import type { Page, StructuredReport } from '../../src/types.js';
 import { reportChecksum, sourceCoverage } from '../../src/report/evidence.js';
+import { auditClaim } from '../../src/report/audit.js';
+import type { ImageObservation } from '../../src/web/image.js';
+import type { Citation } from '../../src/types.js';
 
 async function fixture(language = 'en', imageUrl = 'https://example.test/photo.png'): Promise<StructuredReport> {
   const page: Page = { url: 'about:blank', title: '<Source title>', paragraphs: [{ id: 'p1', text: 'The sky is blue.', source: { kind: 'html', startOffset: 10, endOffset: 26 } }, { id: 'p2', text: 'Unquoted navigation.', source: { kind: 'html' } }], images: [{ id: 'i1', url: imageUrl, alt: '<img src=x onerror=alert(1)>', discoveredBy: ['img'] }] };
   const snapshot = await snapshotPage(page);
-  const profile = getModelProfile('all-q4');
+  const profile = getRegisteredModelProfile('all-q4');
   const text = language === 'zh-TW' ? '天空呈現藍色。' : 'The sky is blue.';
   const description = language === 'zh-TW' ? '圖片呈現紅色方形。' : 'A red square.';
   const quote = { kind: 'quote' as const, snapshotId: snapshot.id, paragraphId: 'p1', versionId: snapshot.paragraphs[0]!.versionId, startOffset: 0, endOffset: 16, quote: 'The sky is blue.' };
   const versionId = 'a'.repeat(64);
+  const observation: ImageObservation = { versionId, sourceVersionId: 'c'.repeat(64), width: 32, height: 32, sourceWidth: 32, sourceHeight: 32, region: { unit: 'pixels', x: 0, y: 0, width: 32, height: 32 }, normalizedRegion: { unit: 'normalized', x: 0, y: 0, width: 1, height: 1 }, preprocessing: { pipeline: 'sharp-raw', orientation: 'as-provided', color: 'as-provided', resize: 'none', maxDimension: 32, inputBytes: 3072, cache: 'disabled', reused: 'none' } };
+  const imageCitation: Citation = { kind: 'image-observation', snapshotId: snapshot.id, imageId: 'i1', versionId, sourceVersionId: observation.sourceVersionId, sourceWidth: 32, sourceHeight: 32, region: observation.region, normalizedRegion: observation.normalizedRegion };
   const report: StructuredReport = {
-    schemaVersion: 2, integrity: { algorithm: 'sha256', checksum: '' },
+    schemaVersion: 3, mode: 'generated', integrity: { algorithm: 'sha256', checksum: '' },
     sourceFacts: [{ id: 'q1', citation: quote }, { id: 'q2', citation: { kind: 'quote', snapshotId: snapshot.id, paragraphId: 'p2', versionId: snapshot.paragraphs[1]!.versionId, startOffset: 0, endOffset: page.paragraphs[1]!.text.length, quote: page.paragraphs[1]!.text } }],
     language, imageFailurePolicy: 'error', page: { url: page.url, title: page.title!, summary: text }, sections: [{ keyPoints: [text], paragraphIds: ['p1', 'p2'] }],
-    images: [{ status: 'described', imageId: 'i1', url: imageUrl, alt: page.images[0]!.alt!, source: { kind: 'image', imageId: 'i1' }, description, observation: { versionId, width: 32, height: 32, verification: 'model-observation' } }],
+    images: [{ status: 'described', imageId: 'i1', url: imageUrl, alt: page.images[0]!.alt!, source: { kind: 'image', imageId: 'i1' }, description, observation: { ...observation, verification: 'model-observation' } }],
     conclusion: text, snapshot,
     claims: [
-      ...['page.summary', 'sections[0].keyPoints[0]', 'conclusion'].map((target, index) => ({ id: `c${index}`, target, startOffset: 0, endOffset: text.length, citations: [quote], verification: 'references-validated' as const })),
-      { id: 'image', target: 'images[0].description', startOffset: 0, endOffset: description.length, citations: [{ kind: 'image-observation', snapshotId: snapshot.id, imageId: 'i1', versionId }], verification: 'references-validated' },
+      ...['page.summary', 'sections[0].keyPoints[0]', 'conclusion'].map((target, index) => ({ id: `c${index}`, target, startOffset: 0, endOffset: text.length, citations: [quote], verification: 'references-validated' as const, audit: auditClaim(text, [quote], snapshot) })),
+      { id: 'image', target: 'images[0].description', startOffset: 0, endOffset: description.length, citations: [imageCitation], verification: 'references-validated', audit: auditClaim(description, [imageCitation], snapshot) },
     ],
-    metadata: { model: { id: profile.id, revision: profile.revision, profile: profile.profile, dtype: { ...profile.dtype } }, backend: { runtime: 'node', device: 'cpu', executionProviders: ['cpu'], gpuMemoryBytes: null, adapterEvidence: null, supported: true, capabilityEvidence: 'model-runtime-compatibility', providerEvidence: 'loaded-session-configuration', sessions: Object.entries(profile.dtype).map(([name, dtype]) => ({ name, dtype, device: 'cpu' })) }, usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, timings: { loadMs: 1, preprocessMs: 2, generationMs: 3, totalMs: 6, queueWaitMs: 0 }, memory: { jsHeapBytes: null, gpuBytes: null }, execution: { mode: 'inline', runtime: 'node' }, resumedStages: 0, evidence: 'references-validated-not-fact-checked', coverage: { selectedParagraphIds: ['p1', 'p2'], selectedTextCharacters: 36, retainedQuoteCount: 2, retainedTextCharacters: 36, modelCitedFactIds: ['q1'], summaryCitedFactIds: ['q1'], conclusionBasis: 'retained-source', semanticRetention: 'not-measured' } },
+    metadata: { model: { id: profile.id, revision: profile.revision, profile: profile.profile, dtype: { ...profile.dtype } }, backend: { runtime: 'node', device: 'cpu', executionProviders: ['cpu'], gpuMemoryBytes: null, adapterEvidence: null, supported: true, capabilityEvidence: 'model-runtime-compatibility', providerEvidence: 'loaded-session-configuration', sessions: Object.entries(profile.dtype).map(([name, dtype]) => ({ name, dtype, device: 'cpu' })) }, usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, timings: { loadMs: 1, preprocessMs: 2, generationMs: 3, totalMs: 6, queueWaitMs: 0 }, memory: { jsHeapBytes: null, gpuBytes: null }, execution: { mode: 'inline', runtime: 'node' }, resumedStages: 0, retryAttempts: 0, evidence: 'references-validated-heuristic-audit', coverage: { selectedParagraphIds: ['p1', 'p2'], selectedTextCharacters: 36, retainedQuoteCount: 2, retainedTextCharacters: 36, modelCitedFactIds: ['q1'], summaryCitedFactIds: ['q1'], conclusionBasis: 'retained-source', semanticRetention: 'not-measured' } },
   };
   report.integrity.checksum = await reportChecksum(report);
   return report;
@@ -64,7 +69,7 @@ test('selected paragraph/image coverage and loaded profile evidence cannot silen
   await assert.rejects(validateStructuredReport(missing), TypeError);
   const altered = structuredClone(report); altered.images[0]!.url = 'https://elsewhere.test/image.png';
   await assert.rejects(validateStructuredReport(altered), TypeError);
-  const wrongProfile = structuredClone(report); wrongProfile.metadata.backend.sessions.find(({ name }) => name === 'vision_encoder')!.dtype = 'fp16';
+  const wrongProfile = structuredClone(report); assert.ok(wrongProfile.metadata.backend); wrongProfile.metadata.backend.sessions.find(({ name }) => name === 'vision_encoder')!.dtype = 'fp16';
   await assert.rejects(validateStructuredReport(wrongProfile), TypeError);
 });
 
@@ -104,7 +109,7 @@ test('versioned report persistence round-trips exact facts and rejects unknown v
   const loaded = await parseStructuredReport(saved);
   assert.deepEqual(loaded, original);
   assert.equal(loaded.sourceFacts.map(({ citation }) => citation.quote).join(''), original.snapshot.source.paragraphs.map(({ text }) => text).join(''));
-  for (const schemaVersion of [undefined, 1, 3]) await assert.rejects(parseStructuredReport(JSON.stringify({ ...original, schemaVersion })), /Unsupported/);
+  for (const schemaVersion of [undefined, 1, 2, 4]) await assert.rejects(parseStructuredReport(JSON.stringify({ ...original, schemaVersion })), /Unsupported/);
   const edited = structuredClone(original); edited.page.summary = 'The sea is blue.';
   await assert.rejects(parseStructuredReport(JSON.stringify(edited)), TypeError);
 });
@@ -131,4 +136,11 @@ test('retained source quote markup remains inert in Markdown output', async () =
   assert.ok(!markdown.includes('<img'));
   assert.doesNotMatch(markdown, /\]\(javascript:/i);
   assert.throws(() => renderMarkdown({ ...report, schemaVersion: 1 } as unknown as StructuredReport), /Unsupported/);
+});
+
+test('persisted claim audits cannot be upgraded by editing status or dropping heuristic limits', async () => {
+  const report = await fixture();
+  const inventedSupport = structuredClone(report); inventedSupport.claims[3]!.audit.status = 'supported';
+  const missingLimits = structuredClone(report); missingLimits.claims[0]!.audit.limits = [];
+  for (const changed of [inventedSupport, missingLimits]) { changed.integrity.checksum = await reportChecksum(changed); await assert.rejects(validateStructuredReport(changed), /audit/i); }
 });

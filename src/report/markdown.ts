@@ -27,7 +27,7 @@ function markdownUrl(value: string): string | undefined {
 }
 
 export function renderMarkdown(report: StructuredReport): string {
-  if (report.schemaVersion !== 2) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 2');
+  if (report.schemaVersion !== 3) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 3');
   const locale = report.language.toLowerCase();
   const labels = LABELS[locale] ?? (locale.startsWith('zh-') ? LABELS.zh! : LABELS.en!);
   const lines = [`# ${markdownText(report.page.title || report.page.url)}`, '', `## ${labels.summary}`, '', markdownText(report.page.summary), ''];
@@ -47,7 +47,7 @@ export function renderMarkdown(report: StructuredReport): string {
       if (image.source.imageId !== image.imageId) throw new TypeError(`Image ${image.imageId} has inconsistent provenance`);
       const source = markdownUrl(image.url);
       const origin = source ? `[${markdownText(image.imageId)}](${source})` : markdownText(image.url);
-      const description = image.status === 'described' ? image.description : `${labels.failed}: ${image.error.code} (${image.error.stage}) — ${image.error.message}`;
+      const description = image.status === 'described' ? image.description : image.status === 'retained' ? (locale.startsWith('zh') ? '只保留來源中繼資料；未進行模型觀察。' : 'Source metadata only; no model observation.') : `${labels.failed}: ${image.error.code} (${image.error.stage}) — ${image.error.message}`;
       lines.push(`### ${markdownText(image.imageId)}${image.alt ? ` — ${markdownText(image.alt)}` : ''}`, '', markdownText(description), '', `_${labels.source}: ${origin}_`, '');
     }
   }
@@ -56,5 +56,8 @@ export function renderMarkdown(report: StructuredReport): string {
   for (const fact of report.sourceFacts) lines.push(`- ${markdownText(fact.id)} (${markdownText(fact.citation.paragraphId)}:${fact.citation.startOffset}–${fact.citation.endOffset}) — ${markdownText(fact.citation.quote)}`);
   const coverage = report.metadata.coverage;
   lines.push('', `## ${labels.coverage}`, '', `${coverage.retainedTextCharacters}/${coverage.selectedTextCharacters} UTF-16; ${coverage.retainedQuoteCount} quotes; model citations ${coverage.modelCitedFactIds.length}; summary citations ${coverage.summaryCitedFactIds.length}.`, '', labels.unverified);
+  lines.push('', locale.startsWith('zh') ? '引用陳述的保守字詞稽核（不代表真實世界事實查核）：' : 'Conservative claim audits (not real-world fact checking):');
+  for (const claim of report.claims) lines.push(`- ${markdownText(claim.id)}: ${claim.audit.status}`);
+  for (const limit of report.claims[0]?.audit.limits ?? []) lines.push(`- ${markdownText(limit)}`);
   return `${lines.join('\n').trimEnd()}\n`;
 }

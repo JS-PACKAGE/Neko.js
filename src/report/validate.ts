@@ -2,9 +2,11 @@ import type { Page, StructuredReport } from '../types.js';
 import { ERROR_CODES, ERROR_STAGES } from '../errors.js';
 import { validateGeneratedLanguage } from './language.js';
 import { snapshotPage, validatePage } from '../web/source.js';
-import { getModelProfile } from '../cache/manifest.js';
+import { getRegisteredModelProfile, type ModelId } from '../cache/registry.js';
 import type { PageSnapshot } from '../types.js';
 import { reportChecksum, sourceCoverage, validateSourceFacts } from './evidence.js';
+import { auditClaim } from './audit.js';
+import { validateImageObservation } from '../web/image.js';
 
 function object(value: unknown, name: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new TypeError(`${name} must be an object`);
@@ -19,7 +21,8 @@ function texts(value: unknown, name: string, allowEmpty = false): asserts value 
 
 function validateReportBody(report: unknown, page: Page): asserts report is StructuredReport {
   object(report, 'Report');
-  if (report.schemaVersion !== 2) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 2');
+  if (report.schemaVersion !== 3) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 3');
+  if (report.mode !== 'generated' && report.mode !== 'extractive') throw new TypeError('Report mode is invalid');
   text(report.language, 'Report language');
   try { Intl.getCanonicalLocales(report.language); } catch { throw new TypeError('Report language must be a valid BCP 47 language tag'); }
   if (report.imageFailurePolicy !== 'error' && report.imageFailurePolicy !== 'omit') throw new TypeError('Report imageFailurePolicy is invalid');
@@ -27,8 +30,10 @@ function validateReportBody(report: unknown, page: Page): asserts report is Stru
   if (typeof report.page.url !== 'string') throw new TypeError('Report URL must be a string');
   text(report.page.summary, 'Report summary');
   text(report.conclusion, 'Report conclusion');
-  validateGeneratedLanguage(report.page.summary, report.language, 'Summary');
-  validateGeneratedLanguage(report.conclusion, report.language, 'Conclusion');
+  if (report.mode === 'generated') {
+    validateGeneratedLanguage(report.page.summary, report.language, 'Summary');
+    validateGeneratedLanguage(report.conclusion, report.language, 'Conclusion');
+  }
   if (report.page.url !== page.url) throw new TypeError('Report URL does not match the extracted page');
   if (report.page.title !== page.title) throw new TypeError('Report title does not match the extracted page');
   if (!Array.isArray(report.sections)) throw new TypeError('Report sections must be an array');
@@ -39,7 +44,7 @@ function validateReportBody(report: unknown, page: Page): asserts report is Stru
     if (section.heading !== undefined) text(section.heading, 'Section heading');
     texts(section.keyPoints, 'Section key points');
     texts(section.paragraphIds, 'Section paragraph IDs');
-    for (const point of section.keyPoints) validateGeneratedLanguage(point, report.language, 'Section key point');
+    if (report.mode === 'generated') for (const point of section.keyPoints) validateGeneratedLanguage(point, report.language, 'Section key point');
     if (new Set(section.paragraphIds).size !== section.paragraphIds.length) throw new TypeError('Section has duplicate paragraph references');
     for (const id of section.paragraphIds) {
       if (!paragraphIds.has(id)) throw new TypeError(`Report references unknown paragraph ${id}`);
@@ -59,11 +64,13 @@ function validateReportBody(report: unknown, page: Page): asserts report is Stru
     object(image.source, 'Image provenance');
     if (image.url !== source.url || image.source.kind !== 'image' || image.source.imageId !== image.imageId) throw new TypeError(`Image ${image.imageId} has inconsistent provenance`);
     if (image.alt !== source.alt) throw new TypeError(`Image ${image.imageId} alt text does not match extracted metadata`);
-    if (image.status === 'described') {
+    if (image.status === 'retained' && report.mode === 'extractive') {
+      if (Object.hasOwn(image, 'description') || Object.hasOwn(image, 'observation') || Object.hasOwn(image, 'error')) throw new TypeError('Retained image metadata cannot include generated output');
+    } else if (image.status === 'described' && report.mode === 'generated') {
       if (typeof image.description !== 'string' || !image.description.trim()) throw new TypeError(`Image ${image.imageId} is missing its generated description`);
       validateGeneratedLanguage(image.description, report.language, `Image ${image.imageId} description`);
       if (image.error !== undefined) throw new TypeError('Described image cannot include an error');
-    } else if (image.status === 'failed' && report.imageFailurePolicy === 'omit') {
+    } else if (image.status === 'failed' && report.mode === 'generated' && report.imageFailurePolicy === 'omit') {
       object(image.error, 'Image failure');
       text(image.error.stage, 'Image error stage'); text(image.error.code, 'Image error code'); text(image.error.message, 'Image error message');
       if (!Object.hasOwn(ERROR_STAGES, image.error.stage) || !Object.hasOwn(ERROR_CODES, image.error.code)) throw new TypeError('Image error stage or code is invalid');
@@ -107,8 +114,8 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
   const targets = new Map<string, string>([['page.summary', report.page.summary], ['conclusion', report.conclusion]]);
   for (const [index, section] of report.sections.entries()) for (const [point, value] of section.keyPoints.entries()) targets.set(`sections[${index}].keyPoints[${point}]`, value);
   for (const [index, image] of report.images.entries()) if (image.status === 'described') {
-    object(image.observation, 'Image observation'); digest(image.observation.versionId, 'Image version');
-    if (image.observation.verification !== 'model-observation' || !Number.isSafeInteger(image.observation.width) || image.observation.width < 1 || !Number.isSafeInteger(image.observation.height) || image.observation.height < 1) throw new TypeError('Image observation is invalid');
+    validateImageObservation(image.observation);
+    if (image.observation.verification !== 'model-observation') throw new TypeError('Image observation is invalid');
     targets.set(`images[${index}].description`, image.description);
   }
   if (!Array.isArray(report.claims) || !report.claims.length) throw new TypeError('Report must contain atomic cited claims');
@@ -134,11 +141,15 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
         reference = `${citation.paragraphId}:${citation.startOffset}:${citation.endOffset}`;
       } else if (citation.kind === 'image-observation') {
         const image = images.get(citation.imageId);
-        if (!image || image.status !== 'described' || citation.versionId !== image.observation.versionId) throw new TypeError('Citation references an unavailable or different image observation');
+        if (!image || image.status !== 'described' || citation.versionId !== image.observation.versionId || citation.sourceVersionId !== image.observation.sourceVersionId || citation.sourceWidth !== image.observation.sourceWidth || citation.sourceHeight !== image.observation.sourceHeight || JSON.stringify(citation.region) !== JSON.stringify(image.observation.region) || JSON.stringify(citation.normalizedRegion) !== JSON.stringify(image.observation.normalizedRegion)) throw new TypeError('Citation references an unavailable or different image observation or region');
         reference = `image:${citation.imageId}`;
       } else throw new TypeError('Unsupported citation kind');
       if (references.has(reference)) throw new TypeError('Claim has duplicate citations'); references.add(reference);
     }
+    const claimText = target.slice(claim.startOffset, claim.endOffset);
+    const expectedAudit = auditClaim(claimText, claim.citations, expected);
+    if (JSON.stringify(claim.audit) !== JSON.stringify(expectedAudit)) throw new TypeError('Claim audit is missing, altered, or inconsistent with its exact cited evidence');
+    if (report.mode === 'extractive' && (expectedAudit.status !== 'supported' || !claim.citations.every((citation) => citation.kind === 'quote') || !claim.citations.some((citation) => citation.kind === 'quote' && citation.quote === claimText))) throw new TypeError('Extractive output must be exact cited source text');
   }
   for (const [target, text] of targets) {
     const ranges = spans.get(target); if (!ranges) throw new TypeError(`Generated text has no atomic claim coverage (${target})`);
@@ -147,7 +158,7 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
     if (text.slice(end).trim()) throw new TypeError('Generated text is not fully covered by cited claims');
   }
   object(report.metadata, 'Report metadata'); object(report.metadata.model, 'Report model');
-  const profile = getModelProfile(report.metadata.model.profile);
+  const profile = getRegisteredModelProfile(report.metadata.model.profile, report.metadata.model.id as ModelId);
   if (report.metadata.model.id !== profile.id || report.metadata.model.revision !== profile.revision) throw new TypeError('Report model identity is not a registered pinned profile');
   object(report.metadata.model.dtype, 'Model dtype');
   for (const key of ['embed_tokens', 'decoder_model_merged', 'vision_encoder'] as const) if (report.metadata.model.dtype[key] !== profile.dtype[key]) throw new TypeError('Report model dtype does not match its profile');
@@ -158,6 +169,7 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
   for (const key of ['loadMs', 'preprocessMs', 'generationMs', 'totalMs', 'queueWaitMs'] as const) if (typeof report.metadata.timings[key] !== 'number' || !Number.isFinite(report.metadata.timings[key]) || report.metadata.timings[key] < 0) throw new TypeError('Report timing is invalid');
   object(report.metadata.memory, 'Report memory');
   if (report.metadata.memory.jsHeapBytes !== null || report.metadata.memory.gpuBytes !== null) throw new TypeError('Report memory must mark unmeasured values as unknown');
+  if (report.mode === 'generated') {
   object(report.metadata.backend, 'Report backend');
   if (!['node', 'browser'].includes(report.metadata.backend.runtime) || !['cpu', 'webgpu'].includes(report.metadata.backend.device) || report.metadata.backend.providerEvidence !== 'loaded-session-configuration' || !Array.isArray(report.metadata.backend.sessions) || !report.metadata.backend.sessions.length) throw new TypeError('Report backend evidence is invalid');
   const sessions = new Set<string>();
@@ -168,20 +180,22 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
     sessions.add(name);
   }
   if (sessions.size !== Object.keys(profile.dtype).length) throw new TypeError('Loaded session configuration is incomplete');
+  } else if (report.metadata.backend !== null) throw new TypeError('Extractive reports cannot claim a loaded backend');
   object(report.metadata.execution, 'Report execution');
-  if (!['inline', 'worker'].includes(report.metadata.execution.mode) || report.metadata.execution.runtime !== report.metadata.backend.runtime || report.metadata.execution.mode === 'worker' && typeof report.metadata.execution.workerId !== 'string' || !Number.isSafeInteger(report.metadata.resumedStages) || report.metadata.resumedStages < 0 || report.metadata.evidence !== 'references-validated-not-fact-checked') throw new TypeError('Report execution or evidence metadata is invalid');
+  if (!['inline', 'worker'].includes(report.metadata.execution.mode) || !['node', 'browser'].includes(report.metadata.execution.runtime) || report.metadata.backend !== null && report.metadata.execution.runtime !== report.metadata.backend.runtime || report.metadata.execution.mode === 'worker' && typeof report.metadata.execution.workerId !== 'string' || !Number.isSafeInteger(report.metadata.resumedStages) || report.metadata.resumedStages < 0 || !Number.isSafeInteger(report.metadata.retryAttempts) || report.metadata.retryAttempts < 0 || report.metadata.evidence !== 'references-validated-heuristic-audit') throw new TypeError('Report execution or evidence metadata is invalid');
+  if (report.mode === 'extractive' && (usage.totalTokens !== 0 || report.metadata.retryAttempts !== 0 || report.metadata.timings.loadMs !== 0 || report.metadata.timings.generationMs !== 0)) throw new TypeError('Extractive reports cannot claim model usage, load/generation timings or retries');
   object(report.metadata.coverage, 'Report coverage');
   const coverage = report.metadata.coverage;
   if (coverage.conclusionBasis !== 'retained-source' && coverage.conclusionBasis !== 'reduced-generated-claims') throw new TypeError('Conclusion source basis is invalid');
-  const expectedCoverage = sourceCoverage(expected, report.sourceFacts, report.claims, coverage.conclusionBasis);
+  const expectedCoverage = sourceCoverage(expected, report.sourceFacts, report.claims, coverage.conclusionBasis, report.mode);
   for (const key of ['selectedParagraphIds', 'modelCitedFactIds', 'summaryCitedFactIds'] as const) if (!Array.isArray(coverage[key]) || coverage[key].length !== expectedCoverage[key].length || coverage[key].some((id, index) => id !== expectedCoverage[key][index])) throw new TypeError(`Report ${key} coverage is inconsistent`);
   for (const key of ['selectedTextCharacters', 'retainedQuoteCount', 'retainedTextCharacters', 'semanticRetention'] as const) if (coverage[key] !== expectedCoverage[key]) throw new TypeError(`Report ${key} coverage is inconsistent`);
 }
 
-/** Audits persisted source hashes and exact references, not factual entailment or image pixels. */
+/** Validates hashes, exact references and reproducible limited lexical audits, never real-world truth. */
 export async function validateStructuredReport(report: unknown, page?: Page): Promise<StructuredReport> {
   object(report, 'Report');
-  if (report.schemaVersion !== 2) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 2');
+  if (report.schemaVersion !== 3) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 3');
   object(report.snapshot, 'Report snapshot'); validatePage(report.snapshot.source);
   const [expected, external] = await Promise.all([snapshotPage(report.snapshot.source), page === undefined || page === report.snapshot.source ? undefined : snapshotPage(page)]);
   if (external && external.id !== expected.id) throw new TypeError('Report source differs from the supplied selected Page');
