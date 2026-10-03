@@ -11,7 +11,7 @@
 | 項目 | 內容 |
 | --- | --- |
 | 專案名稱 | Neko.js |
-| 遠端倉庫 | https://github.com/YueyuHoshizora/Neko.js |
+| 遠端倉庫 | https://github.com/JS-PACKAGE/Neko.js |
 | 專案類型 | TypeScript 本機推理 SDK（Node.js／瀏覽器；來源為 Git 倉庫，不發佈 npm） |
 | 執行環境 | Node.js ≥ 22（ESM）及具備相容 WebGPU adapter 的安全瀏覽器 |
 | 核心模型 | Qwen3.5-0.8B-ONNX-OPT，固定 revision，Q4 embeddings／decoder、FP16 vision encoder |

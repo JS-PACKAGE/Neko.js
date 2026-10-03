@@ -8,16 +8,16 @@ Neko.js 是本機多模態推理 SDK，以固定版本的 Qwen3.5 ONNX 模型提
 
 ### Node.js 安裝
 
-需要 Node.js 22 以上。本專案不發佈 npm；支援的 Git 倉庫用法是 clone 後在本機建置：
+需要 Node.js 22.13 以上。本專案不發佈 npm；支援的 Git 倉庫用法是 clone 後在本機建置：
 
 ```sh
-git clone https://github.com/YueyuHoshizora/Neko.js.git
+git clone https://github.com/JS-PACKAGE/Neko.js.git
 cd Neko.js
 npm ci
 npm run build
 ```
 
-- 使用方也可在本機 clone 並建置目前工作樹後執行 `npm pack`，產生含預建 `dist/` 的 tarball，再以 `npm install /absolute/path/to/<printed-filename>.tgz` 安裝印出的檔案；檔名與版本取自當前 `package.json`，不使用固定版本檔名。本專案不發佈至 npm。因 npm 11 對 Git 相依套件的 `prepare` 有腳本核准限制，不要假設直接安裝 Git URL 會完成建置；clone、`npm ci`、`npm run build` 的本機流程仍支援。Node bundle 已包含 Transformers.js；執行依賴為 pinned `onnxruntime-node@1.30.0`、`sharp@0.35.4`、`parse5@8.0.1`。若 npm 11 封鎖原生安裝腳本，僅核准這兩個有原生程式碼的精確版本，不要核准所有套件腳本。
+- 使用方也可在本機 clone 並建置目前工作樹後執行 `npm pack`，產生含預建 `dist/` 的 tarball，再以 `npm install /absolute/path/to/<printed-filename>.tgz` 安裝印出的檔案；檔名與版本取自當前 `package.json`。本專案不發佈至 npm。npm 11 的 Git dependency `prepare` 可能需要腳本核准，請使用明確的 clone／`npm ci`／`npm run build` 流程。Node bundle 包含 Transformers.js；直接執行依賴為 pinned ONNX Runtime、sharp、parse5、PDF.js 與預建 native canvas。原生 postinstall 僅核准 `onnxruntime-node@1.30.0`、`sharp@0.35.4`；canvas 不需新增腳本核准，勿一律核准所有依賴。
 
 ```js
 import { createNeko } from 'neko.js';
@@ -93,16 +93,16 @@ The default is `onnx-community/Qwen3.5-0.8B-ONNX-OPT`, revision `fafab72d87a9e6b
 
 ### Install for Node.js
 
-Requires Node.js 22 or newer. This project is not published to npm. Clone the Git repository and build locally:
+Requires Node.js 22.13 or newer. This project is not published to npm. Clone the Git repository and build locally:
 
 ```sh
-git clone https://github.com/YueyuHoshizora/Neko.js.git
+git clone https://github.com/JS-PACKAGE/Neko.js.git
 cd Neko.js
 npm ci
 npm run build
 ```
 
-Consumers may clone and build the current working tree locally, then run `npm pack` to create a tarball containing the prebuilt `dist/`. Install the printed filename with `npm install /absolute/path/to/<printed-filename>.tgz`; its name/version derives from the current `package.json`, not a fixed version in this guide. This project is not published to npm. Do not assume an npm Git-URL dependency runs `prepare`: npm 11 may require lifecycle-script approval. The supported Git workflow is clone, `npm ci`, and `npm run build`. The Node bundle includes Transformers.js; runtime dependencies are pinned `onnxruntime-node@1.30.0`, `sharp@0.35.4`, and `parse5@8.0.1`. If npm 11 blocks native install scripts, approve only those exact native package versions rather than allowing all dependency scripts.
+Consumers may clone and build the working tree, then run `npm pack` and install the printed tarball with `npm install /absolute/path/to/<printed-filename>.tgz`. Its name/version derives from `package.json`; this project is not published to npm. npm 11 may require approval for Git dependency `prepare`, so use explicit clone, `npm ci`, and `npm run build`. The Node bundle includes Transformers.js; direct runtime dependencies are pinned ONNX Runtime, sharp, parse5, PDF.js, and prebuilt native canvas. Approve native postinstall only for `onnxruntime-node@1.30.0` and `sharp@0.35.4`; canvas needs no additional script approval. Never blanket-approve dependency scripts.
 
 ```js
 import { createNeko } from 'neko.js';
