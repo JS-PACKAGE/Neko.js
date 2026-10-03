@@ -2,6 +2,8 @@ import type { ChatContent, ChatMessage, InferOptions, InferencePlan, InferenceRe
 import type { ImageInput } from '../web/image.js';
 import { awaitUser, NekoError } from '../errors.js';
 import { validateInferenceOptions } from './preflight.js';
+import { createBoundedStream, streamCharacters, type StreamBufferOptions } from '../runtime/bounded-stream.js';
+import type { InferenceStreamEvent } from '../runtime/stream.js';
 
 export interface SessionHost {
   infer(options: InferOptions): Promise<InferenceResult>;
@@ -15,6 +17,7 @@ export interface SessionOptions extends SessionDefaults {
   maxHistoryMessages?: number;
 }
 export type SessionSendOptions = SessionDefaults & Pick<InferOptions, 'signal' | 'onToken' | 'validateDestination'>;
+export type SessionSendStreamOptions = SessionSendOptions & StreamBufferOptions;
 export interface SessionControlOptions { signal?: AbortSignal; }
 export type PortableSessionImage =
   | { type: 'data-url'; data: string }
@@ -208,18 +211,52 @@ export class ConversationSession {
       drop();
     }
   }
+  private validateResult(result: InferenceResult): void {
+    if (!result || !record(result.model) || !sameModel(result.model, this.model)) throw new NekoError('Conversation model identity changed', 'generate', 'INVALID_INPUT');
+    if (typeof result.text !== 'string') throw new NekoError('Conversation inference returned invalid text', 'generate', 'MODEL_OUTPUT');
+    const usage = result.usage;
+    if (!usage || !Number.isSafeInteger(usage.inputTokens) || usage.inputTokens < 0 || !Number.isSafeInteger(usage.outputTokens) || usage.outputTokens < 0 || !Number.isSafeInteger(usage.totalTokens) || usage.totalTokens !== usage.inputTokens + usage.outputTokens) throw new NekoError('Conversation inference returned invalid usage', 'generate', 'MODEL_OUTPUT');
+  }
   send(content: string | ChatContent[], options: SessionSendOptions = {}): Promise<InferenceResult> {
     let captured: CapturedSend;
     try { captured = this.capture(content, options); } catch (error) { return Promise.reject(error); }
     return this.enqueue(captured.options.signal, async (signal) => {
       const prepared = await this.prepare(captured.user, captured.options, signal);
-      // Identical rendered input in plan/infer uses the engine's exact tokenized-prompt cache, not KV reuse.
       const result = await this.host.infer({ ...copyOptions(prepared.options), messages: cloneMessages(prepared.messages) });
       this.check(signal);
-      if (!sameModel(result.model, this.model)) throw new NekoError('Conversation model identity changed', 'generate', 'INVALID_INPUT');
-      if (typeof result.text !== 'string') throw new NekoError('Conversation inference returned invalid text', 'generate', 'MODEL_OUTPUT');
+      this.validateResult(result);
       this.messages = [...prepared.messages, { role: 'assistant', content: result.text }];
       return result;
+    });
+  }
+  /** History commits only after the consumer requests normal exhaustion after the validated result. */
+  sendStream(content: string | ChatContent[], options: SessionSendStreamOptions = {}): AsyncIterableIterator<InferenceStreamEvent> {
+    if (!record(options)) throw new TypeError('Session send options must be an object');
+    const { ...send } = options;
+    delete send.maxBufferedEvents; delete send.maxBufferedCharacters;
+    const captured = this.capture(content, send);
+    const consumed = Promise.withResolvers<void>();
+    let commit: (() => void) | undefined;
+    return createBoundedStream<InferenceStreamEvent>({
+      ...options,
+      signal: AbortSignal.any([this.lifetime.signal, ...(captured.options.signal ? [captured.options.signal] : [])]),
+      characters: (event) => event.type === 'token' ? event.text.length : streamCharacters(event.result),
+      onConsumed: () => { commit!(); consumed.resolve(); },
+      onCancel: () => { commit = undefined; consumed.resolve(); },
+    }, async (sink) => {
+      await this.enqueue(sink.signal, async (signal) => {
+        const prepared = await this.prepare(captured.user, captured.options, signal);
+        const result = await this.host.infer({
+          ...copyOptions(prepared.options), messages: cloneMessages(prepared.messages),
+          onToken: (text) => { sink.emit({ type: 'token', text }); captured.options.onToken?.(text); },
+        });
+        this.check(signal); this.validateResult(result);
+        // Own commit data before exposing a mutable result to the consumer.
+        const text = result.text;
+        commit = () => { this.check(signal); this.messages = [...prepared.messages, { role: 'assistant', content: text }]; };
+        sink.finish({ type: 'result', result, usage: result.usage });
+        await consumed.promise;
+      });
     });
   }
   plan(content: string | ChatContent[], options: SessionSendOptions = {}): Promise<InferencePlan> {

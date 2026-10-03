@@ -191,3 +191,117 @@ test('session defaults and host arguments cannot mutate retained generation sett
   const snapshot = await setup.session.export();
   assert.deepEqual(snapshot.options.generation!.stop, ['original']);
 });
+
+test('sendStream is lazy, emits actual usage and commits only after normal exhaustion', async () => {
+  const setup = fixture({}, async (options) => { options.onToken?.('first'); options.onToken?.('second'); return setup.result; });
+  const stream = setup.session.sendStream('owned user');
+  assert.equal(setup.inferred.length, 0);
+  const events = [];
+  for await (const event of stream) {
+    events.push(event);
+    assert.deepEqual(setup.session.history(), []);
+    if (event.type === 'result') {
+      assert.deepEqual(event.usage, setup.result.usage);
+      event.result.text = 'consumer mutation';
+    }
+  }
+  assert.deepEqual(events.map(({ type }) => type), ['token', 'token', 'result']);
+  assert.deepEqual(setup.session.history(), [{ role: 'user', content: 'owned user' }, { role: 'assistant', content: '\n exact assistant\t' }]);
+  const snapshot = await setup.session.export();
+  const branch = await setup.session.branch();
+  await branch.import(snapshot);
+  assert.deepEqual(branch.history(), setup.session.history());
+});
+
+test('return after a generated stream result rolls back and releases queued branch and export', async () => {
+  const setup = fixture({ system: 'system' });
+  await setup.session.send('retained');
+  const before = setup.session.history();
+  const stream = setup.session.sendStream('never committed');
+  const event = await stream.next();
+  assert.equal(event.value?.type, 'result');
+  assert.deepEqual(setup.session.history(), before);
+  const branch = setup.session.branch();
+  const snapshot = setup.session.export();
+  await stream.return!();
+  assert.deepEqual((await branch).history(), before);
+  assert.deepEqual((await snapshot).messages, before);
+  await setup.session.send('after return');
+  assert.equal(setup.session.history().at(-2)!.content, 'after return');
+});
+
+test('breaking token iteration aborts active native work and never commits its late result', async () => {
+  const entered = Promise.withResolvers<AbortSignal>();
+  const release = Promise.withResolvers<void>();
+  let calls = 0;
+  const setup = fixture({}, async (options) => {
+    if (++calls === 1) { entered.resolve(options.signal!); options.onToken?.('partial'); await release.promise; }
+    return setup.result;
+  });
+  for await (const event of setup.session.sendStream('discarded')) { assert.equal(event.type, 'token'); break; }
+  assert.equal((await entered.promise).aborted, true);
+  assert.deepEqual(setup.session.history(), []);
+  const next = setup.session.send('retained');
+  assert.equal(setup.inferred.length, 1);
+  release.resolve();
+  await next;
+  assert.deepEqual(setup.session.history().map(({ content }) => content), ['retained', setup.result.text]);
+});
+
+test('stream overflow and caller abort roll back history including tentative dropped turns', async () => {
+  let calls = 0;
+  let active: AbortSignal | undefined;
+  const setup = fixture({ contextPolicy: 'drop-oldest', maxHistoryMessages: 2 }, async (options) => {
+    active = options.signal;
+    if (++calls === 2) { options.onToken?.('A'); options.onToken?.('B'); options.onToken?.('C'); }
+    return setup.result;
+  });
+  await setup.session.send('first');
+  const before = setup.session.history();
+  const overflow = setup.session.sendStream('overflow', { maxBufferedEvents: 1 });
+  assert.equal((await overflow.next()).value?.type, 'token');
+  await assert.rejects(overflow.next(), (error: unknown) => error instanceof NekoError && error.code === 'STREAM_OVERFLOW');
+  assert.equal(active?.aborted, true);
+  assert.deepEqual(setup.session.history(), before);
+  const abort = new AbortController();
+  const canceled = setup.session.sendStream('canceled after result', { signal: abort.signal });
+  assert.equal((await canceled.next()).value?.type, 'result');
+  abort.abort('caller stopped');
+  await assert.rejects(canceled.next(), (error: unknown) => error instanceof NekoError && error.code === 'ABORTED');
+  assert.deepEqual(setup.session.history(), before);
+  assert.deepEqual((await setup.session.export()).messages, before);
+});
+
+test('queued stream cancellation and invalid final usage cannot mutate a session', async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let calls = 0;
+  const setup = fixture({}, async () => {
+    if (++calls === 1) { entered.resolve(); await release.promise; return setup.result; }
+    return { ...setup.result, usage: { inputTokens: 1, outputTokens: 2, totalTokens: 99 } };
+  });
+  const first = setup.session.send('first');
+  await entered.promise;
+  const abort = new AbortController();
+  const stream = setup.session.sendStream('queued', { signal: abort.signal });
+  const next = stream.next();
+  abort.abort();
+  await assert.rejects(next, (error: unknown) => error instanceof NekoError && error.code === 'ABORTED');
+  release.resolve(); await first;
+  assert.equal(setup.inferred.length, 1);
+  const before = setup.session.history();
+  await assert.rejects(setup.session.sendStream('invalid').next(), (error: unknown) => error instanceof NekoError && error.code === 'MODEL_OUTPUT');
+  assert.deepEqual(setup.session.history(), before);
+});
+
+test('normal stream exhaustion atomically seals a committed turn before later cancellation', async () => {
+  const setup = fixture();
+  const abort = new AbortController();
+  const stream = setup.session.sendStream('committed', { signal: abort.signal });
+  assert.equal((await stream.next()).value?.type, 'result');
+  const exhausted = stream.next();
+  abort.abort('too late');
+  assert.deepEqual(await exhausted, { done: true, value: undefined });
+  assert.deepEqual(setup.session.history().map(({ content }) => content), ['committed', setup.result.text]);
+  assert.deepEqual((await setup.session.export()).messages, setup.session.history());
+});

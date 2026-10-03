@@ -24,6 +24,7 @@ import { queuedReadable } from './queued-stream.js';
 import { askDocument, type AskOptions } from './web/query.js';
 import type { ModelBundleSource } from './cache/bundle.js';
 import { generateExtractiveReport, planExtractiveReport } from './report/extractive.js';
+import { createStructuredInferenceStream, createDescribeStream, createAskStream, createAskDocumentsStream, type StructuredInferStreamOptions, type StructuredInferenceStreamEvent, type DescribeStreamOptions, type DescribeStreamEvent, type AskStreamOptions, type AskStreamEvent, type AskDocumentsStreamOptions, type AskDocumentsStreamEvent } from './runtime/operation-stream.js';
 import { inferTools, type ToolDefinitions, type ToolInferOptions, type ToolInferenceResult } from './core/tools.js';
 import type { GenerationStateHandle, ReuseCacheInfo, ReuseCacheLimits } from './types.js';
 import { askDocuments, type DocumentIndex, type DocumentIndexSnapshot, type AskDocumentsOptions, type DocumentsAnswer } from './documents/index.js';
@@ -51,9 +52,10 @@ export type { EngineCacheStatus } from './cache/engine.js';
 export type { QueueStatus } from './core-queue.js';
 export type { InferStreamOptions, InferenceStreamEvent } from './runtime/stream.js';
 export type { SchemaValue, StructuredMode } from './core/structured.js';
-export type { ConversationSession, SessionOptions, SessionSendOptions, SessionControlOptions, SessionSnapshot } from './core/session.js';
+export type { ConversationSession, SessionOptions, SessionSendOptions, SessionSendStreamOptions, SessionControlOptions, SessionSnapshot } from './core/session.js';
 export type { HealthOptions, RuntimeHealth, RuntimeDiagnostics } from './runtime/diagnostics.js';
 export type { ModelBundleSource } from './cache/bundle.js';
+export type { StreamBufferOptions, StructuredInferStreamOptions, StructuredInferenceStreamEvent, DescribeStreamOptions, DescribeStreamEvent, AskStreamOptions, AskStreamEvent, AskDocumentsStreamOptions, AskDocumentsStreamEvent } from './runtime/operation-stream.js';
 
 export interface NekoOptions {
   device?: BackendDevice;
@@ -92,6 +94,7 @@ export interface Neko {
   infer(options: InferOptions): Promise<InferenceResult>;
   inferStream(options: InferStreamOptions): AsyncIterable<InferenceStreamEvent>;
   inferStructured<const S>(options: StructuredInferOptions<S>): Promise<StructuredInferenceResult<SchemaValue<S>>>;
+  inferStructuredStream<const S>(options: StructuredInferStreamOptions<S>): AsyncIterable<StructuredInferenceStreamEvent<SchemaValue<S>>>;
   inferTools<const T extends ToolDefinitions>(options: ToolInferOptions<T>): Promise<ToolInferenceResult<T>>;
   releaseGenerationState(handle: GenerationStateHandle): Promise<void>;
   reuseCacheInfo(): Promise<ReuseCacheInfo | null>;
@@ -100,7 +103,10 @@ export interface Neko {
   planReport(input: string | Page, options?: DescribeOptions): Promise<ReportPlan>;
   session(options?: SessionOptions): ConversationSession;
   ask(input: string | Page, question: string, options?: AskOptions): Promise<DocumentAnswer>;
+  askStream(input: string | Page, question: string, options?: AskStreamOptions): AsyncIterable<AskStreamEvent>;
   askDocuments(index: DocumentIndex | DocumentIndexSnapshot, question: string, options?: AskDocumentsOptions): Promise<DocumentsAnswer>;
+  askDocumentsStream(index: DocumentIndex | DocumentIndexSnapshot, question: string, options?: AskDocumentsStreamOptions): AsyncIterable<AskDocumentsStreamEvent>;
+  describeStream(input: string | Page, options?: DescribeStreamOptions): AsyncIterable<DescribeStreamEvent>;
   extractPdf(source: OwnedDocumentBytes, options?: PdfExtractOptions): Promise<PdfDocument>;
   ocr(source: OcrImageInput, options?: OcrOptions): Promise<OcrDocument>;
   describe(input: string | Page, options: DescribeOptions & { format: 'markdown' }): Promise<string>;
@@ -187,6 +193,7 @@ class LocalNeko implements Neko {
       return this.use(signal, async (engine) => { const result = await engine.inferStructured({ ...options, signal }, { structured: compiled }); return { ...result, timings: { ...result.timings, queueWaitMs }, execution: this.execution() }; });
     });
   }
+  inferStructuredStream<const S>(options: StructuredInferStreamOptions<S>): AsyncIterable<StructuredInferenceStreamEvent<SchemaValue<S>>> { return createStructuredInferenceStream(options, (request) => this.inferStructured(request)); }
   inferTools<const T extends ToolDefinitions>(options: ToolInferOptions<T>): Promise<ToolInferenceResult<T>> { return inferTools(this, options); }
   releaseGenerationState(handle: GenerationStateHandle): Promise<void> {
     return this.run('cache', undefined, async () => this.engines.inspect((engine) => {
@@ -238,11 +245,14 @@ class LocalNeko implements Neko {
         { ...options, signal }, { policy: this.options.policy, offline: this.options.localFilesOnly });
     });
   }
+  askStream(input: string | Page, question: string, options: AskStreamOptions = {}): AsyncIterable<AskStreamEvent> { return createAskStream(input, question, options, (source, query, request) => this.ask(source, query, request)); }
   askDocuments(index: DocumentIndex | DocumentIndexSnapshot, question: string, options: AskDocumentsOptions = {}): Promise<DocumentsAnswer> {
     this.checkRequest('generate', options?.signal);
     assertHardDeadlineUnsupported(options.hardDeadlineMs);
     return this.compose('report', options.signal, (signal) => askDocuments(this, index, question, { ...options, signal }));
   }
+  askDocumentsStream(index: DocumentIndex | DocumentIndexSnapshot, question: string, options: AskDocumentsStreamOptions = {}): AsyncIterable<AskDocumentsStreamEvent> { return createAskDocumentsStream(index, question, options, (source, query, request) => this.askDocuments(source, query, request)); }
+  describeStream(input: string | Page, options: DescribeStreamOptions = {}): AsyncIterable<DescribeStreamEvent> { return createDescribeStream(input, options, (source, request) => this.describe(source, request)); }
   extractPdf(source: OwnedDocumentBytes, options: PdfExtractOptions = {}): Promise<PdfDocument> {
     this.checkRequest('extract', options?.signal);
     if (options.ocr !== undefined && options.ocr !== 'none') assertHardDeadlineUnsupported(options.hardDeadlineMs, 'extract');

@@ -63,6 +63,27 @@ test('character bound and caller cancellation cannot leave a pending consumer ha
   await assert.rejects(next, (error: unknown) => error instanceof NekoError && error.code === 'ABORTED' && error.cause === 'caller stopped');
 });
 
+test('caller abort after generation still clears buffered results until normal stream exhaustion', async () => {
+  const abort = new AbortController();
+  const completed = Promise.withResolvers<void>();
+  const stream = createInferenceStream({ prompt: 'exact', signal: abort.signal }, async (options) => {
+    options.onToken?.('A'); completed.resolve(); return result('A');
+  });
+  assert.equal((await stream.next()).value?.type, 'token');
+  await completed.promise;
+  abort.abort('discard final');
+  await assert.rejects(stream.next(), (error: unknown) => error instanceof NekoError && error.code === 'ABORTED');
+});
+
+test('a buffered final result accounts for retained snapshot and metadata strings', async () => {
+  const stream = createInferenceStream({ prompt: 'exact', maxBufferedCharacters: 8 }, async (options) => {
+    options.onToken?.('A'); return result('A');
+  });
+  assert.equal((await stream.next()).value?.type, 'token');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await assert.rejects(stream.next(), (error: unknown) => error instanceof NekoError && error.code === 'STREAM_OVERFLOW');
+});
+
 test('deferred transferred stream cancellation before arrival cancels its source once', async () => {
   const source = Promise.withResolvers<ReadableStream<Uint8Array>>();
   let canceled = 0;

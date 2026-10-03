@@ -15,6 +15,7 @@ import { createConversationSession } from '../core/session.js';
 import { deferredReadableStream } from './readable.js';
 import type { StructuredInferOptions, StructuredInferenceResult } from '../core/engine.js';
 import type { SchemaValue } from '../core/structured.js';
+import { createStructuredInferenceStream, createDescribeStream, createAskStream, createAskDocumentsStream } from './operation-stream.js';
 import { inferTools } from '../core/tools.js';
 import { askDocuments } from '../documents/index.js';
 import { extractPdf } from '../documents/pdf/index.js';
@@ -366,6 +367,7 @@ export async function createWorkerClient(options: NekoOptions = {}): Promise<Wor
       const { signal, hardDeadlineMs, ...configuration } = options;
       return connection.request('inferStructured', [configuration], signal, hardDeadlineMs);
     },
+    inferStructuredStream: (options) => createStructuredInferenceStream(options, (request) => client.inferStructured(request)),
     inferTools: (options) => inferTools(client, options),
     releaseGenerationState: (handle) => connection.request('releaseGenerationState', [handle]),
     reuseCacheInfo: () => connection.request('reuseCacheInfo', []),
@@ -377,7 +379,10 @@ export async function createWorkerClient(options: NekoOptions = {}): Promise<Wor
       return connection.request('planInference', [configuration], signal, hardDeadlineMs);
     },
     describe,
+    describeStream: (input, options = {}) => createDescribeStream(input, options, (source, request) => client.describe(source, request)),
+    askStream: (input, question, options = {}) => createAskStream(input, question, options, (source, query, request) => client.ask(source, query, request)),
     askDocuments: (index, question, options = {}) => compose('report', options.signal, (signal) => askDocuments(client, index, question, { ...options, signal })),
+    askDocumentsStream: (index, question, options = {}) => createAskDocumentsStream(index, question, options, (source, query, request) => client.askDocuments(source, query, request)),
     extractPdf: (source, options = {}) => compose('extract', options.signal, (signal) => extractPdf(source, { ...options, signal, infer: (request) => client.inferStructured(request) })),
     ocr: (source, options = {}) => compose('image', options.signal, (signal) => ocrImage(source, (request) => client.inferStructured(request), { ...options, signal })),
     planReport: async (input, options = {}) => {
