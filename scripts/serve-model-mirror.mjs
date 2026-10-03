@@ -6,7 +6,8 @@ import { dirname, join, parse, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { pipeline } from 'node:stream/promises';
-import { MODEL_ID, MODEL_REVISION, getModelProfile } from '../dist/src/cache/manifest.js';
+import { MODEL_ID, MODEL_REVISION } from '../dist/src/cache/manifest.js';
+import { getRegisteredModelProfile } from '../dist/src/cache/registry.js';
 
 export const MODEL_MIRROR_PATH = `/models/${MODEL_ID}/${MODEL_REVISION}/`;
 
@@ -19,7 +20,7 @@ export async function createModelMirror({ cacheDir, profile = 'default', allowed
     const origin = new URL(allowedOrigin);
     if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== allowedOrigin) throw new TypeError('allowedOrigin must be an exact HTTP(S) origin');
   }
-  const files = getModelProfile(profile).files;
+  const files = getRegisteredModelProfile(profile).files;
   const uid = process.getuid?.();
   const owned = (info) => uid === undefined || info.uid === uid;
   async function verifiedHandle(name) {

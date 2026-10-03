@@ -6,7 +6,8 @@ import { chromium } from '@playwright/test';
 import { env as transformersEnv } from '@huggingface/transformers';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { getModelProfile, MODEL_BASE_URL, MODEL_ID, MODEL_REVISION, modelFileUrl } from '../dist/src/cache/manifest.js';
+import { MODEL_BASE_URL, MODEL_ID, MODEL_REVISION, modelFileUrl } from '../dist/src/cache/manifest.js';
+import { getRegisteredModelProfile } from '../dist/src/cache/registry.js';
 import { createModelMirror, MODEL_MIRROR_PATH } from './serve-model-mirror.mjs';
 
 
@@ -157,7 +158,7 @@ try {
       await once(modelMirror, 'listening');
       const modelMirrorOrigin = `http://127.0.0.1:${modelMirror.address().port}`;
       const mirrorBaseUrl = new URL(MODEL_MIRROR_PATH, `${modelMirrorOrigin}/`).href;
-      const modelFiles = Object.entries(getModelProfile(modelProfile).files).map(([name, spec]) => ({
+      const modelFiles = Object.entries(getRegisteredModelProfile(modelProfile).files).map(([name, spec]) => ({
         name,
         size: spec.size,
         sha256: spec.sha256,

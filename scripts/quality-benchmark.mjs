@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import sharp from 'sharp';
 import { env as transformersEnv } from '@huggingface/transformers';
-import { getModelProfile, MODEL_BASE_URL, modelFileUrl } from '../dist/src/cache/manifest.js';
+import { MODEL_BASE_URL, modelFileUrl } from '../dist/src/cache/manifest.js';
+import { getRegisteredModelProfile } from '../dist/src/cache/registry.js';
 import { createModelMirror, MODEL_MIRROR_PATH } from './serve-model-mirror.mjs';
 import { evaluateClaims, EVALUATOR_VERSION } from './quality/evaluate.mjs';
 import { evaluateHierarchy } from './quality/hierarchy.mjs';
@@ -245,7 +246,7 @@ async function runBrowser() {
       modelMirror.listen(0, '127.0.0.1');
       await once(modelMirror, 'listening');
       modelMirrorOrigin = `http://127.0.0.1:${modelMirror.address().port}`;
-      const modelFiles = getModelProfile(modelProfile).files;
+      const modelFiles = getRegisteredModelProfile(modelProfile).files;
       const mirrorBaseUrl = new URL(MODEL_MIRROR_PATH, `${modelMirrorOrigin}/`).href;
       const files = Object.entries(modelFiles).map(([name, spec]) => ({
         name,

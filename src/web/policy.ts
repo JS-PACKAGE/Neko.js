@@ -1,4 +1,5 @@
-import { MODEL_BASE_URL, MODEL_FILES } from '../cache/manifest.js';
+import { MODEL_FILES } from '../cache/manifest.js';
+import { isRegisteredModelUrl } from '../cache/registry.js';
 import { awaitUser, NekoError } from '../errors.js';
 import { workerBootstrapUrl } from '../runtime/context.js';
 
@@ -18,7 +19,7 @@ const runtimeFiles: Record<string, true> = {
 interface ModelTransfer { modelFiles?: Readonly<Record<string, unknown>>; modelSource?: URL; modelMirror?: URL | undefined; }
 const modelCdnHosts: Record<string, true> = { 'cdn-lfs.huggingface.co': true, 'cdn-lfs-us-1.hf.co': true, 'cdn-lfs-eu-1.hf.co': true, 'cas-bridge.xethub.hf.co': true, 'us.aws.cdn.hf.co': true };
 function pinnedModelUrl(url: URL, files: Readonly<Record<string, unknown>>): boolean {
-  return url.href.startsWith(MODEL_BASE_URL) && Object.hasOwn(files, url.href.slice(MODEL_BASE_URL.length));
+  return isRegisteredModelUrl(url, files);
 }
 function trustedResource(url: URL, kind: ResourceKind, transfer?: ModelTransfer): boolean {
   if (kind === 'model') {
