@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Validate cheap inference/report options before acquiring a model in inline and worker execution; expose `planInference()` with exact chat/schema/image-expanded input tokens, output capacity and context-fit metadata. Valid cold planning calls still load the model/processor.
+- Stop structured generation at a deterministic single-JSON-value boundary and retain fail-closed Draft-07 runtime validation. Expose `json-boundary-runtime-validation` evidence; no schema grammar constraints, repair, retry or factual guarantees.
+- Preserve all selected paragraph text in an exact source-quote ledger independent of generated summaries; bound section planning to multiple evidence-linked claims and expose structural coverage, conclusion basis and explicitly unmeasured semantic retention.
+- **Breaking persisted contracts:** reports use `schemaVersion: 2`; checkpoints use `version: 2` and `evidence-first-v2`. Add validated report/checkpoint serialize/parse helpers and report integrity checksums. Reject older, unversioned and unknown versions without automatic migration; checksums are not authentication.
+- Record trusted worker execution identity before report checksum generation, so packed Node and browser-worker reports pass validated persistence without post-generation metadata mutation.
+- Add quality-regression CI gates separate from informational benchmark output; do not equate valid schemas/provenance with model quality.
+- Complete bilingual first-use Node cache/offline and browser mirror/runtime/CORS instructions; derive local tarball filenames from `npm pack`. Separate platform API contracts, historical real inference and fresh verification instead of claiming Node/browser/OS parity.
+- Exercise current changes on macOS/arm64 Node 22.23.3 and 26.7.0 CPU, the packed Node consumer, and Chromium 153 WebGPU inline/worker inference. Document that the strict four-fixture quality gate still fails for missing format prefixes and malformed hierarchical model JSON; no quality or cross-platform parity pass is claimed.
+
 ## 1.2.0 — 2026-10-03
 
 - Upgrade the pinned Node image-processing dependency to `sharp@0.35.4` to include upstream libheif and libvips security fixes; retain an exact-version install-script approval.

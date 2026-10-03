@@ -1,57 +1,79 @@
-# Quality benchmark
+# Quality benchmark and gate
 
-The repository benchmark exercises three fixed, reproducible inputs against the pinned SDK model: a five-fact text fixture, a rasterized image fixture, and a 300-paragraph hierarchy fixture. It runs the real Node or browser SDK and retains the SDK's raw per-case results and errors. It is an oracle-based regression benchmark, not a general-purpose factuality test or a guarantee that model output is correct.
+The benchmark runs the pinned SDK model against four fixed inputs: five garden facts, visible image geometry/colors, eight boundary ledger records, and 300 dated station observations. Raw SDK outputs/errors are retained. This finite-oracle regression suite is not generic semantic entailment, factuality proof, or prompt-injection protection.
 
 ## Run
 
+Run `npm ci` first (its `prepare` builds the SDK). After source changes run `npm run build`; the benchmark and gate use the compiled pinned model manifest. Deterministic quality tests never download or execute a model.
+
 ```sh
 MODEL_CACHE=/absolute/path/to/verified-node-cache
-
-# Node, CPU, default profile; offline unless the flag below is supplied
 npm run quality:benchmark -- --runtime node --device cpu --model-profile default \
   --cache-dir "$MODEL_CACHE" --output artifacts/quality-node.json
+npm run quality:gate -- --input artifacts/quality-node.json \
+  --output artifacts/quality-node-diagnostics.json
 
-# Browser, WebGPU; use a dedicated persistent Chromium data directory
+# Deterministic evaluator, programmatic gate, comparison and CLI regression tests; no model
+npm run test:quality
+
+# Browser WebGPU, using a dedicated persistent Chromium directory
 npm run quality:benchmark -- --runtime browser --device webgpu \
   --cache-dir "$MODEL_CACHE" --browser-profile .cache/neko-quality-chromium \
   --browser-port 4173 --output artifacts/quality-browser.json
-
-# Deterministic tests for the evaluator itself (does not run a model)
-npm run test:quality
 ```
 
-The benchmark defaults to `--allow-network` off. Node runs use the selected verified filesystem cache. Offline browser runs require `--cache-dir PATH`: the runner verifies that Node cache, serves the selected profile only from a temporary loopback mirror, seeds complete responses into the SDK's actual `env.cacheKey` CacheStorage plus the pinned runtime WASM asset, then enables `localFilesOnly`, takes Chromium offline, and blocks external requests. A missing or unverified profile prevents inference; no HF model requests should occur. Artifacts record cache and network evidence. Pass `--allow-network` only when you explicitly intend to let the SDK use network model sources. There are no automatic retries. Cache files are verified against the SDK's pinned manifest.
+Benchmark completion and throughput do **not** imply quality acceptance. The gate prints structured JSON, optionally writes it to `--output`, and exits nonzero for malformed, stale, incomplete, noncomparable or below-policy results. It re-evaluates raw SDK output rather than trusting saved scores. The default requires **all four** cases. `--cases text,image` deliberately scopes a diagnostic gate; it is not full release acceptance. Benchmark `--case text|image|boundaries|hierarchy` selects a single fixture; the default is `all`.
 
-`--cache-dir PATH` selects a Node filesystem cache and is also the verified seed source for offline Browser runs; model inference still uses the browser Cache API. Browser cache is origin-scoped: use a dedicated `--browser-profile` directory and keep the same `--browser-port` between runs to reuse it. Port `4173` is the default and must be available; choose another stable port with `--browser-port` if it is occupied. A browser run without `--browser-profile` uses an ephemeral context, so its cache does not persist between runs. Do not point `--browser-profile` at a personal browser profile.
+Node defaults to CPU; Browser requires WebGPU. Browser availability is not evidence of execution-provider correctness or successful model quality. No new platform verification is claimed here. Network is disabled unless `--allow-network` explicitly permits model downloads. There are no automatic retries. Missing verified offline assets block inference. Offline Browser runs require `--cache-dir`: a temporary loopback mirror verifies and seeds the selected pinned model files into the SDK CacheStorage, seeds the pinned WASM asset, then takes Chromium offline and blocks external routes. Artifacts preserve cache/network evidence. Model/cache integrity policy is unchanged.
 
-Other options include `--case text|image|hierarchy` to run one fixture, `--model-profile default|all-q4`, `--context-window-tokens N`, `--max-new-tokens N`, and `--headed`. Native ONNX profiling can be requested with `--profile-prefix PATH` (Node only). `--output PATH` writes the complete JSON artifact and prints a short summary; without it, the complete artifact is printed to stdout. `--help` lists the CLI options.
+Browser cache is origin-scoped: retain the same `--browser-port` and dedicated `--browser-profile` to reuse it. Default port is `4173`. Never use a personal browser profile. Without a profile the browser context is ephemeral. Other benchmark options: `--model-profile default|all-q4`, `--context-window-tokens N`, `--max-new-tokens N`, `--headed`, and Node-only `--profile-prefix PATH`. `--help` lists all options. Default text budget is 512 tokens for five separate facts, boundary budget 512, image budget 256; the text prompt explicitly requests all five assigned facts instead of a single summary.
 
-## Reading the artifact
+Only public synthetic fixtures belong in uploaded artifacts. Raw prompts, model text and reports are untrusted. Never upload private user inputs, credentials, images or cache contents; see [Security](../../SECURITY.md).
 
-Each run records a `stimulusKey` derived from fixture hashes, actual input/prompt hashes, expected record IDs, and effective token/context limits; it identifies the model inputs, not the scoring rules. `oracleSha256` and `evaluatorVersion` identify scoring inputs and semantics separately. The `caseInputs` entries expose each submitted-input SHA-256 and generation budget. Run configuration records runtime, device, profile, and network permission, so a matching stimulus key alone does not imply matching runtime or backend. Offline rescored artifacts also record `rescoreSource` (the prior evaluator version and stimulus key); raw model outputs, errors, and `caseInputs` remain unchanged.
+## Versioned acceptance policy
 
-The artifact contains:
+Artifact `schemaVersion: 3`, fixture `quality-fixtures-v2`, evaluator `quality-claims-v4`, and policy `quality-thresholds-v1` are explicit contracts. The gate requires matching current oracle SHA-256, fixture hashes, effective case inputs/budgets and stimulus key. Missing/wrong versions, missing/duplicate cases, unattempted/failed cases and mismatched profile evidence fail closed. Run and raw-result model ID/revision must equal the pinned manifest; raw result and case backend evidence must agree with declared runtime/device. Old artifacts must be regenerated; relabeling their versions is not a migration.
 
-- Model ID/revision, requested and observed model profile, requested runtime/device, and observed backend. Inference results report profile/backend directly; structured reports report them in `metadata`. A missing or mismatched reported profile is `profile-unverified`, prevents a comparable result, and stops later cases rather than silently substituting another profile.
-- Fixture source/raster hashes, extracted source-ID count, cache status, bounded per-file/phase progress summaries, browser cache-seed and external-request evidence when applicable, environment versions, and (when requested) native ONNX trace summaries.
-- Raw SDK output for each attempted inference/report and structured error details for failed or blocked cases. Inspect the raw output alongside the metrics; a metric is not a substitute for the generated text or report.
+The policy in `scripts/quality/policy.mjs` declares:
 
-`status` is `completed` only when all selected cases complete with verified fixture integrity; `incomplete` indicates a failed inference, unverified profile, or offline network-policy violation; `blocked` indicates cases were not attempted (for example, offline with a missing cache); `fixture-invalid` indicates fixture integrity failed. `comparable` is true only for a fully completed run that satisfies the network policy. For meaningful cross-run comparison, require the same `stimulusKey`, model revision/profile, and observed backend identity, and account for the runtime/browser version recorded in the artifact.
+| Scope | Minimum claim precision | Minimum fact recall | Maximum contradictions / unsupported / format errors |
+| --- | --- | --- | --- |
+| Text, image, boundary claims | 1.0 | 1.0 | 0 / 0 / 0 |
+| Hierarchy retained source quotes | 1.0 | 1.0 | 0 / 0 / 0 |
+| Hierarchy generated section record claims | 1.0 | 0.9 | 0 / 0 / 0 |
+| Hierarchy overview/conclusion record mentions | Not required | Not required | 0 / 0 / 0 |
 
-The image case submits the same manifest-pinned PNG bytes to Node as a `Blob` and to Browser as a data URL. `imageRenderer.rasterSha256` records the raster bytes; `caseInputs.inputSha256` hashes the submitted data-URL string. The SDK image `versionId`, however, hashes decoded pixels plus dimensions and channel count: Node uses Sharp to produce sRGB raw pixels without alpha, while Browser uses `createImageBitmap` and Canvas `ImageData` (RGBA). Thus identical encoded PNG bytes do not guarantee equal decoded/preprocessor representations or `versionId`s. Do not attribute cross-runtime/profile score differences solely to quantization; this benchmark does not isolate decoder or preprocessing effects.
+Where precision/recall thresholds apply, an empty-denominator (`null`) metric fails; it is not perfect quality. These are acceptance targets, **not measured current-model capabilities**. A completed model run with low recall, pink instead of red, contradictory numbers, injected text or lossy sections can fail. Do not lower targets to make the current model green.
 
-## What the metrics mean
+## Scoring boundaries
 
-### Text and image cases
+Text/image lines use `FACT <ID>: <statement>`. Missing `FACT` affects format compliance separately from factual scoring. Unparsed nonempty lines are format errors; unknown/duplicate IDs and wrong signatures are false claims. True positives must match the assigned finite signature without contradiction/unsupported hits. Precision is `TP/(TP+FP)`; recall is `TP/(TP+FN)`. Supported extra known facts can appear as context; this is not unrestricted claim extraction. Garden negation and image-relative position rules remain vocabulary-bounded heuristics.
 
-The evaluator scores explicit-ID claim lines against the fixture's finite regex oracle. The `FACT` prefix is optional for factual scoring; omitting it is reported in `formatCompliance` and does not turn a matching fact into a false claim. Non-empty lines without a recognizable explicit ID are format errors, not false factual claims. A true positive must match its ID's expected signature and must not be duplicated, contradicted, or marked unsupported. Other supported facts may appear as context without invalidating a matching claim; a cross-ID false claim is reported only when the assigned ID misses its expected fact and another known fact matches. Unknown IDs, duplicates, mismatches, contradictions, and unsupported-pattern hits remain false-positive claims; expected IDs without credited true-positive claims are false negatives.
+The boundary ledger is deliberately stricter: each assigned record must match one explicitly enumerated original-language sentence (NFC normalization; the temperature range permits an en dash or ASCII hyphen). It covers negative facts, three versus five varieties bound to different plots, both 18–22 °C endpoints, Traditional Chinese and Japanese entities/colors/counts, the accented name José, and a quoted malicious note that must remain data. Added clauses, swapped entities, wrong numbers or following the injected password instruction fail. Exact matching provides meaningful closed-set Unicode boundaries, not multilingual understanding or general injection resistance.
 
-`claimPrecision = TP / (TP + FP)` and `factRecall = TP / (TP + FN)`; a metric is `null` when its denominator is zero. `formatCompliance` reports missing prefixes and unparsed lines separately from these fact metrics. The artifact includes claim lines, format errors, misses, contradictions, and unsupported-pattern hits. The negative pepper fact is expected; negated positive facts must not earn credit. The image position oracle accepts either “circle left of square” or the equivalent “square right of circle”; the opposite and explicitly negated relations do not match.
+Hierarchy **retention and generation are separate**. `sourceFacts[].citation.quote` must equal the cited source paragraph slice; retained content receives credit only for full expected record tuples. Generated section `keyPoints` are scanned for the declared tuple syntax: `Observation H001: station S001 at Alder plot measured soil moisture 10 percent on 2025-01-01.` The word `Observation` is optional. Every record's code, station, site, field, value, unit and date must match together. The union of section records must meet 0.9 recall and perfect precision. `page.summary` and `conclusion` are scored separately for contradictory/unsupported tuples and malformed record mentions, without a full-catalog recall requirement: compressed overviews should not repeat all 300 records and cannot compensate for missing section facts. An H-ID mention without a parsed tuple is a format error. A wrong known tuple is a contradiction; an unknown tuple is unsupported. Repeated matching record mentions are reported but do not inflate recall or invalidate repeated correct content. Source/citation IDs **never** supply semantic signatures. A perfectly retained source ledger with empty or lossy generated sections fails generated recall.
 
-These are deliberately closed-set lexical checks, not semantic entailment or free-form claim extraction. Regexes cover only the documented fixture vocabulary. Paraphrases, scope, coreference, mixed statements, and negation can be misclassified; contradiction/unsupported detection and negation scope are heuristics, not exhaustive linguistic analysis. A high score does not prove arbitrary statements true, and a low score does not establish why a model failed.
+Non-record hierarchy prose is not semantically certified. Tuple paraphrases outside this grammar may fail even when true, and prose without record IDs may be unscored. The gate remains a finite regression oracle, not a proof that arbitrary report prose is supported. Report provenance/schema validation and exact source quote preservation do not fact-check generated summaries.
 
-### Hierarchy case
+## Comparison and diagnostics
 
-`sourceIds.recall` and `sourceIds.precision` measure exact retained source paragraph IDs (unique IDs); the artifact separately reports missing, extra, and duplicate IDs. The closed-set record evaluator counts a record as matched only when its expected source ID is cited by a section and that section's `keyPoints` contain regex matches for the record ID, site, field, value, and unit. `recordSignatureMetrics.factRecall` is matched expected records divided by all expected records. `recordSignatureMetrics.claimPrecision` is the fraction of emitted record-ID mentions that pass that exact signature-and-citation check; duplicate, unknown, unlinked, or mismatched record IDs do not pass.
+`stimulusKey` identifies current encoded fixture inputs and effective budgets, not model quality or decoded pixels. Each artifact records model/revision/profile, requested/observed backend, runtime/environment, fixture hashes, raw outputs/errors and case inputs. `status: completed` and `comparable: true` describe execution only. Gate diagnostics expose `completion` separately from `quality` and include exact threshold failures and findings.
 
-Those record measures do not parse or certify arbitrary report prose, omitted facts outside the oracle, or the truth of claims that are not represented by the expected record signatures. Source-ID retention measures citation coverage, not factual correctness.
+```sh
+npm run quality:gate -- --input artifacts/new.json --baseline artifacts/prior.json \
+  --comparison-mode strict --output artifacts/comparison.json
+```
+
+Strict comparison requires matching inputs, versions, model/revision, profile, runtime/device, observed backend, environment and browser evidence. `--comparison-mode paired-inputs` explicitly permits runtime/profile/backend differences but still requires the same model/revision, fixtures and encoded stimuli, with complete structurally valid artifacts. Both modes exit nonzero when either quality gate fails. Programmatic exports are `evaluateQualityArtifact(artifact, { requiredCases? })` and `compareQualityArtifacts(left, right, { mode? })` in `scripts/quality/gate.mjs`.
+
+Paired-input comparison is **not** an isolated quantization or platform experiment: Node uses Sharp raw sRGB pixels without alpha while Browser uses browser decoding and RGBA Canvas pixels. Identical manifest PNG bytes do not guarantee identical decoded/preprocessed representations or SDK image `versionId`s. Differences must not be attributed solely to quantization.
+
+## Current measured outcome
+
+The current macOS/arm64 Node 22.23.3 CPU/default offline run attempted all four fixtures. Text (5 facts), image (3 facts) and boundaries (8 records) each scored precision/recall 1.0 with no finite-oracle contradictions or unsupported findings, but all omitted the required `FACT` prefix. The 300-paragraph hierarchy failed with `STRUCTURED_OUTPUT` because generated text was not one complete JSON value. The full gate exited 1 and reported incomplete execution plus quality failures. These are separate from passing deterministic tests, packed-consumer inference and smaller report smokes; the strict release-quality target has **not** been met.
+
+A separate raw-token diagnostic located the hierarchical failure at `section:67`: evidence IDs had malformed escaped closing quotes, after 149 output tokens of a 512-token budget—not output-budget truncation. The SDK rejected that text without repair/retry. Its version-2 failure checkpoint retained all 300 exact source quotes and 67 completed stages, with 33,490 input / 11,485 output tokens including failed generation; validated serialize/parse round-trip passed. This is failure-state/provenance evidence, **not** successful 300-paragraph inference or a factuality guarantee.
+
+## CI
+
+Every push/PR runs deterministic `test:quality` in the existing CI verification job. The model-heavy `real-model-quality` job runs only on `workflow_dispatch`, using the existing macOS 15 / Node 22 CPU runtime, explicit network permission and a temporary model cache. It executes benchmark **and gate**; bad model results fail the job. Raw benchmark output and structured gate diagnostics are uploaded with `if: always()` even when quality fails. There is no publishing or new claimed platform certification.
