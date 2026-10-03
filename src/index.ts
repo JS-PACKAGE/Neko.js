@@ -26,6 +26,7 @@ import type { ModelBundleSource } from './cache/bundle.js';
 import { generateExtractiveReport, planExtractiveReport } from './report/extractive.js';
 import { createStructuredInferenceStream, createDescribeStream, createAskStream, createAskDocumentsStream, type StructuredInferStreamOptions, type StructuredInferenceStreamEvent, type DescribeStreamOptions, type DescribeStreamEvent, type AskStreamOptions, type AskStreamEvent, type AskDocumentsStreamOptions, type AskDocumentsStreamEvent } from './runtime/operation-stream.js';
 import { inferTools, type ToolDefinitions, type ToolInferOptions, type ToolInferenceResult } from './core/tools.js';
+import { createNekoPool as createWorkerPool, type NekoPool, type NekoPoolOptions } from './runtime/pool.js';
 import type { GenerationStateHandle, ReuseCacheInfo, ReuseCacheLimits } from './types.js';
 import { askDocuments, type DocumentIndex, type DocumentIndexSnapshot, type AskDocumentsOptions, type DocumentsAnswer } from './documents/index.js';
 import { extractPdf, type OwnedDocumentBytes, type PdfExtractOptions, type PdfDocument, type OcrImageInput, type OcrOptions, type OcrDocument } from './documents/pdf/index.js';
@@ -41,6 +42,7 @@ export * from './backend/index.js';
 export * from './errors.js';
 export * from './core/tools.js';
 export * from './documents/index.js';
+export type { NekoPool, NekoPoolOptions, NekoPoolStatus, PoolWorkerOptions, PoolItem, PoolItemResult } from './runtime/pool.js';
 export { getGenerationDiagnostic } from './core/diagnostics.js';
 export type { GenerationDiagnostic, GenerationDiagnosticOptions, DiagnosticCapture } from './core/diagnostics.js';
 export { ReportError } from './report/generate.js';
@@ -396,3 +398,4 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
   }, (instance) => instance.dispose());
 }
 export const Neko = { create: createNeko };
+export function createNekoPool(options: NekoPoolOptions): Promise<NekoPool> { return createWorkerPool(options, (configuration) => createNeko(configuration)); }
