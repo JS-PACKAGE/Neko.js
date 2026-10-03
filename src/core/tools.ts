@@ -50,6 +50,24 @@ export interface ToolExecutionOptions<T extends ToolDefinitions> {
   handlers: ToolHandlers<T>;
   signal?: AbortSignal;
 }
+export interface ToolLoopOptions<T extends ToolDefinitions> extends Omit<ToolInferOptions<T>, 'tools'>, ToolExecutionOptions<T> {
+  /** Maximum execution rounds; one final inference may request calls that are not executed. */
+  maxRounds?: number;
+}
+export interface ToolLoopRound<T extends ToolDefinitions> {
+  calls: readonly ToolCall<T>[];
+  results: ToolResultMessage<T>[];
+}
+export interface ToolLoopResult<T extends ToolDefinitions> {
+  stopReason: 'no-calls' | 'max-rounds';
+  message: ToolAssistantMessage<T>;
+  /** Includes the final assistant selection; all model and tool content remains untrusted. */
+  messages: ToolConversationMessage<T>[];
+  roundResults: ToolLoopRound<T>[];
+  /** Number of executed rounds, excluding the final inference. */
+  rounds: number;
+  usage: ToolInferenceResult<T>['usage'];
+}
 interface CompiledTool { parameters: CompiledStructuredSchema; result?: CompiledStructuredSchema; }
 type ToolRegistry = Map<string, CompiledTool>;
 const compiledTools = new WeakMap<object, CompiledTool>();
@@ -215,4 +233,33 @@ export async function executeToolCalls<const T extends ToolDefinitions>(tools: T
     } catch { failed(signal.aborted ? 'cancelled' : 'error', signal.aborted ? 'ABORTED' : 'TOOL_FAILED', signal.aborted ? 'Tool execution was cancelled' : 'Application tool handler or result validation failed'); }
   }
   return results;
+}
+
+/** Runs bounded, explicitly approved tool execution with results fed back as untrusted data. */
+export async function runToolLoop<const T extends ToolDefinitions>(host: Pick<Neko, 'inferTools'>, tools: T, options: ToolLoopOptions<NoInfer<T>>): Promise<ToolLoopResult<T>> {
+  const { messages: input, handlers, approve, maxRounds = 4, ...inference } = options;
+  if (!Number.isSafeInteger(maxRounds) || maxRounds < 1 || maxRounds > 16) throw new NekoError('maxRounds must be between 1 and 16', 'preprocess', 'INVALID_INPUT');
+  if (typeof approve !== 'function' || !handlers || typeof handlers !== 'object') throw new NekoError('Tool execution needs explicit application approval and handlers', 'preprocess', 'INVALID_INPUT');
+  const messages: ToolConversationMessage<T>[] = [...input];
+  const roundResults: ToolLoopRound<T>[] = [];
+  const usage: ToolInferenceResult<T>['usage'] = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const checkAborted = (): void => {
+    if (inference.signal?.aborted) throw new NekoError('Operation was cancelled', 'generate', 'ABORTED', { cause: inference.signal.reason });
+  };
+  for (;;) {
+    checkAborted();
+    const selection = await host.inferTools({ ...inference, tools, messages: [...messages] });
+    checkAborted();
+    usage.inputTokens += selection.usage.inputTokens;
+    usage.outputTokens += selection.usage.outputTokens;
+    usage.totalTokens += selection.usage.totalTokens;
+    messages.push(selection.message);
+    if (selection.toolCalls.length === 0 || roundResults.length === maxRounds) {
+      return { stopReason: selection.toolCalls.length === 0 ? 'no-calls' : 'max-rounds', message: selection.message,
+        messages, roundResults, rounds: roundResults.length, usage };
+    }
+    const results = await executeToolCalls(tools, selection.toolCalls, { handlers, approve, ...(inference.signal ? { signal: inference.signal } : {}) });
+    messages.push(...results);
+    roundResults.push({ calls: selection.toolCalls, results });
+  }
 }
