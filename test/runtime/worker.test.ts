@@ -230,3 +230,85 @@ test('worker cold invalid inference and report options reject before model or so
     assert.equal((await neko.queueStatus()).running, null);
   } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test('worker heartbeat and allowlisted diagnostics reveal no input, output, policy or cache path', { timeout: 30_000 }, async () => {
+  const directory = await cacheDirectory();
+  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'worker' });
+  try {
+    const health = await neko.health();
+    assert.equal(health.healthy, true);
+    assert.equal(health.execution.mode, 'worker');
+    assert.ok(health.roundTripMs !== null && health.roundTripMs >= 0);
+    const diagnostic = await neko.diagnostics();
+    assert.equal(diagnostic.schemaVersion, 1);
+    assert.equal(diagnostic.execution.workerId, health.execution.workerId);
+    assert.equal(diagnostic.readiness.loaded, false);
+    assert.equal(diagnostic.transport?.state, 'ready');
+    const serialized = JSON.stringify(diagnostic);
+    for (const privateField of ['prompt', 'messages', 'text', 'cacheDir', 'policy', 'profilePrefix']) assert.equal(Object.hasOwn(diagnostic, privateField), false);
+    assert.equal(serialized.includes(directory), false);
+    const abort = new AbortController(); abort.abort('health cancelled');
+    await assert.rejects(neko.health({ signal: abort.signal }), (error: unknown) => error instanceof NekoError && error.code === 'ABORTED');
+  } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('explicit worker restart rejects outstanding work and creates a fresh worker without replay', { timeout: 30_000 }, async () => {
+  const directory = await cacheDirectory();
+  const entered = Promise.withResolvers<void>();
+  let decisions = 0;
+  const neko = await createNeko({ cacheDir: directory, device: 'cpu', execution: 'worker', policy: {
+    network: (_url, kind) => { if (kind === 'model') { decisions++; entered.resolve(); return new Promise<void>(() => undefined); } },
+  } });
+  try {
+    const before = await neko.health();
+    const active = neko.infer({ prompt: 'never replay this exact request' });
+    const rejected = assert.rejects(active, (error: unknown) => error instanceof NekoError && error.code === 'WORKER_UNAVAILABLE');
+    await entered.promise;
+    const queued = neko.cache.model.status();
+    const queuedRejected = assert.rejects(queued, (error: unknown) => error instanceof NekoError && error.code === 'WORKER_UNAVAILABLE');
+    await neko.restart();
+    await Promise.all([rejected, queuedRejected]);
+    const after = await neko.health();
+    assert.equal(after.healthy, true);
+    assert.notEqual(after.execution.workerId, before.execution.workerId);
+    assert.equal(decisions, 1);
+    assert.equal(await neko.runtimeStatus(), null);
+    assert.equal((await neko.cache.model.status()).bytes, 0);
+  } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a hard worker deadline terminates its realm and rejects all outstanding requests until explicit restart', { timeout: 30_000 }, async () => {
+  const directory = await cacheDirectory();
+  const entered = Promise.withResolvers<void>();
+  const neko = await createNeko({ cacheDir: directory, device: 'cpu', execution: 'worker', policy: {
+    network: (_url, kind) => { if (kind === 'model') { entered.resolve(); return new Promise<void>(() => undefined); } },
+  } });
+  try {
+    const before = await neko.health();
+    const active = neko.infer({ prompt: 'bounded native request', hardDeadlineMs: 500 });
+    const rejected = assert.rejects(active, (error: unknown) => error instanceof NekoError && error.code === 'DEADLINE_EXCEEDED');
+    await entered.promise;
+    const queued = neko.cache.model.status();
+    const queuedRejected = assert.rejects(queued, (error: unknown) => error instanceof NekoError && error.code === 'DEADLINE_EXCEEDED');
+    await Promise.all([rejected, queuedRejected]);
+    assert.equal((await neko.health()).reason, 'unavailable');
+    await assert.rejects(neko.queueStatus(), (error: unknown) => error instanceof NekoError && error.code === 'WORKER_UNAVAILABLE');
+    await neko.restart();
+    assert.notEqual((await neko.health()).execution.workerId, before.execution.workerId);
+    assert.equal((await neko.cache.model.status()).bytes, 0);
+  } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('worker bundle transfer propagates missing assets and consumer source errors without buffering a model', { timeout: 30_000 }, async () => {
+  const directory = await cacheDirectory();
+  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'worker' });
+  try {
+    const reader = neko.cache.model.exportBundle().getReader();
+    await assert.rejects(reader.read(), /installed asset/);
+    reader.releaseLock();
+    const source = new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error('bundle source failed')); } });
+    await assert.rejects(neko.cache.model.importBundle(source), /bundle source failed/);
+    assert.equal((await neko.cache.model.status()).bytes, 0);
+    assert.equal((await neko.health()).healthy, true);
+  } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
+});

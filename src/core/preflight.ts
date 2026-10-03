@@ -37,6 +37,7 @@ export function validateInferenceOptions(options: InferOptions, planning = false
     if (!Number.isSafeInteger(output) || output < 1 || output > 2048) throw new RangeError('maxNewTokens must be between 1 and 2048');
     const context = options.contextWindowTokens;
     if (context !== undefined && (!Number.isSafeInteger(context) || context < 32)) throw new RangeError('contextWindowTokens must be a safe integer of at least 32');
+    if (options.hardDeadlineMs !== undefined && (!Number.isSafeInteger(options.hardDeadlineMs) || options.hardDeadlineMs < 1 || options.hardDeadlineMs > 2_147_483_647)) throw new RangeError('hardDeadlineMs must be between 1 and 2147483647');
     if (!planning && context !== undefined && output + 1 > context) throw new NekoError('Output budget plus minimum input exceeds context limit', 'preprocess', 'CONTEXT_LIMIT');
     generationSettings(options.generation, Number.MAX_SAFE_INTEGER);
     for (const name of ['onToken', 'validateDestination'] as const) if (options[name] !== undefined && typeof options[name] !== 'function') throw new TypeError(`${name} must be a function`);

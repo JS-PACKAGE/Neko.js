@@ -1,5 +1,5 @@
 import { NekoError, type ErrorCode, type ErrorStage } from '../errors.js';
-import { ReportError, type ReportCheckpoint } from '../report/generate.js';
+import { ReportError, type ReportCheckpoint, type PartialReport } from '../report/generate.js';
 
 export interface WorkerExecution {
   mode: 'worker';
@@ -7,7 +7,9 @@ export interface WorkerExecution {
   workerId: string;
   threadId?: number;
 }
-export type WorkerMethod = 'create' | 'infer' | 'inferStructured' | 'planInference' | 'describe' | 'load' | 'warmup' | 'runtimeStatus' | 'queueStatus' | 'cache.model.prefetch' | 'cache.model.status' | 'cache.model.clear' | 'cache.engine.status' | 'cache.engine.release' | 'backend.current' | 'backend.detect' | 'dispose';
+export const MAX_OUTSTANDING_NOTIFICATIONS = 128;
+export const MAX_NOTIFICATION_CHARACTERS = 1_048_576;
+export type WorkerMethod = 'create' | 'infer' | 'inferStructured' | 'planInference' | 'describe' | 'planReport' | 'ask' | 'load' | 'warmup' | 'runtimeStatus' | 'queueStatus' | 'diagnostics' | 'cache.model.prefetch' | 'cache.model.status' | 'cache.model.clear' | 'cache.model.exportBundle' | 'cache.model.importBundle' | 'cache.model.diagnostics' | 'cache.engine.status' | 'cache.engine.release' | 'backend.current' | 'backend.detect' | 'dispose';
 export type CallbackMode = 'notify' | 'await';
 export type Encoded = null | undefined | string | number | boolean | bigint
   | { kind: 'array'; items: Encoded[] }
@@ -15,16 +17,16 @@ export type Encoded = null | undefined | string | number | boolean | bigint
   | { kind: 'url'; href: string }
   | { kind: 'native'; value: unknown }
   | { kind: 'callback'; id: number; mode: CallbackMode }
-  | { kind: 'error'; name: string; message: string; stack?: string; stage?: ErrorStage; code?: ErrorCode; cause?: Encoded; checkpoint?: Encoded; reportError?: true };
+  | { kind: 'error'; name: string; message: string; stack?: string; stage?: ErrorStage; code?: ErrorCode; cause?: Encoded; checkpoint?: Encoded; partial?: Encoded; reportError?: true };
 export type RequestMessage = { type: 'request'; id: number; method: WorkerMethod; args: Encoded };
-export type MainMessage = RequestMessage | { type: 'abort'; id: number; reason: Encoded }
+export type MainMessage = RequestMessage | { type: 'ping'; id: number } | { type: 'abort'; id: number; reason: Encoded }
   | { type: 'callback-result'; id: number; ok: true; value: Encoded }
   | { type: 'callback-result'; id: number; ok: false; error: Encoded };
-export type WorkerMessage = { type: 'result'; id: number; ok: true; value: Encoded }
+export type WorkerMessage = { type: 'stream-end'; id: number } | { type: 'pong'; id: number; execution: WorkerExecution } | { type: 'result'; id: number; ok: true; value: Encoded }
   | { type: 'result'; id: number; ok: false; error: Encoded }
   | { type: 'callback'; id: number; requestId: number; callbackId: number; args: Encoded };
 export interface MessagePort<Incoming, Outgoing> {
-  post(message: Outgoing): void;
+  post(message: Outgoing, transfer?: Transferable[]): void;
   listen(listener: (message: Incoming) => void): () => void;
 }
 
@@ -39,7 +41,7 @@ export function encode(value: unknown, callback?: (fn: (...args: unknown[]) => u
   if (typeof value !== 'object') throw new TypeError('Worker values must be structured-cloneable');
   if (value instanceof URL) return { kind: 'url', href: value.href };
   if (value instanceof AbortSignal) throw new TypeError('AbortSignal must be supplied as the request signal');
-  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer || value instanceof Blob || value instanceof Date) return { kind: 'native', value };
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer || value instanceof Blob || value instanceof Date || value instanceof ReadableStream) return { kind: 'native', value };
   if (ancestors.has(value)) throw new TypeError('Cyclic worker values are not supported');
   ancestors.add(value);
   try {
@@ -50,6 +52,7 @@ export function encode(value: unknown, callback?: (fn: (...args: unknown[]) => u
       ...(value instanceof ReportError ? { reportError: true as const } : {}),
       ...(Object.hasOwn(value, 'cause') ? { cause: encode(value.cause, callback, 'cause', ancestors) } : {}),
       ...('checkpoint' in value ? { checkpoint: encode(value.checkpoint, callback, 'checkpoint', ancestors) } : {}),
+      ...('partial' in value ? { partial: encode(value.partial, callback, 'partial', ancestors) } : {}),
     };
     if (Array.isArray(value)) return { kind: 'array', items: value.map((item) => encode(item, callback, key, ancestors)) };
     const prototype: unknown = Object.getPrototypeOf(value);
@@ -74,9 +77,10 @@ export function decode(value: Encoded, callback?: (id: number, mode: CallbackMod
       let error = value.stage && value.code ? new NekoError(value.message, value.stage, value.code, options) : new Error(value.message, options);
       if (Object.hasOwn(value, 'checkpoint')) {
         const checkpoint = decode(value.checkpoint, callback);
-        if (value.reportError && error instanceof NekoError) error = new ReportError(error, checkpoint as ReportCheckpoint);
+        if (value.reportError && error instanceof NekoError) error = new ReportError(error, checkpoint as ReportCheckpoint, Object.hasOwn(value, 'partial') ? decode(value.partial, callback) as PartialReport : undefined);
         else Object.defineProperty(error, 'checkpoint', { value: checkpoint, enumerable: true });
       }
+      if (Object.hasOwn(value, 'partial') && !Object.hasOwn(error, 'partial')) Object.defineProperty(error, 'partial', { value: decode(value.partial, callback), enumerable: true });
       error.name = value.name;
       if (value.stack !== undefined) error.stack = value.stack;
       return error;
@@ -86,7 +90,7 @@ export function decode(value: Encoded, callback?: (id: number, mode: CallbackMod
 
 export function methodStage(method: WorkerMethod): ErrorStage {
   if (method === 'create') return 'create';
-  if (method === 'describe') return 'report';
+  if (method === 'describe' || method === 'planReport' || method === 'ask') return 'report';
   if (method === 'planInference') return 'preprocess';
   if (method === 'load' || method === 'warmup') return 'load';
   if (method.startsWith('cache.')) return 'cache';
@@ -105,4 +109,29 @@ export function failure(method: WorkerMethod, cause: unknown): NekoError {
 export function encodeFailure(error: unknown): Encoded {
   try { return encode(error); }
   catch { return encode(new Error(error instanceof Error ? error.message : 'Worker operation threw a non-cloneable value')); }
+}
+
+/** Bundle streams transfer ownership instead of collecting multi-gigabyte model bytes. */
+export function streamTransfers(value: Encoded): Transferable[] {
+  const transfers: Transferable[] = [];
+  const seen = new Set<ReadableStream>();
+  const visit = (item: Encoded): void => {
+    if (item === null || typeof item !== 'object') return;
+    if (item.kind === 'native' && item.value instanceof ReadableStream && !seen.has(item.value)) {
+      seen.add(item.value); transfers.push(item.value);
+    } else if (item.kind === 'array') for (const child of item.items) visit(child);
+    else if (item.kind === 'record') for (const [, child] of item.entries) visit(child);
+  };
+  visit(value);
+  return transfers;
+}
+
+export function encodedCharacters(value: Encoded): number {
+  if (typeof value === 'string') return value.length;
+  if (value === null || typeof value !== 'object') return 0;
+  if (value.kind === 'array') return value.items.reduce<number>((size, item) => size + encodedCharacters(item), 0);
+  if (value.kind === 'record') return value.entries.reduce((size, [key, item]) => size + key.length + encodedCharacters(item), 0);
+  if (value.kind === 'url') return value.href.length;
+  if (value.kind === 'error') return value.message.length + (value.stack?.length ?? 0);
+  return 0;
 }
