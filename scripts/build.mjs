@@ -1,4 +1,4 @@
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, cp, mkdir } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,7 @@ const browserEntries = [
   ['src/report/index.ts', 'report.js'],
   ['src/backend/index.ts', 'backend.js'],
   ['src/types.ts', 'types.js'],
+  ['src/documents/index.ts', 'documents.js'],
 ];
 const nodeEntries = {
   index: 'src/index.ts',
@@ -20,6 +21,7 @@ const nodeEntries = {
   web: 'src/web/index.ts',
   report: 'src/report/index.ts',
   backend: 'src/backend/index.ts',
+  documents: 'src/documents/index.ts',
 };
 
 await mkdir(join(dist, 'browser'), { recursive: true });
@@ -53,7 +55,7 @@ await build({
   format: 'esm',
   platform: 'node',
   target: ['node22'],
-  external: ['onnxruntime-node', 'sharp', 'parse5'],
+  external: ['onnxruntime-node', 'sharp', 'parse5', 'pdfjs-dist', '@napi-rs/canvas'],
   sourcemap: true,
   legalComments: 'external',
 });
@@ -71,3 +73,15 @@ for (const file of [
   await mkdir(dirname(destination), { recursive: true });
   await copyFile(join(wasmSource, file), destination);
 }
+
+// PDF.js is lazy-imported only for extraction. Keep its worker, fonts and image decoders beside it.
+const pdfSource = join(root, 'node_modules/pdfjs-dist');
+const pdfDestination = join(dist, 'browser/assets/pdf');
+await mkdir(pdfDestination, { recursive: true });
+for (const file of ['pdf.mjs', 'pdf.worker.mjs']) {
+  await copyFile(join(pdfSource, 'legacy/build', file), join(pdfDestination, file));
+}
+for (const directory of ['cmaps', 'standard_fonts', 'wasm', 'iccs']) {
+  await cp(join(pdfSource, directory), join(pdfDestination, directory), { recursive: true });
+}
+await copyFile(join(pdfSource, 'LICENSE'), join(pdfDestination, 'LICENSE'));

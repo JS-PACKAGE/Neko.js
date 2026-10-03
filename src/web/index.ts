@@ -6,7 +6,7 @@ export type { Page, PageImage, Paragraph, PageContainer, PageTable, TableCell, D
 export { validatePage, selectPage, snapshotPage } from './source.js';
 export type { ResourcePolicy, ResourceKind } from './policy.js';
 export { askDocument } from './query.js';
-export type { AskOptions, DocumentInference } from './query.js';
+export type { AskOptions, DocumentInference, DocumentInferenceResult } from './query.js';
 export { normalizeImageRegion, normalizedImageRegion, tileImageRegions } from './image-regions.js';
 export type { ImageRegion, PixelRegion, NormalizedRegion, ImageTilingOptions } from './image-regions.js';
 export { ImagePreprocessCache } from './image-cache.js';

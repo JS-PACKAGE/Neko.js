@@ -52,6 +52,7 @@ test('QA source selection does not expose excluded evidence and empty selection 
   const empty = await askDocument(page, 'What is known?', async () => { throw new Error('Inference must not run'); }, { sources: { paragraphIds: [] } });
   assert.equal(empty.status, 'insufficient-evidence');
   assert.deepEqual(empty.snapshot.source.paragraphs, []);
+  assert.deepEqual(empty.usage, { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
 });
 
 test('QA cancellation does not abandon pending native inference work', async () => {
@@ -65,4 +66,20 @@ test('QA cancellation does not abandon pending native inference work', async () 
   await Promise.resolve(); assert.equal(settled, false);
   release.resolve({ value: { status: 'insufficient-evidence', claims: [] } });
   await assert.rejects(answer, { name: 'AbortError' });
+});
+
+test('QA retains actual inference usage on supported and insufficient answers and forwards provisional tokens', async () => {
+  const usage = { inputTokens: 120, outputTokens: 30, totalTokens: 150 };
+  const tokens: string[] = [];
+  for (const text of ['Garden evidence.', 'Unsupported assertion.']) {
+    const answer = await askDocument('<p>Garden evidence.</p>', 'What evidence?', async (options) => {
+      options.onToken?.('{');
+      return { value: { status: 'answered', claims: [{ text, paragraphIds: ['p1'] }] }, usage };
+    }, { onToken: (token) => tokens.push(token) });
+    assert.deepEqual(answer.usage, usage);
+    assert.equal(answer.status, text === 'Garden evidence.' ? 'answered' : 'insufficient-evidence');
+  }
+  assert.deepEqual(tokens, ['{', '{']);
+  const custom = await askDocument('<p>Garden evidence.</p>', 'What evidence?', async () => ({ value: { status: 'insufficient-evidence', claims: [] } }));
+  assert.equal(custom.usage, null);
 });

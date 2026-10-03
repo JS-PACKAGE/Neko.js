@@ -32,6 +32,12 @@
       "node": "./dist/node/report.js",
       "default": "./dist/browser/report.js"
     },
+    "./documents": {
+      "types": "./dist/src/documents/index.d.ts",
+      "browser": "./dist/browser/documents.js",
+      "node": "./dist/node/documents.js",
+      "default": "./dist/browser/documents.js"
+    },
     "./backend": {
       "types": "./dist/src/backend/index.d.ts",
       "browser": "./dist/browser/backend.js",
@@ -57,8 +63,10 @@
     "test:quality": "node --test scripts/quality/*.test.mjs"
   },
   "dependencies": {
+    "@napi-rs/canvas": "1.0.0",
     "onnxruntime-node": "1.30.0",
     "parse5": "8.0.1",
+    "pdfjs-dist": "6.3.289",
     "sharp": "0.35.4"
   },
   "overrides": {
@@ -75,7 +83,7 @@
     "typescript-eslint": "8.71.0"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "allowScripts": {
     "esbuild@0.25.12": true,

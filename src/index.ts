@@ -26,6 +26,9 @@ import type { ModelBundleSource } from './cache/bundle.js';
 import { generateExtractiveReport, planExtractiveReport } from './report/extractive.js';
 import { inferTools, type ToolDefinitions, type ToolInferOptions, type ToolInferenceResult } from './core/tools.js';
 import type { GenerationStateHandle, ReuseCacheInfo, ReuseCacheLimits } from './types.js';
+import { askDocuments, type DocumentIndex, type DocumentIndexSnapshot, type AskDocumentsOptions, type DocumentsAnswer } from './documents/index.js';
+import { extractPdf, type OwnedDocumentBytes, type PdfExtractOptions, type PdfDocument, type OcrImageInput, type OcrOptions, type OcrDocument } from './documents/pdf/index.js';
+import { ocrImage } from './documents/ocr.js';
 import { attachGenerationDiagnostic, getGenerationDiagnostic } from './core/diagnostics.js';
 
 export * from './types.js';
@@ -36,6 +39,7 @@ export * from './cache/registry.js';
 export * from './backend/index.js';
 export * from './errors.js';
 export * from './core/tools.js';
+export * from './documents/index.js';
 export { getGenerationDiagnostic } from './core/diagnostics.js';
 export type { GenerationDiagnostic, GenerationDiagnosticOptions, DiagnosticCapture } from './core/diagnostics.js';
 export { ReportError } from './report/generate.js';
@@ -96,6 +100,9 @@ export interface Neko {
   planReport(input: string | Page, options?: DescribeOptions): Promise<ReportPlan>;
   session(options?: SessionOptions): ConversationSession;
   ask(input: string | Page, question: string, options?: AskOptions): Promise<DocumentAnswer>;
+  askDocuments(index: DocumentIndex | DocumentIndexSnapshot, question: string, options?: AskDocumentsOptions): Promise<DocumentsAnswer>;
+  extractPdf(source: OwnedDocumentBytes, options?: PdfExtractOptions): Promise<PdfDocument>;
+  ocr(source: OcrImageInput, options?: OcrOptions): Promise<OcrDocument>;
   describe(input: string | Page, options: DescribeOptions & { format: 'markdown' }): Promise<string>;
   describe(input: string | Page, options?: DescribeOptions & { format?: 'json' }): Promise<StructuredReport>;
   describe(input: string | Page, options: DescribeOptions): Promise<StructuredReport | string>;
@@ -115,6 +122,7 @@ class LocalNeko implements Neko {
   private readonly lifetime = new AbortController();
   private disposePromise?: Promise<void>;
   private readiness: RuntimeReadiness | null = null;
+  private readonly compositions = new Set<Promise<unknown>>();
   readonly cache: Neko['cache'];
   readonly backend: Neko['backend'];
   constructor(private readonly engines: EngineCache<VisionEngine>, private readonly installation: VerifiedCacheInstallation, private readonly restore: () => void, backend: BackendInfo, private readonly options: OwnedNekoOptions, private readonly admission: RequestQueue) {
@@ -142,6 +150,14 @@ class LocalNeko implements Neko {
       try { return await this.installation.withSignal(active, () => operation(active, queueWaitMs)); }
       finally { setActiveRequest(this, undefined); }
     });
+  }
+  private compose<T>(stage: ErrorStage, signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    this.checkRequest(stage, signal);
+    const active = AbortSignal.any([this.lifetime.signal, ...(signal ? [signal] : [])]);
+    const work = atStage(stage, active, () => operation(active));
+    this.compositions.add(work);
+    void work.then(() => { this.compositions.delete(work); }, () => { this.compositions.delete(work); });
+    return work;
   }
   private async use<T>(signal: AbortSignal, operation: (engine: VisionEngine) => Promise<T>): Promise<T> {
     return this.engines.use(async (engine) => { try { return await operation(engine); } finally { this.readiness = engine.readiness(); } }, signal);
@@ -222,6 +238,21 @@ class LocalNeko implements Neko {
         { ...options, signal }, { policy: this.options.policy, offline: this.options.localFilesOnly });
     });
   }
+  askDocuments(index: DocumentIndex | DocumentIndexSnapshot, question: string, options: AskDocumentsOptions = {}): Promise<DocumentsAnswer> {
+    this.checkRequest('generate', options?.signal);
+    assertHardDeadlineUnsupported(options.hardDeadlineMs);
+    return this.compose('report', options.signal, (signal) => askDocuments(this, index, question, { ...options, signal }));
+  }
+  extractPdf(source: OwnedDocumentBytes, options: PdfExtractOptions = {}): Promise<PdfDocument> {
+    this.checkRequest('extract', options?.signal);
+    if (options.ocr !== undefined && options.ocr !== 'none') assertHardDeadlineUnsupported(options.hardDeadlineMs, 'extract');
+    return this.compose('extract', options.signal, (signal) => extractPdf(source, { ...options, signal, infer: (request) => this.inferStructured(request) }));
+  }
+  ocr(source: OcrImageInput, options: OcrOptions = {}): Promise<OcrDocument> {
+    this.checkRequest('image', options?.signal);
+    assertHardDeadlineUnsupported(options.hardDeadlineMs, 'image');
+    return this.compose('image', options.signal, (signal) => ocrImage(source, (request) => this.inferStructured(request), { ...options, signal }));
+  }
   describe(input: string | Page, options: DescribeOptions & { format: 'markdown' }): Promise<string>;
   describe(input: string | Page, options?: DescribeOptions & { format?: 'json' }): Promise<StructuredReport>;
   describe(input: string | Page, options: DescribeOptions): Promise<StructuredReport | string>;
@@ -283,7 +314,7 @@ class LocalNeko implements Neko {
   dispose(): Promise<void> {
     if (!this.disposePromise) {
       this.closed = true; this.lifetime.abort(new Error('Neko disposed'));
-      this.disposePromise = atStage('dispose', undefined, async () => { try { await this.admission.idle(); await this.engines.release(); this.readiness = null; } finally { this.restore(); } });
+      this.disposePromise = atStage('dispose', undefined, async () => { try { await Promise.allSettled([...this.compositions]); await this.admission.idle(); await this.engines.release(); this.readiness = null; } finally { this.restore(); } });
     }
     return this.disposePromise;
   }

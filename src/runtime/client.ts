@@ -1,7 +1,7 @@
 import type { Neko, NekoOptions } from '../index.js';
 import type { Page, StructuredReport } from '../types.js';
 import { ReportError, validateDescribeOptions, type DescribeOptions, type ReportCheckpoint } from '../report/generate.js';
-import { NekoError } from '../errors.js';
+import { atStage, NekoError, type ErrorStage } from '../errors.js';
 import { authorizeNetwork } from '../web/policy.js';
 import { aborted, decode, encode, encodeFailure, failure, methodStage, streamTransfers, MAX_OUTSTANDING_NOTIFICATIONS, type MainMessage, type MessagePort, type WorkerMessage, type WorkerMethod, type WorkerExecution } from './protocol.js';
 import type * as NodeWorkers from 'node:worker_threads';
@@ -16,6 +16,9 @@ import { deferredReadableStream } from './readable.js';
 import type { StructuredInferOptions, StructuredInferenceResult } from '../core/engine.js';
 import type { SchemaValue } from '../core/structured.js';
 import { inferTools } from '../core/tools.js';
+import { askDocuments } from '../documents/index.js';
+import { extractPdf } from '../documents/pdf/index.js';
+import { ocrImage } from '../documents/ocr.js';
 import { attachGenerationDiagnostic, getGenerationDiagnostic } from '../core/diagnostics.js';
 
 export type WorkerClient = Neko;
@@ -320,12 +323,21 @@ export async function createWorkerClient(options: NekoOptions = {}): Promise<Wor
   let disposed = false;
   let restartPromise: Promise<void> | undefined;
   let disposePromise: Promise<void> | undefined;
+  const compositions = new Set<Promise<unknown>>();
+  const compose = <T>(stage: ErrorStage, signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    connection.checkRequest('infer', signal);
+    const active = AbortSignal.any([lifetime.signal, connection.lifetime.signal, ...(signal ? [signal] : [])]);
+    const work = atStage(stage, active, () => operation(active));
+    compositions.add(work);
+    void work.then(() => { compositions.delete(work); }, () => { compositions.delete(work); });
+    return work;
+  };
 
   function dispose(): Promise<void> {
     if (!disposePromise) {
       disposed = true; lifetime.abort(new NekoError('Neko is disposed', 'dispose', 'DISPOSED'));
       const current = connection.dispose();
-      disposePromise = Promise.all([current, restartPromise?.catch(() => undefined)]).then(() => undefined);
+      disposePromise = Promise.all([current, Promise.allSettled([...compositions]), restartPromise?.catch(() => undefined)]).then(() => undefined);
     }
     return disposePromise;
   }
@@ -365,6 +377,9 @@ export async function createWorkerClient(options: NekoOptions = {}): Promise<Wor
       return connection.request('planInference', [configuration], signal, hardDeadlineMs);
     },
     describe,
+    askDocuments: (index, question, options = {}) => compose('report', options.signal, (signal) => askDocuments(client, index, question, { ...options, signal })),
+    extractPdf: (source, options = {}) => compose('extract', options.signal, (signal) => extractPdf(source, { ...options, signal, infer: (request) => client.inferStructured(request) })),
+    ocr: (source, options = {}) => compose('image', options.signal, (signal) => ocrImage(source, (request) => client.inferStructured(request), { ...options, signal })),
     planReport: async (input, options = {}) => {
       connection.checkRequest('planReport', options?.signal); validateDescribeOptions(options);
       const { signal, hardDeadlineMs, ...configuration } = options;

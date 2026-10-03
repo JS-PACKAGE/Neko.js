@@ -1,5 +1,5 @@
 import type { ErrorStage, ErrorCode } from './errors.js';
-import type { ModelIdentity, LoadedBackend } from './core/engine.js';
+import type { ModelIdentity, LoadedBackend, InferenceResult } from './core/engine.js';
 import type { ClaimAudit } from './report/audit.js';
 import type { ImageObservation } from './web/image.js';
 export interface GenerationStateHandle { readonly id: string; }
@@ -103,6 +103,10 @@ export interface DocumentAnswer {
   answer: string;
   claims: DocumentAnswerClaim[];
   snapshot: PageSnapshot;
+  /** Zero when no inference ran; null only when a custom inference callback omits usage. */
+  usage: InferenceResult['usage'] | null;
+  model?: ModelIdentity;
+  execution?: ExecutionInfo;
   evidence: 'exact-quotes-heuristic-audit-not-fact-checked';
 }
 export type Citation =
