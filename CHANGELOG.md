@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 — 2026-10-03
 
 - Validate cheap inference/report options before acquiring a model in inline and worker execution; expose `planInference()` with exact chat/schema/image-expanded input tokens, output capacity and context-fit metadata. Valid cold planning calls still load the model/processor.
 - Stop structured generation at a deterministic single-JSON-value boundary and retain fail-closed Draft-07 runtime validation. Expose `json-boundary-runtime-validation` evidence; no schema grammar constraints, repair, retry or factual guarantees.
