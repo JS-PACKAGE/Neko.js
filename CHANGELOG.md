@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Add tokenizer-aware JSON constrained decoding for an explicit supported schema subset, inferred `SchemaValue` results and explicit validation-only fallback. Reject unsupported constrained schemas before model acquisition; handle integral exponent constants, finite unique-enum domains and UTF-8 token boundaries without weakening runtime validation.
+- Add bounded AsyncIterable inference streams, transactional conversation sessions, context eviction, branching/reset and model-bound snapshots. Cache only exact rendered-prompt tokenization; do not claim growing-prefix or model KV-cache reuse.
+- Make text-only inference planning tokenizer/configuration-only, without ONNX sessions; add staged report planning with explicitly unknown reduction, duration and total-cost bounds.
+- **Breaking persisted contracts:** migrate reports/checkpoints to version 3 and `evidence-first-v3`. Add conservative claim–evidence audits, zero-inference extractive reports, typed partial reports, cumulative failed-attempt accounting, increased-budget/retry authorization and bounded per-stage retries. Budget-induced incomplete JSON is `BUDGET_EXCEEDED`, not an output retry.
+- Add inert main-content extraction, structured tables/paragraph relations and document questions with SDK-constructed exact citations; reject unsupported claims without pretending citations certify truth or relevance.
+- Add EXIF-oriented image regions, bounded tiling, preprocessing provenance and byte/count-bounded owned pixel caches; reauthorize/read/validate before reuse. Support browser raw images with all four channel layouts.
+- Add integrity-checked streaming offline bundles with staged imports/cancellation, installation/quota diagnostics, privacy-safe health/diagnostics, explicit worker restart and realm-wide hard deadlines without replay. Bound transferred chunk backing buffers rather than cloning whole upstream allocations; tighten POSIX cache-ancestor trust checks.
+- Register immutable Qwen3.5-2B revision `2ea7886f48b926aca97de8b0e041ffca7e3ebaa9` alongside the default 0.8B model, with pinned default/all-q4 assets and provenance; exercise both 2B profiles with actual Node text/image/report inference.
+- Migrate callers, packed-consumer declarations and quality hierarchy contracts; advance the finite evaluator to `quality-claims-v5` without lowering acceptance thresholds. Consolidate English/Traditional Chinese API and security documentation after implementation.
+- Verify 130 Node/27 quality-tool/21 browser contracts, packed-consumer inference, full Node streaming bundle transfer and Chromium 153 WebGPU cold Blob import followed by actual local-only inference, budget-only resume and deadline/restart. Runtime assets remain separately deployed/cached. The full four-fixture quality gate still fails; retain its diagnostics without lowering policy or claiming model-quality acceptance.
+
 ## 1.3.0 — 2026-10-03
 
 - Validate cheap inference/report options before acquiring a model in inline and worker execution; expose `planInference()` with exact chat/schema/image-expanded input tokens, output capacity and context-fit metadata. Valid cold planning calls still load the model/processor.

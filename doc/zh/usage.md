@@ -2,9 +2,9 @@
 
 ## 目前範圍
 
-Neko.js 是供 Node.js 與受支援 WebGPU 瀏覽器使用的本機多模態 SDK。`createNeko()` 會懶載入固定版本 Qwen 模型，提供文字／圖片推理、網站到結構化報告、後端狀態，以及明確的模型／引擎快取控制。報告會以不執行腳本的方式擷取 HTML，並對找到的圖片執行真實推理；它不是爬蟲。呼叫端應自行保護遠端 URL 請求的網路政策。模型輸出可能不正確，請勿用於安全、授權或其他重大決策。
+Neko.js 是供 Node.js 與受支援 WebGPU 瀏覽器使用的本機多模態 SDK。`createNeko()` 會懶載入固定版本 Qwen 模型，提供文字／圖片推理、網站到結構化報告、後端狀態，以及明確的模型／引擎快取控制。生成報告以不執行腳本的方式擷取 HTML，並對選取圖片執行真實推理；extractive 模式不做模型或圖片推理。它不是爬蟲。呼叫端應自行保護遠端 URL 請求的網路政策。模型輸出可能不正確，請勿用於安全、授權或其他重大決策。
 
-模型固定為 `onnx-community/Qwen3.5-0.8B-ONNX-OPT` revision `fafab72d87a9e6be3925b38caf48286d2838f2d0`，embedding／decoder 使用 Q4，vision encoder 使用 FP16。首次使用約需下載 871 MB。每個快取資產在使用前均依固定清單驗證大小與 SHA-256。執行時 bundle 內含 Transformers.js 4.2.0；Node 使用 ONNX Runtime 1.30.0。
+預設模型為 `onnx-community/Qwen3.5-0.8B-ONNX-OPT` revision `fafab72d87a9e6be3925b38caf48286d2838f2d0`，另提供已註冊的 `onnx-community/Qwen3.5-2B-ONNX-OPT` revision `2ea7886f48b926aca97de8b0e041ffca7e3ebaa9`。以 `createNeko({ model: 'onnx-community/Qwen3.5-2B-ONNX-OPT', device: 'cpu' })` 選取；公開的 `MODEL_REGISTRY` 列出固定身分。兩者的 `default` profile 均為 q4 embedding／decoder、fp16 vision，`all-q4` 則全部 q4。不可指定任意模型或 revision；`modelSource` 只改變已核准固定資產的傳輸 mirror。0.8B/default 首次完整下載約 871 MB，其他模型／profile 不適用此大小。每個快取資產在使用前均依固定清單驗證大小與 SHA-256。執行時 bundle 內含 Transformers.js 4.2.0；Node 使用 ONNX Runtime 1.30.0。
 
 ## 安裝與建置
 
@@ -93,7 +93,7 @@ try {
 
 `generation` 支援 `sampling`、`temperature`、`topK`、`topP`、`repetitionPenalty`、`noRepeatNgramSize`、`stop`、`stopTokenIds`。Temperature／top-K／top-P 須搭配 `sampling: true`；預設仍為 greedy。字串 stop 可跨解碼片段邊界，且不洩漏 stop 文字。`inferStructured({ ...inferenceOptions, schema })` 將驗證過的 JSON Schema 納入 prompt／context 規劃，回傳解析後的 `value` 與推理 metadata。低成本的 prompt／messages／generation／budget 驗證及 schema 編譯會先於取得模型執行，包含 worker 模式；拒絕無效請求不需已有模型快取。
 
-結構化生成在第一個完整 JSON 值的邊界確定性停止，不是在生成後擷取看似有效的子字串。邊界偵測使用原始生成 token IDs；若完成 JSON 的同一個 token 內還有多餘內容，仍會驗證並拒絕，不切除尾端。數字根值須等到空白或 EOS 才確立邊界。無效前綴、不完整 JSON 與 schema 違規會被拒絕，不修補、不重試。完整的受支援 Draft-07 runtime 驗證仍 fail closed（無效／不支援 schema 為 `SCHEMA_INVALID`；無效生成 JSON／schema 輸出為 `STRUCTURED_OUTPUT`）。結果的 `structured.mode` 為 `'json-boundary-runtime-validation'`，`structured.dialect` 為 `'draft-07'`。這**不是** schema grammar constrained decoding、語意驗證或生成成功保證。
+預設 `structuredMode: 'constrained'` 使用真正的 tokenizer-aware JSON grammar，逐 token 限制合法候選，再完整執行 runtime schema 驗證；結果 `structured.mode` 為 `'tokenizer-constrained-runtime-validation'`。支援 primitive type、primitive `enum`／`const`、字串 `minLength`／`maxLength`、以 `properties`／`required`／`additionalProperties: false` 定義的封閉物件，以及同質 `items` 陣列的 `minItems`／`maxItems`／`uniqueItems`。數值上下界、schema composition 等不受 grammar 支援的契約在取得引擎前以 `SCHEMA_UNSUPPORTED` 拒絕，不會暗中 fallback。只有明確指定 `structuredMode: 'validation-only'` 才使用既有完整受支援 Draft-07 runtime validator 與 JSON 邊界停止，結果模式為 `'json-boundary-runtime-validation'`；無效 schema 為 `SCHEMA_INVALID`。兩種模式皆驗證整個 JSON，不修補生成、不擷取子字串，不保證完成或事實正確。完成 JSON 的同一 token 若含尾端多餘內容仍會拒絕；數字根值需空白或 EOS 確立邊界。Schema／JSON 不符為 `STRUCTURED_OUTPUT`。
 
 ### 精確推理規劃
 
@@ -107,7 +107,7 @@ console.log(plan.inputTokens, plan.maxNewTokens, plan.contextLimit,
 if (plan.fits) console.log((await neko.infer(request)).text);
 ```
 
-`planInference(options)` 使用與推理相同的實際 chat template／tokenizer／圖片前處理，包含圖片 token 展開。選填 `schema` 會把結構化輸出指令納入計數。結果含模型／圖片觀測及 execution metadata，但不生成 token。`availableOutputTokens` 為 `max(0, contextLimit - inputTokens)`；`fits` 比較請求輸出預算與該容量。有效的冷啟動規劃請求**會載入模型／processor，也可能下載所選資產**，不是輕量的 tokenizer-only API。規劃超出上下文時回傳 `fits: false`，實際推理則拒絕。規劃不預留佇列容量，也不保證稍後生成成功。
+`planInference(options)` 使用與推理相同的實際 chat template／tokenizer，選填 `schema`／`structuredMode` 會納入結構化指令。**純文字規劃僅下載／讀取已驗證 tokenizer、config 與 template，不建立 ONNX sessions**；離線仍須已有這些固定資產。圖片規劃會做真實前處理與圖片 token 展開，可能取得引擎。`availableOutputTokens` 為 `max(0, contextLimit - inputTokens)`；`fits` 比較輸出預算與容量。超出上下文回傳 `fits: false`，實際推理則拒絕；規劃不預留佇列，也不保證生成成功。`preprocessing` metadata 只表示完全相同、SDK 擁有的 rendered prompt tokenization 重用，`kvReuse: false`；不是成長中的對話 prefix 或模型 KV cache 重用。
 
 ```ts
 const schema = {
@@ -115,7 +115,7 @@ const schema = {
   properties: { greeting: { type: 'string' } },
   required: ['greeting'],
   additionalProperties: false,
-};
+} as const;
 const structuredRequest = {
   prompt: 'Return a short greeting in the requested JSON shape.',
   maxNewTokens: 64, schema,
@@ -127,7 +127,7 @@ if (structuredPlan.fits) {
 }
 ```
 
-`describe(urlOrHtmlOrPage, options?)` 接受 HTTP(S) URL、惰性 HTML 或經驗證的 `Page` 擁有副本。`sources` 可選取段落／圖片 ID，並提供可非同步的 `paragraph`／`image` predicate；ID 須存在且不重複，predicate 接收 readonly 來源記錄。擷取與選取發生於載入模型前。報告須涵蓋所有選取來源，刻意排除的來源不需涵蓋；圖片前處理結果會重用於該階段推理。每個階段產生證據連結的 claims，必要時階層縮減摘要／結論。每階段 `maxNewTokens` 預設 256；`format: 'json'` 回傳具型別報告，`'markdown'` 回傳已跳脫的 Markdown。`language` 為 BCP 47；英文與繁體中文文字系統檢查僅為啟發式，不保證流暢度或事實。`onToken(text, phase)` 區分 `image`、`section`、`summary`、`conclusion`。`imageFailurePolicy: 'error'` 拒絕圖片失敗；`'omit'` 保留具型別的失敗項目，但不壓下 policy 違規、callback 錯誤（含 `throw undefined`）、取消或 budget 錯誤。無效／截斷生成與語言不符不會自動重試。
+`describe(urlOrHtmlOrPage, options?)` 接受 HTTP(S) URL、惰性 HTML 或經驗證的 `Page` 擁有副本。`sources` 可選取段落／圖片 ID，並提供可非同步的 `paragraph`／`image` predicate；ID 須存在且不重複，predicate 接收 readonly 來源記錄。擷取與選取發生於載入模型前。預設 `mode: 'generated'` 須涵蓋所有選取來源；圖片前處理結果會重用於該階段推理。每個階段產生證據連結 claims，必要時階層縮減摘要／結論。每階段 `maxNewTokens` 預設 256；`format: 'json'` 回傳具型別報告，`'markdown'` 回傳已跳脫 Markdown。`language` 為 BCP 47；文字系統檢查只是啟發式。`onToken(text, phase)` 區分 `image`、`section`、`summary`、`conclusion`。`imageFailurePolicy: 'omit'` 保留失敗項目，但不壓下 policy、callback、取消或 budget 錯誤；預設 `'error'` 拒絕圖片失敗。
 
 `contextWindowTokens` 會依固定模型設定檢查；預設使用保守的 4096-token 工作視窗，不代表實際可用的最大上下文。輸入與輸出預算須合計落在視窗內。報告依實際 tokenizer 分割段落並保留 Unicode 邊界；每個 section 請求最多處理四段 quote span，產生一至四個證據連結 claims，不再把任意大型來源壓成單一 claim。`sourceFacts` 獨立於生成摘要，以精確、連續引用及 UTF-16 offsets 保留所有選取段落文字。Ledger 是保留的來源文字，**不是**擷取或查核過的真實世界事實。容量足夠時，摘要／結論使用保留來源證據；不足時才階層縮減生成 claims。來源參照與成功縮減均不保證語意忠實。
 
@@ -135,7 +135,90 @@ if (structuredPlan.fits) {
 
 `budget: { maxTotalTokens, maxDurationMs }` 限制累計輸入／輸出 token 與整個請求耗時，包含排隊、載入、擷取、前處理、生成，以及支援的非同步來源 predicate、資源核准、`onEvent`、`onCheckpoint`。Deadline 取消 SDK 對使用者 Promise 的等待，不會強制搶占 native ORT／OS 呼叫，也不終止呼叫端自己的外部副作用。`onEvent` 回報階段轉換；`onCheckpoint` 提供可保存、cloneable 的 state。`resume: checkpoint` 只重用相容的完成階段，保留已花費 budget，並驗證來源／模型／設定／checksum 與圖片內容版本。報告 checkpoint 建立後的失敗提供 `ReportError.checkpoint` 最終 accounting；較早的擷取／選取／載入失敗可能只有 `NekoError`。Checkpoint 保存選取文字與 metadata，不包含圖片像素；持久化資料可能敏感。
 
-所有 cache／backend／status 方法都回傳 Promise。`cache.model.prefetch/status/clear` 僅操作選取的 pinned profile；`cache.engine.status/release` 檢查／釋放 live engine。`cache: { engine: true, engineTtlMs: 1_800_000 }` 於閒置 30 分鐘內重用引擎。`backend.detect()` 檢查相容性，並不證明 native driver／session 成功。預設 `execution: 'inline'` 只允許一個 process-global runtime owner；`'worker'` 使用真正的 Node thread 或 browser module worker，各自獨立持有 runtime。各實例使用有上限的 FIFO（`queue: { maxPending: 8 }`）、回報排隊耗時，滿額以 `QUEUE_FULL` 拒絕；`queueStatus()` 提供即時狀態。Worker 保留 callback 順序與 typed errors／checkpoints。`dispose()` 取消排隊工作、等待目前工作的安全清理、釋放資源並還原 hooks。
+### 結構化型別、串流與對話
+
+保留上例的 `as const`，`result.value.greeting` 才會由 `SchemaValue<typeof schema>` 推導成 `string`；required 欄位為必要屬性，其他 properties 為選填。不以呼叫端任意指定的泛型冒充驗證結果。若確實需要數值上下界等 validator 功能，須明確選擇 fallback：
+
+```ts
+const bounded = await neko.inferStructured({
+  prompt: 'Return a JSON integer from 1 to 5.',
+  schema: { type: 'integer', minimum: 1, maximum: 5 } as const,
+  structuredMode: 'validation-only',
+  maxNewTokens: 32,
+});
+console.log(bounded.value, bounded.structured.mode);
+```
+
+SDK 保留呼叫端提示內容；沒有公開 `_budget`、`_prepared` 或 `_structured` 選項。
+
+```js
+for await (const event of neko.inferStream({
+  prompt: 'Write one short greeting.',
+  maxNewTokens: 32, maxBufferedEvents: 64, maxBufferedCharacters: 1_048_576,
+})) {
+  if (event.type === 'token') process.stdout.write(event.text);
+  else console.log(event.result.usage, event.result.finishReason);
+}
+
+const session = neko.session({
+  system: 'Answer briefly.', contextPolicy: 'drop-oldest', maxHistoryMessages: 32,
+  maxNewTokens: 64,
+});
+try {
+  console.log(await session.plan('Hello.'));
+  console.log((await session.send('Hello.')).text);
+  const branch = await session.branch();
+  try {
+    const saved = await session.export();
+    await branch.import(saved);
+    await branch.reset();
+  } finally { await branch.dispose(); }
+} finally { await session.dispose(); }
+```
+
+`inferStream` 回傳有界 `AsyncIterable`，事件為 `token`／最後的 `result`；完整 usage 在 result。消費者過慢溢位為 `STREAM_OVERFLOW` 並取消生成；提前 `break`／iterator return 亦取消，不默默丟棄片段。串流在 EOF／取消前保留佇列所有權。
+
+Session 的 `send(content, options?)`／`plan(content, options?)` 接受文字或 chat content array。操作序列化；只有成功完成的 user／assistant turn 才交易式寫入 history，規劃不提交。`contextPolicy: 'error'` 是預設；`'drop-oldest'` 只移除完整最舊 turn，保留 system。`maxHistoryMessages` 包含 system 且至多 128。同步 `history()` 提供擁有副本；branch 有獨立 history，但共用 host。`reset()` 保留 system；`export()`／`import(snapshot)` 使用 model-bound `version: 1` snapshot。圖片匯出只接受可攜 raster data URL／擁有 raw pixels；外部 URL／path 被拒絕，匯出不為此讀檔或 fetch。Snapshot 可能含敏感對話／像素，須安全保存。Dispose session 不 dispose host。每次生成仍處理整段對話；只可能重用 plan/send 的完全相同 tokenization，並非 KV／跨 turn prefix 重用。
+
+### 報告模式、規劃、稽核與續跑
+
+```js
+const html = '<article><p>The garden opened in 1987.</p></article>';
+const extractive = await neko.describe(html, {
+  mode: 'extractive', sourceLanguage: 'en', format: 'json',
+});
+const reportPlan = await neko.planReport(html, {
+  mode: 'generated', language: 'en', maxNewTokens: 256,
+  retries: { section: 1, summary: 1 },
+});
+console.log(reportPlan.stages, reportPlan.reduction);
+```
+
+`extractive` 不載入 tokenizer／ONNX、不 fetch 圖片、不做 vision；以整段精確引用建立報告，usage 為零、backend 為 `null`。`sourceLanguage` 預設 `'und'`，不是翻譯要求；生成模式與來源語言分開。Generated／extractive 都提供 claim audit：`supported`／`contradicted`／`unknown` 是保守的 lexical quote check，**不是**語意蘊含、真實世界事實、信心或相關性判定；圖片內容不由文字 audit 證明。
+
+`planReport(input, options?)` 回傳 `mode`、`snapshotId`、`sectionCount`、`imageCount`、`stages`、`knownInputTokens`、`maxKnownOutputTokens`。Stage 含 `id`、`phase`、`inputTokens: number | null`、`maxOutputTokens`、`maxAttempts`；未確定輸入為 `null`。`reduction.required` 為 `boolean | null`、`reduction.stageCount` 為 `null`，`estimatedDurationMs`／`totalTokensUpperBound` 也為 `null`，不能作精確總成本承諾。Generated 規劃可能取得引擎，extractive 不會。
+
+每 phase 的 `retries` 是 0–3 次**額外**嘗試，只對 `STRUCTURED_OUTPUT`／`MODEL_OUTPUT` 授權；不是任意錯誤的自動重試。累計 budget 包含失敗生成的已花費 tokens；budget 造成不完整 JSON 為 `BUDGET_EXCEEDED`，不因 retries 重試。Resume identity 不綁定可增加的 budget／retry 授權，其他來源／模型／生成設定仍不可更換。即使 retries 為 0，只增加 budget 也可續跑尚未完成的階段：
+
+```js
+import { ReportError } from 'neko.js';
+
+try {
+  await neko.describe(html, { budget: { maxTotalTokens: 100 }, retries: { section: 0 } });
+} catch (error) {
+  if (!(error instanceof ReportError)) throw error;
+  console.log(error.partial); // 具型別的 snapshot、sourceFacts、completedStages、usage。
+  const resumed = await neko.describe(html, {
+    resume: error.checkpoint,
+    budget: { maxTotalTokens: 10_000 }, retries: { section: 0 },
+  });
+  console.log(resumed.metadata);
+}
+```
+
+`ReportError.partial`／checkpoint 亦跨 worker 傳輸；partial 不是完整可驗證報告。失敗在 checkpoint 建立前可能只有 `NekoError`；續跑保留所有已花費 accounting，不重置預算。
+
+除 `inferStream` 與 `cache.model.exportBundle` 同步回傳串流，以及同步建立 session 外，cache／backend／status 方法回傳 Promise。`cache.model.prefetch/status/clear` 僅操作選取的 pinned profile；`cache.engine.status/release` 檢查／釋放 live engine。`cache: { engine: true, engineTtlMs: 1_800_000 }` 於閒置 30 分鐘內重用引擎。`backend.detect()` 不證明 native driver／session 成功。預設 `execution: 'inline'` 只允許一個 process-global runtime owner；`'worker'` 使用真正 Node thread 或 browser module worker。各實例使用有上限 FIFO（`queue: { maxPending: 8 }`），滿額為 `QUEUE_FULL`；`queueStatus()` 提供狀態。Worker 保留 callback 順序與 typed errors／checkpoints／partial。`dispose()` 取消排隊工作、等待目前工作的安全清理、釋放資源並還原 hooks。
 
 `policy.network(url, kind)` 正常回傳（`undefined`／`true`）表示核准；拋錯／回傳 `false` 表示拒絕。`kind` 為 `model`、`runtime`、`worker`、`page`、`image`。`policy.localFiles(canonicalPath)` 明確核准 Node 輸入檔案。預設只允許固定模型傳輸與套件 bootstrap；任意頁面／圖片目的地與本機檔案預設拒絕。每個可觀測 redirect hop 都先核准；每次呼叫的 `validateDestination` 只增加限制，不取代實例 policy。SDK 無法替部署判斷 private／SSRF-safe 邊界，應用程式核准須自行落實。
 
@@ -167,6 +250,37 @@ const prepared = await loadImage(page.images[0]);
 
 `extractPage(input, options?)` 接受 HTTP(S) 網址或 HTML 字串；HTML 中的相對網址需設定 `baseUrl`。預設 HTML 上限為 2 MiB、最多 20 個去重圖片網址、圖片下載上限 10 MiB、每個請求逾時 10 秒。解析器不執行腳本，僅擷取語意文字及圖片來源，不載入連結資源。它會發現 `img`、`picture/source[srcset]`、inline style、`background` 屬性和 `og:image`，並保留來源 metadata。
 
+### 文件結構與有來源引用的問答
+
+```js
+const document = await extractPage(
+  '<main><p>The garden opened in 1987.</p></main>', { content: 'main' },
+);
+console.log(document.extraction, document.containers, document.tables);
+const answer = await neko.ask(document, 'When did the garden open?', { maxNewTokens: 256 });
+console.log(answer.status, answer.claims);
+```
+
+`content: 'main'` 是 opt-in：只在唯一可見 main／article 可保守識別且非空時採用，否則完整 body fallback；預設 `'full'`。請查看 `page.extraction` 的 `mode`／`root`／`fallback`，不是通用 readability 演算法。`containers` 保存 parent／paragraph 關係，paragraph 可含 `containerId`／`sectionId`；`tables` 保存 caption、cells、row／column／span、header references 與 paragraph IDs。選取後的 partial table 保留空 cell 幾何，不保留被排除文字。SDK 擷取／選取持有經驗證的 Page snapshot，不信任呼叫端可變物件。
+
+`ask(input, question, options?)` 的模型受 grammar 限制選取 paragraph IDs 與 extractive claims；SDK 建立整段精確引用及 UTF-16 offsets。未知／重複 ID 或不受引用支持的 claims 被拒絕，或結果為 `insufficient-evidence`。選取文字不會為了塞進 context 而暗中截斷；超過容量須由呼叫端明確縮小 sources。引用精確不代表答案相關、語意正確或世界事實已查核。
+
+### ROI、切片與前處理快取
+
+```js
+const cropped = await neko.infer({
+  image: './photo.png', prompt: 'Describe this region.', maxNewTokens: 64,
+  region: { unit: 'normalized', x: 0, y: 0, width: 0.5, height: 1 },
+  tiling: { tileWidth: 640, tileHeight: 640, overlap: 0.15, maxTiles: 16 },
+  maxDimension: 1280,
+});
+console.log(cropped.images);
+```
+
+此範例沿用前述核准 canonical path 的 host。`region` 支援整數 `pixels` 或 `[0,1]` 範圍的 `normalized`，均在 EXIF 方向校正後座標裁切。`tiling` 於 ROI 內切片，`overlap` 為 0–0.5（預設 0.15），`maxTiles` 預設 16、至多 64；整次請求最多 16 個來源圖片、64 個處理區域，超額拒絕而非漏圖。每個 decoded image 上限 40 MP，`maxDimension` 至多 1280，不放大。公開 `prepareImageRegions(source, options?, cache?)` 可取得切片；單圖 `prepareImage`／`readImage`／`loadImage` 不接受 tiling。Raw pixels 須給正確 `width`／`height`／`channels: 1 | 2 | 3 | 4`，瀏覽器亦處理灰階與 alpha，不假定所有輸入為 RGBA。
+
+引擎重用有 byte／count 上限、SDK 擁有的 normalized pixels；每次仍重新讀取、核准來源與 digest 後才命中，不是 vision embeddings cache。`images` provenance 包含 `sourceVersionId`、`sourceWidth`／`sourceHeight`、實際整數 `region`／`normalizedRegion`、處理後 `versionId`／尺寸，以及 `preprocessing.pipeline`／`cache`／`reused`。`cache` 為 `hit`／`miss`／`disabled`，`reused` 為 `normalized-pixels`／`none`。內容 hash 不認證來源，切片也不保證辨識品質。
+
 呼叫端接收不可信 URL 時，遠端擷取可能產生 SSRF 風險。請用 `validateDestination` 檢查每個目的地／redirect，並套用應用程式層級的 outbound network 控制；此 SDK 無法判斷特定部署中哪些私人或內部目的地安全。
 
 `loadImage(image, options?)` 使用 Node 原生解碼器或瀏覽器 bitmap/canvas 路徑解碼擷取出的圖片。它會檢查 raster 位元組／MIME、限制輸入與解碼尺寸、套用方向、等比例縮放至 1280×1280（不放大），並輸出 PNG。SVG 和格式不符／無效內容會被拒絕。此函式只負責前處理；模型推理由 `Neko.describe()` 執行。瀏覽器遠端圖片請求仍受 CORS 限制。
@@ -175,7 +289,7 @@ const prepared = await loadImage(page.images[0]);
 
 ### 版本化報告與 checkpoints
 
-報告使用 `schemaVersion: 2`，包含 `sourceFacts` 與 `integrity: { algorithm: 'sha256', checksum }`。`metadata.coverage` 記錄選取段落 IDs／字元數、保留引用數／字元數、模型與摘要引用的 fact IDs、`conclusionBasis`（`'retained-source'` 或 `'reduced-generated-claims'`），以及 `semanticRetention: 'not-measured'`。來源涵蓋是結構 accounting，不是語意 recall 分數；生成 claims 沒有事實查核。
+報告使用 `schemaVersion: 3`，包含 `sourceFacts` 與 `integrity: { algorithm: 'sha256', checksum }`。`metadata.coverage` 記錄選取段落 IDs／字元數、保留引用數／字元數、模型與摘要引用的 fact IDs、`conclusionBasis`（`'retained-source'` 或 `'reduced-generated-claims'`），以及 `semanticRetention: 'not-measured'`。來源涵蓋是結構 accounting，不是語意 recall 分數；claim 的啟發式 audit 也不是事實查核。
 
 `renderMarkdown(report)` 除生成 sections 外，也包含保留引用 ledger 與 coverage；即使模型摘要遺漏內容，仍可檢視精確來源文字。跳脫不讓引用文字變成可信或私密資料。
 
@@ -203,13 +317,49 @@ async function resumeSaved(saved: string): Promise<StructuredReport> {
 }
 ```
 
-序列化與解析都先驗證才接受資料；report helper 可用第二個參數傳入相符的選取 `Page`。`validateReportCheckpoint(value)` 也可驗證記憶體中的 checkpoint。Checkpoint 使用 `version: 2`、`plan: 'evidence-first-v2'`，保存引用 ledger，只有輸入／模型／設定相符才可 resume。**持久化相容性的 breaking change：**沒有版本、舊版或未來版本的報告／checkpoint 都會拒絕，不自動遷移、不透過 alias 解讀。報告拒絕為 `TypeError`；無效 checkpoint 版本為 `CHECKPOINT_INVALID`。請以原始輸入在目前契約下重新產生。Checksum 可偵測保存內容不一致／遭修改，但不認證作者；來源引用、metadata 和生成文字可能敏感。
+序列化與解析都先驗證才接受資料；report helper 可用第二個參數傳入相符選取 `Page`。`validateReportCheckpoint(value)` 亦驗證記憶體 checkpoint。Checkpoint 使用 `version: 3`、`plan: 'evidence-first-v3'`，保存引用 ledger、mode、attempts 與 authorization；只有來源／模型／不可變設定相符才可 resume。沒有版本、舊版（含 v2）或未來版本均拒絕，不自動遷移、不透過 alias 解讀。報告拒絕為 `TypeError`；無效 checkpoint 版本為 `CHECKPOINT_INVALID`。請以原始輸入重新產生。Checksum 不認證作者；來源引用、metadata 和生成文字可能敏感。
 
 Checkpoint 的 `sectionPlan` 記錄依序排列的 source-fact ID 群組，每組一至四個，且須精確涵蓋 ledger。即使重算 checksum，驗證仍拒絕 section 引用其他群組；resume 亦核對確定性 plan 及 request hashes。請以 helper 保存 SDK 提供的 checkpoint，不手動構造保存 state。
 
 ## 快取與後端
 
 模型 manifest 固定 Hugging Face revision、必要檔案大小與 SHA-256。每次使用快取前都會驗證；不符時會失敗，不會靜默當作 cache miss。`neko.cache.model.prefetch/status/clear` 僅操作這些固定檔案。瀏覽器 Cache Storage 仍受使用者操作與瀏覽器淘汰策略影響。
+
+### 離線 bundle 與診斷
+
+```js
+// source／target 是同 model／profile 的獨立 worker；先完成 source prefetch。
+await source.cache.model.prefetch();
+const bytes = source.cache.model.exportBundle(); // 同步 ReadableStream，不是 Promise。
+await target.cache.model.importBundle(bytes);   // 亦接受 Blob。
+console.log(await target.cache.model.diagnostics());
+console.log(await target.diagnostics());
+```
+
+`exportBundle(signal?: AbortSignal)` 不是 async，也不接受 `{ signal }`；`importBundle(blobOrStream, signal?)` 回傳 Promise。串流匯出在 EOF／cancel 前持有 queue slot。Bundle 使用嚴格版本化 manifest、模型／profile pins、檔案大小與 digest；import 先 staging／驗證才提交，取消與損壞拒絕，保留既有已驗證及無關檔案。已損壞 cache fail closed，不會被當作一般 miss 靜默替換。匯入後可於相同設定建立 `localFilesOnly: true` host；bundle 不包含原生依賴、runtime bootstrap 或遠端頁面／圖片。
+
+`cache.model.diagnostics()` 提供必要位元組與 storage；Node filesystem quota 無法觀測，為 `null`，不是「空間足夠」。瀏覽器數值來自 `navigator.storage.estimate()`，是 origin storage 估計而非模型記憶體保證；Cache Storage 可用性、quota、persisted 與淘汰皆由 host 決定。`diagnostics()` 僅回報允許的 readiness／backend／engine／queue／worker transport metadata，不含 prompt、圖片 bytes 或模型輸出；cache diagnostics 另包含快取 path，分享時仍須審查。
+
+Browser bundle 只有模型資產，**不含 runtime `.mjs`／WASM**。使用 `localFilesOnly: true` 前，另行部署相符的隨附 runtime，並將請求的 WASM URL 寫入對應快取；缺少 runtime 仍會回報 offline cache miss，不會偷偷連線。現有 browser runner 會一併 seed；靜態 app／worker module 仍須可取得，這不是完整網站離線。相同 origin 的 browser hosts 共用 CacheStorage。匯出 chunks 僅持有可見 bytes，避免 transferable stream 複製上游超大的 backing buffer。
+
+### Worker 健康與硬期限
+
+```js
+const worker = await createNeko({ device: 'cpu', execution: 'worker' });
+try {
+  console.log(await worker.health({ timeoutMs: 1000 }));
+  try {
+    console.log((await worker.infer({
+      prompt: 'Write one short greeting.', maxNewTokens: 32, hardDeadlineMs: 60_000,
+    })).text);
+  } catch (error) {
+    console.error(error);
+    await worker.restart(); // 明確重建 worker；自行決定是否重新提交原工作。
+  }
+} finally { await worker.dispose(); }
+```
+
+`health({ signal?, timeoutMs? })` 是輕量 liveness／round-trip 檢查，不載入模型、不測量品質或證明 provider 可推理。`restart()` 僅支援 worker，需明確呼叫，沒有自動 replay。`hardDeadlineMs` 僅 worker 支援：到期終止該 worker realm，所有 pending／queued 呼叫一併失敗；不只中止單一生成。之後須 restart 才繼續。Inline 的 hard deadline／restart 為不支援；一般 signal／report budget 仍是合作式取消，不能強制中斷 native 工作。
 
 ### 瀏覽器模型來源
 
@@ -287,9 +437,17 @@ await neko.cache.model.prefetch();
 
 `device: 'cpu'` 和 `device: 'webgpu'` 是明確選擇；沒有自動 provider fallback，也不保證跨平台一致。`backend.detect()` 回報模型／runtime 相容性；瀏覽器 WebGPU 也會檢查支援 `shader-f16` 的 adapter，但 Node 不會在實際推理前探測 native provider／driver 是否可用。瀏覽器 CPU/WASM 因 ONNX Runtime Web 缺少 `GatherBlockQuantized(1)` 而不受支援。請求／session provider 組態既不證明推理成功，也不證明所有 operator 都在 GPU 執行；前述歷史 hybrid profiling 實際觀測到 CPU 與 WebGPU operator 並存。
 
-證據快照（2026-10-03）：macOS（Darwin 27）、arm64，於 Node 22.23.3 與 Node 26.7.0 完成全新 CPU smoke。下方結果只驗證所記錄 runtime／backend／profile／輸入，不涵蓋其他列或所有 Node `>=22` 版本。
+**本輪 SDK 實測**，macOS／arm64：
 
-| Runtime／平台 | API／契約狀態 | 歷史真實推理證據 | 目前改動的全新驗證 |
+- Node 22.23.3 CPU／default：冷文字規劃不建立 ONNX、Unicode／指數整數／unique-enum 約束生成、有界 iterator、session 淘汰／分支／重設／匯入、兩個 ROI tiles（input 152／output 24）、報告 audit 與累計預算續跑。完整 871,364,778-byte 串流 bundle 跨 worker 匯入新 filesystem cache 後，完成 local-only 真實推理；已回傳串流 abort 後仍健康。
+- Registry 的 2B 兩種 profile 均完成 Node 真實文字／圖片／報告；不代表 2B browser 或品質 parity。
+- 完整 Chromium 153.0.8010.12 headless，搭配 `--enable-unsafe-webgpu`：0.8B 真實文字、Unicode grammar、iterator、session、ROI 與段落引用 QA。另部署／快取 runtime，將完整匯出 Blob 匯入**空** CacheStorage；新 local-only worker 拒絕模型網路後實際生成 8 tokens。指數整數／unique-enum 結果 17 tokens；1-token 預算失敗後，以零 output retries 續跑，累計 1,212 tokens。硬期限同時使推理與排隊規劃回報 `DEADLINE_EXCEEDED`，明確 restart 恢復 health／輕量規劃；最終 browser 證據畫面已視覺確認。
+- Typecheck／lint／build、130 個 Node 契約、27 個品質工具、21 個 browser 契約與 packed consumer 真實推理通過；獨立[完整四樣本品質 gate 仍未通過](quality.md#目前實測結果)。Provider 證據仍只是 loaded-session configuration，不是逐 operator／硬體 GPU 認證。
+
+
+以下為前一輪平台驗證的**歷史證據快照**（2026-10-03）：macOS（Darwin 27）、arm64，於 Node 22.23.3 與 Node 26.7.0 完成全新 CPU smoke。「全新／目前改動」均指該歷史輪次，不代表上述新 API 已逐項在所有平台重驗。結果只驗證所記錄 runtime／backend／profile／輸入，不涵蓋其他列或所有 Node `>=22` 版本。
+
+| Runtime／平台 | API／契約狀態 | 歷史真實推理證據 | 該歷史輪次的驗證 |
 | --- | --- | --- | --- |
 | Node，macOS／arm64，CPU | 原生 CPU 路徑；套件要求 Node `>=22`、build target 為 Node 22 | Node 22.23.3 冷下載／離線 prototype 與 packed consumer 文字／路徑圖片／HTML 報告實測 | Node 22.23.3 與 26.7.0 離線 CPU／default worker 推理、規劃、inline／worker preflight、報告持久化及 4-stage checkpoint resume 通過 |
 | Node，macOS／arm64，WebGPU | 明確選擇原生 provider；driver／session 須可用 | Hybrid profiling 記錄 GPU **與 CPU** operator | 本次改動尚未建立證據 |

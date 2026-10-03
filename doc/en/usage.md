@@ -2,9 +2,11 @@
 
 ## Current scope
 
-Neko.js is a local multimodal SDK for Node.js and supported WebGPU browsers. `createNeko()` lazily owns the pinned Qwen model and exposes text/image inference, website-to-structured-report generation, backend status, and explicit model/engine cache controls. A report runs inert HTML extraction and real image inference for discovered images; it is not a crawler, and remote URL fetching must be protected by the calling application's network policy. Model output may be inaccurate; never use it for security or authorization decisions.
+Neko.js is a local multimodal SDK for Node.js and supported WebGPU browsers. `createNeko()` lazily owns a registered pinned Qwen model and exposes text/image inference, structured output, streams, sessions, document QA/reports, planning, diagnostics and cache controls. Generated reports perform real image inference; extractive reports do not. Extraction is inert and is not a crawler. Application network policy must protect remote inputs. Model output may be inaccurate; never use it for security or authorization decisions.
 
 The model is pinned to `onnx-community/Qwen3.5-0.8B-ONNX-OPT` revision `fafab72d87a9e6be3925b38caf48286d2838f2d0`, with Q4 embeddings/decoder and an FP16 vision encoder. Initial use downloads approximately 871 MB. Each cached asset is verified against pinned size and SHA-256 values before use. Runtime inference bundles Transformers.js 4.2.0; Node uses ONNX Runtime 1.30.0.
+
+Select either registered model with `createNeko({ model: 'onnx-community/Qwen3.5-2B-ONNX-OPT', modelProfile: 'all-q4', device: 'cpu' })`. The 2B revision is `2ea7886f48b926aca97de8b0e041ffca7e3ebaa9`. Both models offer only the fixed `default` and `all-q4` profiles. `MODEL_REGISTRY` and `getRegisteredModelProfile(profile?, model?)` expose their immutable identities and asset manifests. Arbitrary model IDs/revisions are unsupported; `modelSource` changes only the approved asset mirror, never model identity. The download size above belongs to the default 0.8B profile.
 
 ## Install and build
 
@@ -93,7 +95,9 @@ try {
 
 `generation` supports `sampling`, `temperature`, `topK`, `topP`, `repetitionPenalty`, `noRepeatNgramSize`, `stop`, and `stopTokenIds`. Temperature/top-K/top-P require `sampling: true`; greedy decoding remains the default. String stops work across decoded chunk boundaries without leaking the stop text. `inferStructured({ ...inferenceOptions, schema })` includes the validated JSON Schema in prompt/context planning and returns parsed `value` alongside inference metadata. Cheap prompt/message/generation/budget validation and schema compilation happen before model acquisition, including worker execution; invalid requests do not need a populated model cache.
 
-Structured generation stops deterministically at the boundary of the first complete JSON value, rather than extracting a valid-looking substring after generation. Boundary detection uses raw generated token IDs; any extra content emitted inside the completing token is still validated and rejected, not sliced off. Numeric roots wait for whitespace or EOS to establish their boundary. It rejects malformed prefixes, incomplete JSON and schema violations; it does not repair output or retry. Full supported Draft-07 runtime validation remains fail-closed (`SCHEMA_INVALID` for invalid/unsupported schemas; `STRUCTURED_OUTPUT` for invalid generated JSON/schema output). The result's `structured.mode` is `'json-boundary-runtime-validation'` and `structured.dialect` is `'draft-07'`. This is **not** schema-grammar-constrained decoding, semantic validation or a promise that generation succeeds.
+Default `inferStructured` uses a real tokenizer-aware JSON grammar and returns `structured.mode: 'tokenizer-constrained-runtime-validation'`. Its supported subset is primitive types, primitive `enum`/`const`, string `minLength`/`maxLength`, closed objects with `properties`, `required` and `additionalProperties: false`, and homogeneous arrays with `minItems`, `maxItems` and `uniqueItems`. Numeric bounds, composition and other unsupported grammar keywords fail with `SCHEMA_UNSUPPORTED` before engine acquisition; invalid schemas fail with `SCHEMA_INVALID`. There is no silent fallback.
+
+Explicit `structuredMode: 'validation-only'` opts into the existing full supported Draft-07 runtime validator and JSON-boundary decoding, returning `'json-boundary-runtime-validation'`. Both modes report dialect `'draft-07'`, validate the full result, reject malformed/incomplete JSON and schema violations (`STRUCTURED_OUTPUT`), and do not repair output or guarantee factuality. Boundary handling never slices a valid-looking substring from invalid output. `inferStructured<const S>` returns `SchemaValue<S>`; retain literal schema types with `as const` for precise TypeScript inference.
 
 ### Exact inference planning
 
@@ -107,7 +111,9 @@ console.log(plan.inputTokens, plan.maxNewTokens, plan.contextLimit,
 if (plan.fits) console.log((await neko.infer(request)).text);
 ```
 
-`planInference(options)` uses the same actual chat-template/tokenizer/image preprocessing as inference, including image-token expansion. Optional `schema` includes the structured-output instruction in the count. It returns model/image observations and execution metadata, but generates no tokens. `availableOutputTokens` is `max(0, contextLimit - inputTokens)`; `fits` compares the requested output budget with that capacity. A valid cold planning request **loads the model/processor and may download the selected assets**; this is not a lightweight tokenizer-only API. Planning an oversized context returns `fits: false`, whereas inference rejects it. A plan does not reserve queue capacity or guarantee later generation success.
+`planInference(options)` uses the same rendered chat template, tokenizer and image-token expansion as inference, including optional `schema` and `structuredMode`. Text-only planning reads/downloads verified tokenizer/config/template assets but creates **no ONNX sessions**. Image planning preprocesses images and may acquire the engine. It generates no tokens. `availableOutputTokens` is `max(0, contextLimit - inputTokens)`; `fits` compares requested output with capacity. Oversized planning returns `fits: false`, whereas inference rejects it. Plans reserve neither queue capacity nor successful generation.
+
+The `preprocessing` observations describe exact owned rendered-prompt tokenization reuse only, with `kvReuse: false`. Repeating an identical plan/inference request can reuse those tokens; appending conversation turns does not reuse a growing prefix or model KV state. Caller prompt text is preserved. Engine reuse and normalized image-pixel reuse are separate mechanisms.
 
 ```ts
 const schema = {
@@ -115,7 +121,7 @@ const schema = {
   properties: { greeting: { type: 'string' } },
   required: ['greeting'],
   additionalProperties: false,
-};
+} as const;
 const structuredRequest = {
   prompt: 'Return a short greeting in the requested JSON shape.',
   maxNewTokens: 64, schema,
@@ -127,7 +133,48 @@ if (structuredPlan.fits) {
 }
 ```
 
-`describe(urlOrHtmlOrPage, options?)` accepts an HTTP(S) URL, inert HTML, or an owned copy of a validated `Page`. `sources` selects paragraph/image IDs and optionally asynchronous `paragraph`/`image` predicates; IDs must be known and unique, and predicates receive readonly owned source records. Selection and extraction happen before model loading. Every selected source must be accounted for; deliberately excluded sources are not required. Image preprocessing is reused for its staged inference. Each report stage produces evidence-linked claims, then summaries/conclusions are reduced hierarchically as needed. `maxNewTokens` defaults to 256 per generation. `format: 'json'` returns the typed report; `'markdown'` returns escaped Markdown. `language` is BCP 47; English and Traditional Chinese script checks are heuristic, not fluency/factual guarantees. `onToken(text, phase)` identifies `image`, `section`, `summary`, or `conclusion`. `imageFailurePolicy: 'error'` rejects image failures; `'omit'` records a typed failed image but never suppresses policy violations, callback exceptions (including `throw undefined`), cancellation, or budget errors. Invalid/truncated generated output and language mismatches fail without automatic retries.
+### Streams and conversations
+
+```js
+for await (const event of neko.inferStream({
+  prompt: 'Write a short greeting.', maxNewTokens: 32,
+  maxBufferedEvents: 64, maxBufferedCharacters: 1_048_576,
+})) {
+  if (event.type === 'token') process.stdout.write(event.text);
+  else console.log(event.result.usage);
+}
+const conversation = neko.session({
+  system: 'Answer concisely.', contextPolicy: 'drop-oldest',
+  maxHistoryMessages: 16, maxNewTokens: 64,
+});
+try {
+  console.log(await conversation.plan('Hello.'));
+  console.log((await conversation.send('Hello.')).text);
+  console.log(conversation.history());
+  const fork = await conversation.branch();
+  try {
+    await fork.import(await conversation.export());
+    await fork.reset();
+  } finally { await fork.dispose(); }
+} finally { await conversation.dispose(); }
+```
+
+`inferStream` is a bounded `AsyncIterable` of decoded `token` events followed by one `result` with final usage. Slow-consumer overflow cancels generation with `STREAM_OVERFLOW`; breaking iteration/early return also cancels. Chunk counts are not token usage.
+
+Session operations are serialized and transactional: only successful completed turns enter history. `plan` does not commit; failure/cancellation does not append partial history. Default `contextPolicy: 'error'` rejects overflow; `'drop-oldest'` removes whole oldest turns while preserving system. `maxHistoryMessages` includes system and is at most 128. History/branches are owned copies. `export()`/`import(snapshot)` use model-bound version-1 snapshots with portable raw pixels/raster data URLs (raster Blobs are embedded); external URL/path images are rejected on export without IO. Reset preserves system/defaults. Session disposal never disposes its host. Sessions do not provide KV/prefix reuse.
+
+For an unsupported grammar constraint, explicitly opt in:
+
+```ts
+const bounded = await neko.inferStructured({
+  prompt: 'Return a positive integer.', maxNewTokens: 32,
+  schema: { type: 'integer', minimum: 1 } as const,
+  structuredMode: 'validation-only',
+});
+console.log(bounded.value, bounded.structured.mode);
+```
+
+`describe(urlOrHtmlOrPage, options?)` accepts an HTTP(S) URL, inert HTML, or an owned copy of a validated `Page`. `sources` selects known, unique paragraph/image IDs and optional asynchronous readonly predicates. Selection/extraction precede model loading; every selected source must be accounted for. Default `mode: 'generated'` performs staged text/image inference and hierarchical reductions when needed. `maxNewTokens` defaults to 256 per generation. `format: 'json'` returns the typed report; `'markdown'` returns escaped Markdown. `language` is BCP 47; language/script checks are heuristic, not fluency/factual guarantees. `onToken(text, phase)` identifies `image`, `section`, `summary`, or `conclusion`. `imageFailurePolicy: 'error'` rejects image failures; `'omit'` records a typed failure but does not suppress policy violations, callback exceptions, cancellation or budget errors.
 
 `contextWindowTokens` is checked against the pinned model configuration; the default is a conservative 4096-token working window, not a claim about practical maximum context. Input and output budgets must fit together. Reports split paragraph text using the actual tokenizer and Unicode-preserving boundaries. Each section request handles at most four quote spans and asks for one to four evidence-linked claims, rather than collapsing an arbitrarily large source into one claim. `sourceFacts` retains the full selected paragraph text as exact contiguous quotes with UTF-16 offsets independently of generated summaries. The ledger is retained source text, **not** extracted or verified real-world facts. Summaries/conclusions use retained source evidence when it fits; otherwise generated claims are reduced hierarchically. Neither references nor successful reduction proves faithful meaning.
 
@@ -135,7 +182,46 @@ Generation schemas are phase-specific: sections and intermediate reduction reque
 
 `budget: { maxTotalTokens, maxDurationMs }` bounds aggregate input/output usage and elapsed request time, including queue wait, load, extraction, preprocessing, generation, and supported asynchronous source predicates, resource approvals, `onEvent`, and `onCheckpoint`. A deadline cancels pending user awaits; it does not terminate caller-owned side effects or forcibly preempt a native ORT/OS call. `onEvent` reports stage transitions; `onCheckpoint` receives cloneable saved state. `resume: checkpoint` reuses only compatible completed stages, preserves spent budget, and verifies source/model/settings/checksum and image content versions. After a report checkpoint exists, failures expose its final accounting through `ReportError.checkpoint`; earlier extraction/selection/load failures may be plain `NekoError`. Checkpoints contain selected source text/metadata, not image pixels; treat persisted data as potentially sensitive.
 
-All cache/backend/status methods return promises. `cache.model.prefetch/status/clear` affect only the selected pinned profile; `cache.engine.status/release` inspect or release the live engine. `cache: { engine: true, engineTtlMs: 1_800_000 }` reuses it until 30 minutes idle. `backend.detect()` checks compatibility, not successful native driver/session creation. `execution: 'inline'` is the default and permits one process-global runtime owner; `'worker'` creates a real Node thread or browser module worker with independent ownership. Calls are bounded FIFO per instance (`queue: { maxPending: 8 }`), report queue wait, and reject excess admission with `QUEUE_FULL`; `queueStatus()` exposes current state. Worker callbacks retain ordering and typed errors/checkpoints. `dispose()` cancels queued work, awaits safe active-work cleanup, releases resources, and restores hooks.
+### Report modes, planning and recovery
+
+```js
+const source = '<main><p>The park opened in 1987.</p></main>';
+const extractedReport = await neko.describe(source, {
+  mode: 'extractive', sourceLanguage: 'en', content: 'main',
+});
+const reportPlan = await neko.planReport(source, {
+  maxNewTokens: 256, retries: { section: 1 },
+});
+console.log(extractedReport.sourceFacts, reportPlan.stages, reportPlan.reduction);
+```
+
+Extractive mode retains exact whole-paragraph quotes without tokenizer/ONNX loading, has zero token usage and `metadata.backend: null`, and retains image metadata without image fetching or vision. `sourceLanguage` defaults to `'und'`; it does not translate.
+
+`planReport(input, options?)` reports source/context segmentation, `sectionCount`, `imageCount`, and stages with `id`, `phase`, `inputTokens: number | null`, `maxOutputTokens`, `maxAttempts`. `knownInputTokens`/`maxKnownOutputTokens` cover known stages only. `reduction.required` is `boolean | null`; `reduction.stageCount`, `estimatedDurationMs` and `totalTokensUpperBound` are `null` where unknown. Generated planning may acquire the engine; extractive planning does not. Plans do not promise duration, final total or successful output.
+
+`retries: { image?, section?, summary?, conclusion? }` allows 0–3 extra attempts per phase, only for `STRUCTURED_OUTPUT`/`MODEL_OUTPUT`. Failed generation charges cumulative input/output usage. Budget-induced incomplete JSON is `BUDGET_EXCEEDED`, not retryable structured failure. Budget/retry authorization is excluded from immutable resume identity and may increase; spending never resets.
+
+```js
+import { ReportError } from 'neko.js';
+try {
+  await neko.describe(source, {
+    maxNewTokens: 256, budget: { maxTotalTokens: 1024 },
+    retries: { section: 0 },
+  });
+} catch (error) {
+  if (!(error instanceof ReportError)) throw error;
+  console.log(error.partial.completedStages, error.partial.usage);
+  const resumed = await neko.describe(source, {
+    maxNewTokens: 256, budget: { maxTotalTokens: 8192 },
+    retries: { section: 0 }, resume: error.checkpoint,
+  });
+  console.log(resumed.metadata.resumedStages);
+}
+```
+
+`ReportError.partial` is a typed version-1 partial result with snapshot, source facts, completed audited stages and cumulative usage/elapsed time, not a successful report. Partial/checkpoint survive worker transport. Increasing budget alone can resume with zero retries; incompatible immutable settings still fail. The example requires a compatible checkpoint and sufficient new authorization.
+
+Cache/backend/status methods return promises except `cache.model.exportBundle()`, which synchronously returns a readable stream. `cache.model.prefetch/status/clear` affect only the selected model/profile; `cache.engine.status/release` inspect/release the live engine. `cache: { engine: true, engineTtlMs: 1_800_000 }` reuses it until 30 minutes idle. `backend.detect()` checks compatibility, not successful native driver/session creation. Default `execution: 'inline'` permits one realm-local inline owner; `'worker'` creates a real Node thread/browser module worker with independent ownership. Bounded FIFO admission (`queue: { maxPending: 8 }`) rejects excess work with `QUEUE_FULL`; `queueStatus()` exposes state. Worker callbacks preserve ordering and typed errors, partial reports and checkpoints. Streams retain queue ownership until EOF/cancellation. `dispose()` cancels queued work, awaits safe active cleanup, releases resources and restores hooks.
 
 `policy.network(url, kind)` approves normally (`undefined` or `true`) or denies by throwing/returning `false`; `kind` is `model`, `runtime`, `worker`, `page`, or `image`. `policy.localFiles(canonicalPath)` explicitly approves Node input-file access. Defaults allow only exact pinned model transfers and package bootstrap assets; arbitrary page/image destinations and local files are denied. Checks happen before each visible redirect hop, and per-call `validateDestination` adds restrictions without replacing instance policy. The SDK cannot identify deployment-specific private/SSRF-safe destinations; application approval must enforce those boundaries.
 
@@ -167,6 +253,42 @@ const prepared = await loadImage(page.images[0]);
 
 `extractPage(input, options?)` accepts an HTTP(S) URL or an HTML string; set `baseUrl` to resolve relative URLs in HTML. Defaults limit HTML to 2 MiB, images to 20 unique URLs, image downloads to 10 MiB, and each request to 10 seconds. Parsing is inert: it extracts semantic text and image sources without running scripts or fetching linked resources. It discovers `img`, `picture/source[srcset]`, inline styles, `background` attributes, and `og:image`, preserving source metadata.
 
+### Main content, tables and document questions
+
+```js
+const document = await extractPage(
+  '<main><p>The park opened in 1987.</p><table><caption>Hours</caption>' +
+  '<tr><th scope="col">Day</th><th scope="col">Time</th></tr>' +
+  '<tr><td>Monday</td><td>09:00</td></tr></table></main>',
+  { content: 'main' },
+);
+console.log(document.extraction, document.containers, document.tables);
+const answer = await neko.ask(document, 'When did the park open?', {
+  maxNewTokens: 256,
+});
+console.log(answer.status, answer.claims);
+```
+
+Default extraction is full content. Opt-in `content: 'main'` selects a conservative unique visible `main`/`article`; ambiguous/empty candidates fall back to full body, recorded in `extraction`. Paragraph `containerId`/`sectionId` and containers preserve relations. Tables preserve captions, geometry/spans, cells, row/column/header references and paragraph IDs. Selection may mark tables `partial`, retaining empty geometry without pretending omitted text remains. Page inputs/snapshots are owned and validated.
+
+`ask(input, question, options?)` uses constrained model selection of known paragraph IDs and extractive claim text. SDK citations quote exact whole paragraphs with UTF-16 offsets, not model-computed offsets. Unknown/duplicate IDs and invalid output are rejected; unsupported claims return `insufficient-evidence`. Selected evidence is not silently omitted/truncated to fit context. Supported quotes guarantee neither truth nor question relevance; images are not visual evidence in QA.
+
+### Image regions and preprocessing reuse
+
+```js
+const regional = await neko.infer({
+  image: './photo.png', prompt: 'Describe these regions.', maxNewTokens: 64,
+  region: { unit: 'normalized', x: 0, y: 0, width: 1, height: 0.5 },
+  tiling: { tileWidth: 640, tileHeight: 640, overlap: 32, maxTiles: 16 },
+  maxDimension: 1280,
+});
+console.log(regional.images);
+```
+
+Use approved paths as above. `region` takes `unit: 'pixels' | 'normalized'`, `x`, `y`, `width`, `height`, after EXIF orientation and before crop/resize. Tiling partitions that region; inference caps source images at 16 and total regions at 64. Decoded images are capped at 40 million pixels; output dimensions never exceed 1280. Browser raw pixels support 1/2/3/4 channels.
+
+The engine's byte/count-bounded cache owns normalized pixels, not vision embeddings. Inputs are re-read, re-authorized and digested before hits. `ImageObservation` records `sourceVersionId`, source dimensions, pixel/normalized region, processed `versionId`, and preprocessing pipeline/cache/reuse kind. Hashes detect changes, not authenticity or vision accuracy.
+
 Remote URL fetching creates SSRF risk when callers accept untrusted URLs. Supply `validateDestination` to check every destination/redirect and also apply application-level outbound network controls; this SDK cannot determine which private or internal destinations are safe for a particular deployment.
 
 `loadImage(image, options?)` decodes an extracted image using the Node native decoder or browser bitmap/canvas path. It checks raster bytes/MIME, caps input and decoded dimensions, applies orientation, scales to at most 1280×1280 without enlarging, and emits PNG bytes. SVG and mismatched/invalid content are rejected. It preprocesses only; `Neko.describe()` performs the model inference. Browser remote image requests remain subject to CORS.
@@ -175,7 +297,7 @@ Remote URL fetching creates SSRF risk when callers accept untrusted URLs. Supply
 
 ### Versioned reports and checkpoints
 
-Reports use `schemaVersion: 2` and carry `sourceFacts` plus `integrity: { algorithm: 'sha256', checksum }`. `metadata.coverage` records selected paragraph IDs/character count, retained quote/character count, model- and summary-cited fact IDs, `conclusionBasis` (`'retained-source'` or `'reduced-generated-claims'`), and `semanticRetention: 'not-measured'`. Source coverage is structural accounting, not a semantic recall score; generated claims are not fact-checked.
+Reports use `schemaVersion: 3`, `mode: 'generated' | 'extractive'`, and carry `sourceFacts` plus `integrity: { algorithm: 'sha256', checksum }`. `metadata.coverage` records selected paragraph IDs/character count, retained quote/character count, model- and summary-cited fact IDs, `conclusionBasis` (`'retained-source'` or `'reduced-generated-claims'`), and `semanticRetention: 'not-measured'`. Source coverage is structural accounting, not semantic recall. Each claim's `audit.status` is `supported`, `contradicted` or `unknown`, using `conservative-lexical-v1`: exact quote retention and narrowly aligned lexical conflicts, not semantic truth, confidence, relevance, translations or image-pixel verification.
 
 `renderMarkdown(report)` includes the retained quote ledger and coverage as well as generated sections, so exact source text remains inspectable even when a model summary omits it. Escaping does not make quoted text trustworthy or private.
 
@@ -203,13 +325,44 @@ async function resumeSaved(saved: string): Promise<StructuredReport> {
 }
 ```
 
-Serialization and parsing validate before accepting data; optionally pass a matching selected `Page` as the second report-helper argument. `validateReportCheckpoint(value)` also validates an in-memory checkpoint. Checkpoints use `version: 2` and `plan: 'evidence-first-v2'`, persist the quote ledger, and resume only with matching input/model/settings. **Breaking persistence policy:** unversioned/older/future reports and checkpoints are rejected, not migrated or interpreted through aliases. Report rejection is a `TypeError`; invalid checkpoint versions use `CHECKPOINT_INVALID`. Recreate reports/checkpoints from the original inputs under the current contract. Checksums detect inconsistent/tampered saved content but do not authenticate its author. Saved source quotes, metadata and generated text may be sensitive.
+Serialization and parsing validate before accepting data; optionally pass a matching selected `Page` as the second report-helper argument. `validateReportCheckpoint(value)` validates an in-memory checkpoint. Current checkpoints use `version: 3` and `plan: 'evidence-first-v3'`, persist the quote ledger, and require matching immutable source/model/settings identity. **Breaking persistence policy:** unversioned/older/future reports and checkpoints are rejected, not migrated or interpreted through aliases. Report rejection is a `TypeError`; invalid checkpoint versions use `CHECKPOINT_INVALID`. Recreate old persisted data from original inputs. Checksums do not authenticate authors; saved source text, metadata and generated text may be sensitive.
 
 Checkpoint `sectionPlan` records ordered groups of one to four source-fact IDs covering the ledger exactly. Validation rejects section citations into other groups even if a checksum is recomputed; resume also verifies the deterministic plan and request hashes. Persist SDK-issued checkpoints through the helpers rather than constructing saved state manually.
 
 ## Cache and backend notes
 
 The model manifest fixes the Hugging Face revision and SHA-256/size of required files. Every cache hit is verified before use; mismatches fail instead of silently becoming misses. `neko.cache.model.prefetch/status/clear` operate on only these pinned files. Browser Cache Storage remains subject to browser user actions and eviction.
+
+### Portable offline bundles and diagnostics
+
+```js
+// Independent worker hosts with the same model/profile; source is prefetched.
+const controller = new AbortController();
+// Returns a stream immediately; pass the signal itself, not { signal }.
+await target.cache.model.importBundle(
+  source.cache.model.exportBundle(controller.signal), controller.signal,
+);
+console.log(await target.cache.model.diagnostics());
+console.log(await target.diagnostics());
+console.log(await target.health({ timeoutMs: 1000 }));
+```
+
+`importBundle(Blob | ReadableStream<Uint8Array>, signal?)` validates strict versioned manifests, pins, sizes and digests, stages before publication and supports cancellation. Import preserves verified/unrelated files; corrupt cache fails closed instead of silent replacement. Bundle transfer is not inference/quality validation. Node filesystem quota is unknown (`null`); browser diagnostics use actual `navigator.storage.estimate()` when available, not a memory guarantee. Browser storage availability/quota/eviction remain host-dependent.
+
+Bundles contain selected model assets, not native dependencies or browser runtime/bootstrap files. Before browser `localFilesOnly: true` inference, separately deliver the matching shipped `.mjs`/WASM assets and cache the requested WASM URL; a missing runtime asset remains an offline-cache error. The existing browser runners seed these assets. Static app/worker modules still need delivery; this is model-network-offline, not a complete offline website. Same-origin browser hosts share CacheStorage. Exported chunks own only their visible bytes, preventing transferable streams from cloning oversized upstream backing buffers.
+
+Diagnostics exclude prompts, image bytes and model output. `health()` is lightweight readiness/transport metadata, not generation or quality testing. Worker restart is explicit:
+
+```js
+const worker = await createNeko({ device: 'cpu', execution: 'worker' });
+try {
+  await worker.infer({ prompt: 'Hello.', maxNewTokens: 16, hardDeadlineMs: 30_000 });
+  console.log(await worker.health());
+  await worker.restart();
+} finally { await worker.dispose(); }
+```
+
+Worker-only `hardDeadlineMs` terminates the realm on expiry and fails **all pending/queued calls**, without automatic replay. Explicitly restart before reuse; model sessions must load again and interrupted calls are not replayed. Inline hard deadlines/restart are unsupported; dispose/create instead. Ordinary abort/duration budgets are cooperative, not native-call preemption.
 
 ### Browser model sources
 
@@ -287,9 +440,17 @@ Alternatively reverse-proxy that directory under the application origin. Match `
 
 `device: 'cpu'` and `device: 'webgpu'` are explicit choices; there is no automatic provider fallback or cross-platform parity guarantee. `backend.detect()` reports model/runtime compatibility; browser WebGPU also probes for an adapter with `shader-f16`, but Node does not probe native provider/driver availability until actual inference. Browser CPU/WASM is unsupported because ONNX Runtime Web lacks `GatherBlockQuantized(1)`. Requested/session provider configuration is not proof of successful inference or that every operator runs on the GPU. Historical hybrid operator profiling above actually observed CPU operations alongside WebGPU.
 
-Evidence snapshot (2026-10-03): macOS (Darwin 27), arm64, with fresh CPU smoke runs on Node 22.23.3 and Node 26.7.0. Fresh outcomes below verify only their recorded runtime/backend/profile/input, not the other rows or every Node `>=22` release.
+**Current SDK verification**, macOS/arm64:
 
-| Runtime/platform | API/contract status | Historical real-inference evidence | Fresh verification of current changes |
+- Node 22.23.3 CPU/default: cold text planning without ONNX, Unicode/integral-exponent/unique-enum constrained generation, bounded iterators, transactional session eviction/branch/reset/import, two ROI tiles (152 input / 24 output tokens), report audits and cumulative budget-only resume. Full 871,364,778-byte streaming bundles transferred between workers into a new filesystem cache and produced actual local-only inference; returned-stream abort preserved health.
+- Both registered 2B profiles completed actual Node text, image and report inference. This does not establish 2B browser support or quality parity.
+- Full Chromium 153.0.8010.12 headless with `--enable-unsafe-webgpu`: real 0.8B text, Unicode grammar, iterators, sessions, ROI and paragraph-cited QA. A separately shipped/cached runtime plus full exported Blob was imported into **empty** CacheStorage, then a new local-only worker with model-network denial generated 8 tokens. Integral-exponent/unique-enum output used 17 tokens; a one-output-token budget failure resumed with zero output retries (1,212 cumulative tokens). Hard expiry rejected both inference and queued planning with `DEADLINE_EXCEEDED`; explicit restart recovered health/light planning. The final browser evidence surface was visually checked.
+- Typecheck/lint/build, 130 Node contracts, 27 deterministic quality-tool tests, 21 browser contracts and packed-consumer real inference passed. The independent [full four-fixture quality gate still fails](quality.md#current-measured-outcome). Provider evidence remains loaded-session configuration, not per-operator/hardware GPU certification.
+
+
+Historical evidence snapshot retained from earlier validation (2026-10-03), macOS (Darwin 27), arm64, Node 22.23.3/26.7.0. The table and detailed runs below verify only their recorded runtime/backend/profile/input. They are not revalidation of every newly documented API, browser full-bundle transfer, a full quality gate, other platforms or every Node `>=22` release.
+
+| Runtime/platform | API/contract status | Historical real-inference evidence | Recorded prior verification |
 | --- | --- | --- | --- |
 | Node on macOS/arm64, CPU | Native CPU path; Node `>=22` required by package, build targets Node 22 | Node 22.23.3 cold/download/offline prototype and packed-consumer text/path-image/HTML-report runs | Passed Node 22.23.3 and 26.7.0 offline CPU/default worker inference, planning, inline/worker preflight, report persistence and 4-stage checkpoint resume |
 | Node on macOS/arm64, WebGPU | Explicit native provider selection; driver/session must work | Hybrid provider profiling recorded GPU **and CPU** operators | Not established for this change |

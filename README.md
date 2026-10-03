@@ -4,7 +4,7 @@
 
 Neko.js 是本機多模態推理 SDK，以固定版本的 Qwen3.5 ONNX 模型提供文字／圖片推理，以及從網址或 HTML 產生結構化網頁報告。Node.js 與受支援的瀏覽器都可執行；瀏覽器需支援 WebGPU。這不是爬蟲，也不會執行擷取頁面的腳本。模型輸出可能不正確，請勿用於安全或授權判斷。
 
-模型為 `onnx-community/Qwen3.5-0.8B-ONNX-OPT` revision `fafab72d87a9e6be3925b38caf48286d2838f2d0`，embedding／decoder 使用 Q4，vision encoder 使用 FP16。首次使用約需下載 871 MB；固定模型檔案會在使用前驗證大小和 SHA-256。執行時 bundle 內含 Transformers.js 4.2.0；Node 使用原生 ONNX Runtime 1.30.0。
+預設模型為 `onnx-community/Qwen3.5-0.8B-ONNX-OPT` revision `fafab72d87a9e6be3925b38caf48286d2838f2d0`，embedding／decoder 使用 Q4，vision encoder 使用 FP16，首次完整下載約 871 MB。Registry 另提供固定 revision 的 Qwen3.5-2B，兩個模型均有 `default`／`all-q4` profile；不是任意 Hub 模型載入器。固定檔案會在使用前驗證大小和 SHA-256。執行時 bundle 內含 Transformers.js 4.2.0；Node 使用原生 ONNX Runtime 1.30.0。模型選擇與 revision 詳見[使用說明](doc/zh/usage.md)。
 
 ### Node.js 安裝
 
@@ -46,7 +46,14 @@ try {
 
 模型採懶載入。Node 預設快取位於 macOS `~/Library/Caches/neko.js`、Windows `%LOCALAPPDATA%/neko.js`、Linux `$XDG_CACHE_HOME/neko.js` 或 `~/.cache/neko.js`；可用 `cacheDir` 覆寫。瀏覽器使用 Cache Storage。`neko.cache.model.prefetch/status/clear` 管理固定模型檔案，`neko.cache.engine.status/release` 管理載入的引擎。詳見[繁體中文使用說明](doc/zh/usage.md)。
 
-首次使用先以 `cache.model.prefetch()` 連線建立驗證快取，`dispose()` 後再以相同 `cacheDir`／profile 和 `localFilesOnly: true` 在全新程序推理。完整可執行範例見[Node 首次使用](doc/zh/usage.md#node-首次建立快取再離線推理)。`planInference()` 提供精確輸入（含圖片展開）／輸出／上下文預算；有效冷請求會載入模型，不是無載入成本的 tokenizer-only 規劃。結構化生成以 JSON 邊界停止及 Draft-07 runtime 驗證，不是 schema grammar 約束，也不修補／重試。報告 `schemaVersion: 2` 保存精確來源引用 ledger 與 coverage；checkpoint `version: 2`／`evidence-first-v2` 的持久化 helper 拒絕舊版／未知版本，不自動遷移。來源涵蓋不等於生成 claims 已查核。
+首次使用可先以 `cache.model.prefetch()` 建立驗證快取，再用相同 model／profile、`localFilesOnly: true` 離線推理；也可匯出／匯入經驗證的離線 bundle。純文字 `planInference()` 只載入 tokenizer／設定，不建立 ONNX session；圖片規劃仍需前處理。`inferStructured()` 預設使用 tokenizer-aware JSON grammar 約束明確 schema 子集，完整 Draft-07 驗證須明確選用 `structuredMode: 'validation-only'`；兩者都會 runtime 驗證，不保證事實正確。
+
+- 有限緩衝的 `inferStream()` AsyncIterable、可分支／重設／持久化的對話 session；目前只重用精確相同 prompt 的 tokenization，**不重用 model KV cache**。
+- 報告／checkpoint 版本 3，支援 extractive 零推理模式、`planReport()`、累計預算、明確階段重試、型別化部分報告與增加授權後續跑。Claim–evidence audit 是保守詞彙檢查，不是語意／真偽認證。
+- 可選主內容擷取、表格與段落關聯、帶精確引用的文件問答、圖片 ROI／tiling 與有界前處理快取。
+- 離線 bundle、安裝／配額診斷、worker health／restart／硬期限；硬期限會終止同一 worker 所有待處理請求，需明確 restart，不自動重播。
+
+完整契約與可執行範例見[繁體中文使用說明](doc/zh/usage.md)。
 
 ### 瀏覽器
 
@@ -74,7 +81,7 @@ NEKO_MODEL_CACHE="$HOME/Library/Caches/neko.js/onnx-community/Qwen3.5-0.8B-ONNX-
 
 瀏覽器 smoke 需要實際可用的 WebGPU adapter；headed 不保證裝置可用。runner 的本機靜態伺服器仍須可連線；`--offline-reload` 只封鎖模型下載，不代表整個網站離線可用。
 
-平台 API／契約、歷史實測和目前全新驗證分開列於[平台矩陣](doc/zh/usage.md#後端相容性)。Node `>=22` 是套件要求；macOS／arm64 的 Node 22.23.3 與 26.7.0 已完成全新 CPU smoke；完整 Chromium 153 headless WebGPU 亦完成真實推理，但使用測試旗標。Windows／Linux、其他瀏覽器與各平台 GPU driver 實際推理未獲跨平台驗證，不主張 parity。Provider 組態不等於 GPU 執行證據；離線、schema 和 provenance 均不承諾模型品質。
+最新變更通過 130 個 Node 契約、27 個品質工具、21 個 browser 契約測試，以及 packed consumer 真實 CPU 文字／圖片／報告推理。macOS／arm64 Node 22.23.3 實測串流、session、約束生成、ROI、恢復及完整離線 bundle；2B 的兩種 profile 也完成真實 Node 文字／圖片／報告。Chromium 153 WebGPU 另通過 0.8B 完整 bundle 冷匯入後離線推理、預算續跑與硬期限／restart。[平台矩陣](doc/zh/usage.md#後端相容性)區分最新與歷史證據；browser 使用測試旗標，未主張 Windows／Linux、其他瀏覽器、2B browser 或各 driver parity。Provider 組態不是所有算子的 GPU 證據；[完整品質 gate 仍未通過](doc/zh/quality.md#目前實測結果)，不以 schema／引用／audit 取代品質驗收。
 
 Node 網址擷取可能產生 SSRF 風險；對不可信 URL 必須自行設定 `validateDestination` 和 outbound network policy。HTML 與模型輸出均是不可信資料。更多威脅模型見 [SECURITY.md](SECURITY.md)。
 
@@ -82,7 +89,7 @@ Node 網址擷取可能產生 SSRF 風險；對不可信 URL 必須自行設定 
 
 Neko.js is a local multimodal inference SDK. It uses a pinned Qwen3.5 ONNX model for text/image inference and structured website reports from a URL or HTML. It runs in Node.js and supported WebGPU browsers. It is not a crawler and does not execute page scripts. Model output may be wrong; do not use it for security or authorization decisions.
 
-The model is `onnx-community/Qwen3.5-0.8B-ONNX-OPT`, revision `fafab72d87a9e6be3925b38caf48286d2838f2d0`, with Q4 embeddings/decoder and an FP16 vision encoder. First use downloads about 871 MB; each pinned model asset is size- and SHA-256-verified before use. Transformers.js 4.2.0 is bundled; Node uses native ONNX Runtime 1.30.0.
+The default is `onnx-community/Qwen3.5-0.8B-ONNX-OPT`, revision `fafab72d87a9e6be3925b38caf48286d2838f2d0`, with Q4 embeddings/decoder and an FP16 vision encoder; a full first download is about 871 MB. The registry also provides an immutable Qwen3.5-2B revision, with `default` and `all-q4` profiles for both models—not arbitrary Hub model loading. Each pinned asset is size- and SHA-256-verified before use. Transformers.js 4.2.0 is bundled; Node uses native ONNX Runtime 1.30.0. See the [usage guide](doc/en/usage.md) for model selection and revisions.
 
 ### Install for Node.js
 
@@ -124,7 +131,14 @@ try {
 
 Model loading is lazy. The default Node cache is macOS `~/Library/Caches/neko.js`, Windows `%LOCALAPPDATA%/neko.js`, or Linux `$XDG_CACHE_HOME/neko.js` / `~/.cache/neko.js`; `cacheDir` overrides it. Browsers use Cache Storage. `neko.cache.model.prefetch/status/clear` manages only the pinned model files; `neko.cache.engine.status/release` manages the loaded engine. See the [English usage guide](doc/en/usage.md).
 
-First prefetch the verified cache online, dispose that instance, then infer in a fresh process with the same `cacheDir`/profile and `localFilesOnly: true`; see the [complete first-use example](doc/en/usage.md#first-use-node-cache-then-offline-inference). `planInference()` reports exact input (including image expansion), output and context budgets; valid cold calls load the model, so planning is not tokenizer-only or load-free. Structured generation uses JSON boundary stopping and Draft-07 runtime validation, not schema grammar constraints, repair or retry. Report `schemaVersion: 2` preserves an exact source-quote ledger and coverage; persistence helpers reject older/unknown report and checkpoint (`version: 2` / `evidence-first-v2`) schemas without automatic migration. Source coverage does not fact-check generated claims.
+First prefetch a verified cache, then infer with the same model/profile and `localFilesOnly: true`, or import a verified offline bundle. Text-only `planInference()` loads verified tokenizer/configuration assets without creating ONNX sessions; image planning still requires preprocessing. `inferStructured()` defaults to tokenizer-aware JSON grammar for an explicit schema subset; full Draft-07 validation requires explicit `structuredMode: 'validation-only'`. Both modes validate at runtime without factual guarantees.
+
+- Bounded `inferStream()` AsyncIterable and transactional conversation sessions with branching/reset/persistence. Reuse is exact-prompt tokenization only, **not model KV-cache reuse**.
+- Version-3 reports/checkpoints, zero-inference extractive mode, `planReport()`, cumulative budgets, explicit stage retries, typed partial reports and increased-authorization resume. Claim–evidence audits are conservative lexical checks, not semantic or truth certification.
+- Opt-in main-content extraction, tables/paragraph relations, citation-grounded document questions, image ROI/tiling and bounded preprocessing caches.
+- Offline bundles, installation/quota diagnostics and worker health/restart/hard deadlines. A hard deadline terminates all pending work in that worker; explicit restart is required, with no automatic replay.
+
+See the [English usage guide](doc/en/usage.md) for complete contracts and examples.
 
 ### Browser
 
@@ -152,7 +166,7 @@ NEKO_MODEL_CACHE="$HOME/Library/Caches/neko.js/onnx-community/Qwen3.5-0.8B-ONNX-
 
 The browser smoke requires an available WebGPU adapter; headed mode does not guarantee one. The runner's local static server must remain reachable; `--offline-reload` blocks model downloads, not all site-network traffic or the need for that server.
 
-The [platform matrix](doc/en/usage.md#backend-compatibility) separates API/contracts, historical inference and fresh verification. Node `>=22` is the package requirement; fresh macOS/arm64 CPU smokes passed on Node 22.23.3 and 26.7.0, and full Chromium 153 headless WebGPU completed real inference with a test flag. Windows/Linux, other browsers and platform-specific GPU drivers lack cross-platform real-inference verification here; no parity is claimed. Provider configuration is not GPU execution proof; offline use, schemas and provenance do not promise model quality.
+The latest changes pass 130 Node contract, 27 quality-tool and 21 browser contract tests plus real packed-consumer CPU text/image/report inference. Fresh macOS/arm64 Node 22.23.3 runs exercise streams, sessions, constrained generation, ROI, recovery and full offline bundles; both 2B profiles complete real Node text/image/report inference. Chromium 153 WebGPU additionally passes 0.8B offline inference after full-bundle cold import, budget resume and hard deadline/restart. The [platform matrix](doc/en/usage.md#backend-compatibility) separates current and historical evidence; browser runs use a test flag, without Windows/Linux, other-browser, 2B-browser or driver parity claims. Provider configuration is not per-operator GPU proof. The [full quality gate still fails](doc/en/quality.md#current-measured-outcome); schemas, citations and audits do not replace quality acceptance.
 
 Node URL extraction can create SSRF risk. For untrusted URLs, provide `validateDestination` and application-level outbound network controls. Treat HTML and model output as untrusted. See [SECURITY.md](SECURITY.md) for the threat model.
 

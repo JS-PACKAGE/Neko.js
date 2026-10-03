@@ -32,7 +32,7 @@ Node 預設 CPU，Browser 必須使用 WebGPU。能啟動瀏覽器不等於 prov
 
 ## 明確版本與驗收政策
 
-產物 `schemaVersion: 3`、樣本 `quality-fixtures-v2`、評估器 `quality-claims-v4`、政策 `quality-thresholds-v1` 都是明確契約。閘門會核對目前 oracle SHA-256、樣本雜湊、生效案例輸入／預算與 stimulus key。版本缺少或錯誤、案例遺漏／重複、未嘗試／失敗及 profile 不符均 fail closed。整體與原始結果的模型 ID／revision 必須符合固定 manifest；原始結果與案例的 backend 證據必須一致，且符合宣告的 runtime／device。舊產物須重新生成，改標版本不是遷移。
+產物 `schemaVersion: 3`、樣本 `quality-fixtures-v2`、評估器 `quality-claims-v5`、政策 `quality-thresholds-v1` 都是明確契約。階層產物目前包含版本 3 報告；benchmark／gate 針對預設固定 0.8B 模型，不代表所有 registry 模型。閘門會核對目前 oracle SHA-256、樣本雜湊、生效案例輸入／預算與 stimulus key。版本缺少或錯誤、案例遺漏／重複、未嘗試／失敗及 profile 不符均 fail closed。整體與原始結果的模型 ID／revision 必須符合固定 manifest；原始結果與案例 backend 證據須一致，且符合宣告 runtime／device。舊產物須重新生成，改標版本不是遷移。
 
 `scripts/quality/policy.mjs` 宣告門檻：
 
@@ -55,7 +55,7 @@ Node 預設 CPU，Browser 必須使用 WebGPU。能啟動瀏覽器不等於 prov
 
 `page.summary` 與 `conclusion` 另查矛盾／unsupported tuple 與不完整紀錄提及，**不要求完整 300 筆召回**：壓縮 overview 不需重述全部目錄，也不能補足 section 遺漏事實。提到 H-ID 卻沒有完整 tuple 是格式錯誤；已知 tuple 內容錯誤是矛盾，未知 tuple 是 unsupported。重複正確紀錄另行記錄，不會增加召回率，也不因重述正確內容失敗。來源／引用 ID **永遠不提供語意特徵**。來源 ledger 全部保留但生成 section 為空或大量遺漏，仍會因生成召回率失敗。
 
-非紀錄形式的階層文字不會獲得語意認證。語法以外的正確改寫可能失分，沒有紀錄 ID 的文字可能未被評分。此閘門仍是有限回歸 oracle，不證明任意報告文字有來源支持。provenance／schema 驗證與精確引文保留不會替生成摘要查核事實。
+非紀錄形式的階層文字不會獲得語意認證。語法以外的正確改寫可能失分，沒有紀錄 ID 的文字可能未被評分。此閘門仍是有限回歸 oracle，不證明任意報告文字有來源支持。版本 3 報告 audit 是保守詞彙證據檢查；tokenizer-aware JSON 約束、provenance／schema 驗證與精確引文保留，都不會替摘要查核事實，也不能取代獨立品質閘門。
 
 ## 比較與診斷
 
@@ -72,9 +72,11 @@ paired-inputs **不是**獨立量化／平台實驗：Node 使用 Sharp 無 alph
 
 ## 目前實測結果
 
-目前 macOS／arm64、Node 22.23.3 CPU／default 離線 run 嘗試全部四種樣本。文字（5 項事實）、圖片（3 項事實）、邊界（8 筆紀錄）的有限 oracle 精確率／召回率皆為 1.0，沒有命中矛盾或 unsupported，但全部遺漏指定的 `FACT` 前綴。300 段階層報告因生成文字不是完整單一 JSON value 而回傳 `STRUCTURED_OUTPUT`。完整閘門以狀態 1 結束，回報執行不完整及品質失敗。這與確定性測試、packed consumer 推理及較小報告 smoke 通過是不同證據；嚴格發行品質目標**尚未達成**。
+最新 macOS／arm64、Node 22.23.3 CPU／default 離線 run 使用 `quality-claims-v5`，嘗試全部四種樣本。文字（5 項事實）、圖片（3 項事實）、邊界（8 筆紀錄）的有限 oracle 精確率／召回率皆為 1.0，沒有命中矛盾或 unsupported，但全部遺漏指定的 `FACT` 前綴。300 段階層報告回傳 `STRUCTURED_OUTPUT`（`Generated text is not one complete JSON value`）。完整閘門以狀態 1 結束，回報執行不完整與品質失敗。契約測試、packed consumer、約束生成 smoke 與較小報告通過，不代表嚴格發行品質目標達成。
 
-另一次原始 token 診斷定位在 `section:67`：evidence ID 的結尾引號被錯誤跳脫，512-token 預算只生成 149 tokens 即失敗，**不是**輸出預算截斷。SDK 不修補／重試，直接拒絕該文字。版本 2 的失敗 checkpoint 保留全部 300 段精確來源引用與 67 個已完成階段，記錄包含失敗生成的 input 33,490／output 11,485 tokens；驗證及序列化／解析 round-trip 通過。這是失敗狀態與來源保留的證據，**不代表**300 段推理完成或事實正確性保證。
+此次 artifact 保存階層錯誤，沒有失敗階段的原始 token stream／checkpoint，因此不能確認精確原因或階段。約束不保證在有限輸出預算內完成；不完整輸出仍 fail closed。沒有調低 gate 門檻。
+
+**歷史 validation-only 診斷：**先前版本 2 run 定位到 `section:67` 的結尾引號錯誤跳脫，512-token 預算生成 149 tokens 即失敗。該舊 checkpoint 保留全部 300 段精確引用及 67 個已完成階段，記錄包含失敗嘗試的 input 33,490／output 11,485 tokens；持久化驗證通過。這是歷史失敗／來源保留證據，不是目前約束 run 的診斷，也不代表 300 段推理完成或事實正確性。
 
 ## CI
 
