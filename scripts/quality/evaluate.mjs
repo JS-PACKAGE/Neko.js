@@ -1,6 +1,6 @@
 const claimLine = /^\s*(?:(FACT)\s+)?([A-Z0-9-]+)\s*:\s*(.*?)\s*$/iu;
 
-export const EVALUATOR_VERSION = 'quality-claims-v3';
+export const EVALUATOR_VERSION = 'quality-claims-v4';
 
 function matchAll(pattern, text) {
   return [...text.matchAll(new RegExp(pattern, 'giu'))];
@@ -24,6 +24,7 @@ function findings(text, rules) {
 }
 
 function matchesFact(text, fact) {
+  if (Array.isArray(fact.exact)) return fact.exact.includes(text.normalize('NFC'));
   const signature = fact.pattern
     ? new RegExp(fact.pattern, 'iu').test(text)
     : Array.isArray(fact.match) && fact.match.every((pattern) => new RegExp(pattern, 'iu').test(text));

@@ -53,7 +53,8 @@
     "test:browser": "playwright test",
     "smoke:browser": "node scripts/smoke-browser.mjs",
     "quality:benchmark": "node scripts/quality-benchmark.mjs",
-    "test:quality": "node --test scripts/quality/evaluate.test.mjs"
+    "quality:gate": "node scripts/quality/gate-cli.mjs",
+    "test:quality": "node --test scripts/quality/*.test.mjs"
   },
   "dependencies": {
     "onnxruntime-node": "1.30.0",

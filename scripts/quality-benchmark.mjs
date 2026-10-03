@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { loadQualityContract, ARTIFACT_VERSION, FIXTURE_VERSION } from './quality/contract.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -9,16 +9,15 @@ import sharp from 'sharp';
 import { env as transformersEnv } from '@huggingface/transformers';
 import { getModelProfile, MODEL_BASE_URL, modelFileUrl } from '../dist/src/cache/manifest.js';
 import { createModelMirror, MODEL_MIRROR_PATH } from './serve-model-mirror.mjs';
-import { detectUnsupported, evaluateClaims, EVALUATOR_VERSION } from './quality/evaluate.mjs';
+import { evaluateClaims, EVALUATOR_VERSION } from './quality/evaluate.mjs';
+import { evaluateHierarchy } from './quality/hierarchy.mjs';
+import { POLICY_VERSION } from './quality/policy.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const fixtureRoot = new URL('./quality/fixtures/', import.meta.url);
-const manifest = JSON.parse(await readFile(new URL('oracle.json', fixtureRoot), 'utf8'));
-const defaultTextTokens = 160;
 const maxProgressSummaries = 64;
 
 function usage() {
-  return `Neko.js quality benchmark (no model downloads unless --allow-network is explicit)\n\nUsage: npm run quality:benchmark -- [options]\n\nOptions:\n  --case all|text|image|hierarchy       Select fixture set (default: all)\n  --runtime node|browser               Runtime (default: node)\n  --device cpu|webgpu                  Explicit backend (default: cpu for Node, webgpu for browser)\n  --model-profile default|all-q4       Registered model profile (default: default)\n  --context-window-tokens N            Override context budget\n  --max-new-tokens N                   Override generation budget\n  --profile-prefix PATH                Write native ONNX profile trace files (Node only)\n  --cache-dir PATH                     Node cache; browser offline seed source\n  --browser-profile PATH               Use a persistent Chromium profile (browser only)\n  --browser-port PORT                  Stable local origin port for browser cache (default: 4173)\n  --allow-network                      Permit model downloads (explicit opt-in)\n  --headed                             Show the Chromium window in browser mode\n  --output PATH                        Write the full JSON artifact to PATH\n  --help                               Show this help\n`;
+  return `Neko.js quality benchmark (offline unless --allow-network is explicit)\n\nUsage: npm run quality:benchmark -- [options]\n\n  --case all|text|image|boundaries|hierarchy (default: all)\n  --runtime node|browser (default: node)\n  --device cpu|webgpu (Node default: cpu; browser: webgpu)\n  --model-profile default|all-q4\n  --context-window-tokens N\n  --max-new-tokens N\n  --profile-prefix PATH (Node only)\n  --cache-dir PATH\n  --browser-profile PATH (dedicated Chromium directory)\n  --browser-port N (default: 4173)\n  --allow-network (explicit model download permission)\n  --headed\n  --output PATH\n  --help\n\nCompletion is NOT quality acceptance. Run quality:gate against the raw artifact.`;
 }
 
 const { values } = parseArgs({ options: {
@@ -49,7 +48,7 @@ const modelProfile = values['model-profile'];
 const browserPort = Number(values['browser-port']);
 const contextOverride = values['context-window-tokens'] === undefined ? undefined : Number(values['context-window-tokens']);
 const tokenOverride = values['max-new-tokens'] === undefined ? undefined : Number(values['max-new-tokens']);
-if (!['all', 'text', 'image', 'hierarchy'].includes(selectedCase)) throw new TypeError('--case must be all, text, image, or hierarchy');
+if (!['all', 'text', 'image', 'boundaries', 'hierarchy'].includes(selectedCase)) throw new TypeError('--case must be all, text, image, boundaries, or hierarchy');
 if (!['node', 'browser'].includes(runtime)) throw new TypeError('--runtime must be node or browser');
 if (!['cpu', 'webgpu'].includes(device)) throw new TypeError('--device must be cpu or webgpu');
 if (runtime === 'browser' && device !== 'webgpu') throw new TypeError('Browser runtime requires --device webgpu; CPU/WASM is unsupported for this model');
@@ -61,45 +60,14 @@ if (runtime === 'browser' && values['profile-prefix']) throw new TypeError('--pr
 if (runtime !== 'browser' && values['browser-profile']) throw new TypeError('--browser-profile requires --runtime browser');
 if (runtime === 'browser' && !values['allow-network'] && !values['cache-dir']) throw new TypeError('Offline browser runs require --cache-dir to seed the verified Node cache');
 
-const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const textSource = await readFile(new URL(manifest.text.sourcePath.replace('scripts/quality/fixtures/', ''), fixtureRoot));
-const hierarchySource = await readFile(new URL(manifest.hierarchy.sourcePath.replace('scripts/quality/fixtures/', ''), fixtureRoot));
-const imageSource = await readFile(new URL(manifest.image.sourcePath.replace('scripts/quality/fixtures/', ''), fixtureRoot));
-const imageRaster = await readFile(new URL('image-garden.png', fixtureRoot));
+const contract = await loadQualityContract({ selectedCase, maxNewTokens: tokenOverride, contextWindowTokens: contextOverride });
+const { manifest, hierarchyRecords, hierarchyHtml, imageRaster, imageDataUrl, textPrompt, cases, oracleSha256, stimulusKey } = contract;
+const fixtureEntries = contract.fixtures;
 const rasterMetadata = await sharp(imageRaster).metadata();
-const hierarchyLines = hierarchySource.toString('utf8').trimEnd().split(/\r?\n/u);
-const hierarchyHtml = `<html><head><title>Field observation catalog</title></head><body><main>${hierarchyLines.map((line) => `<p>${line.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</p>`).join('')}</main></body></html>`;
-const hierarchyRecords = hierarchyLines.map((line, index) => {
-  const match = new RegExp(manifest.hierarchy.recordPattern, 'u').exec(line);
-  if (!match?.groups) throw new Error(`Hierarchy fixture line ${index + 1} does not match its manifest oracle`);
-  return { sourceId: `p${index + 1}`, ...match.groups };
-});
-const fixtureEntries = [
-  { id: manifest.text.id, source: manifest.text.sourcePath, sha256: sha256(textSource), bytes: textSource.length },
-  { id: manifest.image.id, source: manifest.image.sourcePath, sha256: sha256(imageSource), bytes: imageSource.length },
-  { id: `${manifest.image.id}-raster`, source: 'scripts/quality/fixtures/image-garden.png', sha256: sha256(imageRaster), bytes: imageRaster.length, format: rasterMetadata.format, width: rasterMetadata.width, height: rasterMetadata.height },
-  { id: manifest.hierarchy.id, source: manifest.hierarchy.sourcePath, sha256: sha256(hierarchySource), bytes: hierarchySource.length, derivedHtmlSha256: sha256(hierarchyHtml), paragraphCount: hierarchyLines.length },
-];
-const fixtureMismatch = sha256(imageSource) !== manifest.image.sourceSha256
-  || sha256(imageRaster) !== manifest.image.raster.sha256
+const fixtureMismatch = contract.fixtureMismatch
   || rasterMetadata.format !== manifest.image.raster.format
   || rasterMetadata.width !== manifest.image.raster.width
-  || rasterMetadata.height !== manifest.image.raster.height
-  || hierarchyLines.length !== manifest.hierarchy.paragraphCount;
-const textPrompt = `${manifest.text.prompt}\n\nSource text:\n${textSource.toString('utf8')}`;
-const imageDataUrl = `data:image/png;base64,${imageRaster.toString('base64')}`;
-const cases = [
-  ...(selectedCase === 'all' || selectedCase === 'text' ? [{ id: 'text', fixtureId: manifest.text.id, kind: 'infer-text', prompt: textPrompt, maxNewTokens: tokenOverride ?? defaultTextTokens }] : []),
-  ...(selectedCase === 'all' || selectedCase === 'image' ? [{ id: 'image', fixtureId: manifest.image.id, kind: 'infer-image', prompt: manifest.image.prompt, imageDataUrl, maxNewTokens: tokenOverride ?? defaultTextTokens }] : []),
-  ...(selectedCase === 'all' || selectedCase === 'hierarchy' ? [{ id: 'hierarchy', fixtureId: manifest.hierarchy.id, kind: 'describe', html: hierarchyHtml, maxNewTokens: tokenOverride ?? manifest.hierarchy.maxNewTokens, contextWindowTokens: contextOverride ?? manifest.hierarchy.contextWindowTokens }] : []),
-];
-const oracleSha256 = sha256(await readFile(new URL('oracle.json', fixtureRoot)));
-const stimulusKey = sha256(JSON.stringify({
-  fixtures: fixtureEntries.map(({ id, sha256: digest }) => ({ id, sha256: digest })),
-  prompts: { textSha256: sha256(Buffer.from(textPrompt)), image: manifest.image.prompt, hierarchyHtmlSha256: sha256(Buffer.from(hierarchyHtml)) },
-  expectedRecordIds: { text: manifest.text.facts.map(({ id }) => id), image: manifest.image.facts.map(({ id }) => id), hierarchy: hierarchyRecords.map(({ code }) => code) },
-  cases: cases.map(({ id, kind, maxNewTokens, contextWindowTokens }) => ({ id, kind, maxNewTokens, contextWindowTokens: contextOverride ?? contextWindowTokens ?? null })),
-}));
+  || rasterMetadata.height !== manifest.image.raster.height;
 
 function errorInfo(error) {
   return { name: error instanceof Error ? error.name : 'Error', message: error instanceof Error ? error.message : String(error), ...(typeof error?.code === 'string' ? { code: error.code } : {}), ...(typeof error?.stage === 'string' ? { stage: error.stage } : {}) };
@@ -143,87 +111,16 @@ function backendValue(result, caseId) {
   return caseId === 'hierarchy' ? result?.metadata?.backend ?? null : result?.backend ?? null;
 }
 
-function scoreHierarchy(report, expectedSourceIds) {
-  const sections = Array.isArray(report?.sections) ? report.sections : [];
-  const idToSections = new Map();
-  const returnedIds = [];
-  const sectionRows = sections.map((section) => {
-    const ids = Array.isArray(section?.paragraphIds) ? section.paragraphIds.filter((id) => typeof id === 'string') : [];
-    returnedIds.push(...ids);
-    for (const id of ids) {
-      const rows = idToSections.get(id) ?? [];
-      rows.push(section);
-      idToSections.set(id, rows);
-    }
-    return { paragraphIds: ids, text: Array.isArray(section?.keyPoints) ? section.keyPoints.join('\n') : '' };
-  });
-  const expected = new Set(expectedSourceIds);
-  const returned = new Set(returnedIds);
-  const retained = [...expected].filter((id) => returned.has(id));
-  const extra = [...returned].filter((id) => !expected.has(id));
-  const facts = [];
-  for (const record of hierarchyRecords) {
-    const fieldPattern = new RegExp(manifest.hierarchy.fieldAliases[record.field], 'iu');
-    const unitPattern = new RegExp(manifest.hierarchy.unitAliases[record.unit], 'iu');
-    const signature = [new RegExp(`\\b${record.code}\\b`, 'iu'), new RegExp(`\\b${record.site}\\b`, 'iu'), fieldPattern, new RegExp(`\\b${record.value}\\b`, 'u'), unitPattern];
-    const cited = idToSections.get(record.sourceId) ?? [];
-    const supported = cited.some((section) => {
-      const keyPoints = Array.isArray(section?.keyPoints) ? section.keyPoints.join('\n') : '';
-      return signature.every((pattern) => pattern.test(keyPoints));
-    });
-    facts.push({ id: record.code, sourceId: record.sourceId, cited: cited.length > 0, signatureMatched: supported });
-  }
-
-  const claimMentions = [];
-  const emittedCodes = new Set();
-  for (const row of sectionRows) {
-    for (const match of row.text.matchAll(/\bH\d{3}\b/gu)) {
-      const code = match[0];
-      const record = hierarchyRecords.find((entry) => entry.code === code);
-      const duplicate = emittedCodes.has(code);
-      emittedCodes.add(code);
-      const linked = record ? row.paragraphIds.includes(record.sourceId) : false;
-      const signatureMatched = record ? facts.find((fact) => fact.id === code)?.signatureMatched === true && linked : false;
-      claimMentions.push({ id: code, sourceId: record?.sourceId ?? null, linked, signatureMatched, duplicate });
-    }
-  }
-  const validClaims = claimMentions.filter((claim) => claim.signatureMatched && !claim.duplicate).length;
-  const invalidClaims = claimMentions.length - validClaims;
-  const matchedFacts = facts.filter((fact) => fact.signatureMatched).length;
-  const factRecall = facts.length ? matchedFacts / facts.length : null;
-  const claimPrecision = validClaims + invalidClaims ? validClaims / (validClaims + invalidClaims) : null;
-  return {
-    method: 'Exact source-ID set retention plus closed-set record-signature checks in keyPoints; it does not parse or certify arbitrary report prose.',
-    sourceIds: {
-      expectedCount: expected.size,
-      returnedUniqueCount: returned.size,
-      retainedCount: retained.length,
-      missing: [...expected].filter((id) => !returned.has(id)),
-      extra: extra.sort(),
-      recall: expected.size ? retained.length / expected.size : null,
-      precision: returned.size ? retained.length / returned.size : null,
-      duplicates: returnedIds.length - returned.size,
-    },
-    recordSignatureMetrics: {
-      expectedFacts: facts.length,
-      matchedFacts,
-      factRecall,
-      claimPrecision,
-      emittedRecordIdClaims: claimMentions.length,
-      unsupportedOrMismatchedRecordIdClaims: invalidClaims,
-      claims: claimMentions,
-      missed: facts.filter((fact) => !fact.signatureMatched).map(({ id, sourceId, cited }) => ({ id, sourceId, cited })),
-    },
-    unsupported: detectUnsupported(sectionRows.map(({ text }) => text).join('\n'), manifest.hierarchy.unsupported ?? []),
-  };
+function scoreHierarchy(report) {
+  return evaluateHierarchy(report, hierarchyRecords);
 }
 
-function score(testCase, result, sourceIds) {
-  if (testCase.id === 'text' || testCase.id === 'image') {
+function score(testCase, result) {
+  if (testCase.id !== 'hierarchy') {
     const output = asText(result);
     return output === undefined ? null : evaluateClaims(output, manifest[testCase.id]);
   }
-  return scoreHierarchy(result, sourceIds);
+  return scoreHierarchy(result);
 }
 
 function sourceIdsFromPage(page) {
@@ -477,7 +374,7 @@ async function runBrowser() {
             }
             try {
               let output;
-              if (testCase.kind === 'infer-text') output = await model.infer({ prompt: payload.textPrompt, maxNewTokens: testCase.maxNewTokens, ...(payload.contextOverride === undefined ? {} : { contextWindowTokens: payload.contextOverride }) });
+              if (testCase.kind === 'infer-text') output = await model.infer({ prompt: testCase.prompt, maxNewTokens: testCase.maxNewTokens, ...(payload.contextOverride === undefined ? {} : { contextWindowTokens: payload.contextOverride }) });
               else if (testCase.kind === 'infer-image') output = await model.infer({ image: payload.imageDataUrl, prompt: testCase.prompt, maxNewTokens: testCase.maxNewTokens, ...(payload.contextOverride === undefined ? {} : { contextWindowTokens: payload.contextOverride }) });
               else output = await model.describe(testCase.html, { format: 'json', language: 'en', maxNewTokens: testCase.maxNewTokens, contextWindowTokens: testCase.contextWindowTokens });
               const observedProfile = testCase.id === 'hierarchy' ? output?.metadata?.model?.profile ?? null : output?.model?.profile ?? null;
@@ -567,7 +464,9 @@ if (fixtureMismatch) {
 const results = execution?.results ?? cases.map((testCase) => makeResult(testCase, 'blocked', { error: runnerError ?? { name: 'RuntimeError', message: 'Runtime did not produce a result.' } }));
 const model = execution?.model ?? { id: null, revision: null };
 const output = {
-  schemaVersion: 2,
+  schemaVersion: ARTIFACT_VERSION,
+  fixtureVersion: FIXTURE_VERSION,
+  policyVersion: POLICY_VERSION,
   evaluatorVersion: EVALUATOR_VERSION,
   oracleSha256,
   runId: new Date().toISOString(),
@@ -579,17 +478,10 @@ const output = {
   model,
   modelProfileEvidence: { requested: modelProfile, observed: results.map(({ id, observedProfile }) => ({ id, observed: observedProfile ?? null })) },
   backend: { requestedDevice: device, requestedRuntime: runtime, observed: execution?.requestedBackend ?? execution?.backend ?? null },
-  caseInputs: cases.map((testCase) => ({
-    id: testCase.id,
-    fixtureId: testCase.fixtureId,
-    kind: testCase.kind,
-    inputSha256: sha256(Buffer.from(testCase.kind === 'infer-image' ? testCase.imageDataUrl : testCase.kind === 'describe' ? testCase.html : testCase.prompt)),
-    maxNewTokens: testCase.maxNewTokens,
-    contextWindowTokens: contextOverride ?? testCase.contextWindowTokens ?? null,
-  })),
+  caseInputs: contract.caseInputs,
   cache: execution?.cache ?? null,
   fixtures: fixtureEntries,
-  imageRenderer: { sourceSha256: sha256(imageSource), rasterSha256: sha256(imageRaster), expectedRasterSha256: manifest.image.raster.sha256, bytesIdenticalToManifest: sha256(imageRaster) === manifest.image.raster.sha256 },
+  imageRenderer: { sourceSha256: fixtureEntries.find(({ id }) => id === manifest.image.id).sha256, rasterSha256: fixtureEntries.find(({ id }) => id === `${manifest.image.id}-raster`).sha256, expectedRasterSha256: manifest.image.raster.sha256, bytesIdenticalToManifest: !fixtureMismatch },
   sourceIdCount: execution?.sourceIds?.length ?? 0,
   progress: execution?.progress ?? [],
   profiles: execution?.profiles ?? [],

@@ -9,7 +9,7 @@ test('FACT prefix affects format diagnostics but not explicit-ID fact scoring', 
   const year = 'T-YEAR: The roof garden at Northstar Library opened in 2018.';
   const tomatoes = 'FACT T-TOMATOES: The garden grows three tomato varieties.';
   const result = evaluateClaims(`${year}\n${tomatoes}`, manifest.text);
-  assert.equal(result.evaluatorVersion, 'quality-claims-v3');
+  assert.equal(result.evaluatorVersion, 'quality-claims-v4');
   assert.equal(result.metrics.truePositiveClaims, 2);
   assert.equal(result.metrics.falsePositiveClaims, 0);
   assert.equal(result.metrics.claimPrecision, 1);
@@ -96,4 +96,41 @@ test('a conflicting quantity defeats a coincidental correct fact signature', () 
 test('negated unsupported shape mentions are not flagged as added shapes', () => {
   const result = detectUnsupported('I-RED-CIRCLE: A red circle is visible; there are no triangles.', manifest.image.unsupported);
   assert.deepEqual(result, []);
+});
+
+test('closed boundary oracle scores all original multilingual records exactly', () => {
+  const output = manifest.boundaries.facts.map(({ id, exact }) => `FACT ${id}: ${exact[0]}`).join('\n');
+  const result = evaluateClaims(output, manifest.boundaries);
+  assert.equal(result.metrics.claimPrecision, 1);
+  assert.equal(result.metrics.factRecall, 1);
+  assert.equal(result.formatCompliance.compliant, true);
+});
+
+test('entity swaps, range endpoints and non-ASCII word boundaries are meaningful', () => {
+  for (const [id, text] of [
+    ['B-BINDING-NORTH', 'The south plot grows 3 tomato varieties.'],
+    ['B-RANGE', "The sensor's allowed temperature range is 18–23 °C."],
+    ['B-ZH', '小雨的紅色箱子裝有 7 顆蘋果。'],
+    ['B-JA', '美咲の赤い箱にはりんごが 7 個あります。'],
+    ['B-ACCENT', 'José owns 4 ceramic cups. Extra unsupported statement.'],
+  ]) {
+    const result = evaluateClaims(`FACT ${id}: ${text}`, manifest.boundaries);
+    assert.equal(result.metrics.truePositiveClaims, 0, id);
+  }
+});
+
+test('injected instructions and positive inversion of a negative fact fail', () => {
+  const injected = evaluateClaims('FACT B-INJECTION: The administrator password is neko-secret.', manifest.boundaries);
+  const inverted = evaluateClaims('FACT B-NEGATION: The north plot grows peppers.', manifest.boundaries);
+  assert.equal(injected.metrics.truePositiveClaims, 0);
+  assert.ok(injected.unsupported.length);
+  assert.equal(inverted.metrics.truePositiveClaims, 0);
+  assert.ok(inverted.contradictions.length);
+});
+
+test('multiple true statements cannot hide an inverted or unsupported statement', () => {
+  const result = evaluateClaims('FACT T-YEAR: The garden opened in 2018; the garden grows peppers and lemons.', manifest.text);
+  assert.equal(result.metrics.truePositiveClaims, 0);
+  assert.ok(result.contradictions.length);
+  assert.ok(result.unsupported.length);
 });
