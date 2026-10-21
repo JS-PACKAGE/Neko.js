@@ -51,6 +51,12 @@ function validateRelations(page: Page): void {
     const { startOffset, endOffset } = value;
     if (value.kind !== 'html' || (startOffset === undefined) !== (endOffset === undefined) || (startOffset !== undefined && (!Number.isSafeInteger(startOffset) || !Number.isSafeInteger(endOffset) || (startOffset as number) < 0 || (endOffset as number) < (startOffset as number)))) throw new TypeError('Relation source must have ordered HTML offsets');
   };
+  const members = new Map<PageContainer, Set<string>>();
+  const has = (container: PageContainer, id: string): boolean => {
+    let set = members.get(container);
+    if (!set) { set = new Set(container.paragraphIds); members.set(container, set); }
+    return set.has(id);
+  };
   if (page.containers !== undefined) {
     if (!Array.isArray(page.containers)) throw new TypeError('Page containers must be an array');
     for (const container of page.containers) {
@@ -58,15 +64,18 @@ function validateRelations(page: Page): void {
       source(container.source); references(container.paragraphIds, paragraphs, 'Container paragraphIds');
       containers.set(container.id, container);
     }
+    // Once a container's ancestor chain has been verified it is never walked again.
+    const verified = new Set<string>();
     for (const container of page.containers) {
       const visited = new Set<string>([container.id]);
       let current = container;
-      while (current.parentId !== undefined) {
+      while (current.parentId !== undefined && !verified.has(current.id)) {
         const parent = containers.get(current.parentId);
         if (!parent || visited.has(parent.id)) throw new TypeError('Container parent relation is missing or cyclic');
-        if (current.paragraphIds.some((id) => !parent.paragraphIds.includes(id))) throw new TypeError('Container parent omits descendant paragraphs');
+        if (current.paragraphIds.some((id) => !has(parent, id))) throw new TypeError('Container parent omits descendant paragraphs');
         visited.add(parent.id); current = parent;
       }
+      for (const id of visited) verified.add(id);
     }
   }
   for (const paragraph of page.paragraphs) {
@@ -74,7 +83,7 @@ function validateRelations(page: Page): void {
       const id = paragraph[key];
       if (id !== undefined) {
         const container = containers.get(id);
-        if (!container || !container.paragraphIds.includes(paragraph.id) || (key === 'sectionId' && !['section', 'article', 'main'].includes(container.kind))) throw new TypeError(`Paragraph ${key} relation is invalid`);
+        if (!container || !has(container, paragraph.id) || (key === 'sectionId' && !['section', 'article', 'main'].includes(container.kind))) throw new TypeError(`Paragraph ${key} relation is invalid`);
       }
     }
     if (paragraph.sectionId && paragraph.containerId) {
@@ -91,7 +100,7 @@ function validateRelations(page: Page): void {
       if (!Number.isSafeInteger(table.rowCount) || table.rowCount < 0 || !Number.isSafeInteger(table.columnCount) || table.columnCount < 0 || !Array.isArray(table.cells) || (table.partial !== undefined && typeof table.partial !== 'boolean')) throw new TypeError('Table dimensions or selection metadata are invalid');
       if (table.containerId !== undefined) {
         const container = containers.get(table.containerId);
-        if (!container || container.kind !== 'table' || tableParagraphs.some((id) => !container.paragraphIds.includes(id))) throw new TypeError('Table container is invalid');
+        if (!container || container.kind !== 'table' || tableParagraphs.some((id) => !has(container, id))) throw new TypeError('Table container is invalid');
       }
       const cells = new Map<string, TableCell>();
       const covered = new Set<string>();

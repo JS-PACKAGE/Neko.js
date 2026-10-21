@@ -78,3 +78,17 @@ test('source validation rejects dangling, cyclic, overlapping and forged table r
   assert.deepEqual(empty.containers, []); assert.deepEqual(empty.tables, []);
   validatePage(empty);
 });
+
+test('container ancestry is verified for every link, including parents shared by earlier-verified siblings', async () => {
+  let sections = '';
+  for (let index = 0; index < 60; index++) sections += `<section><p>First ${index}.</p><p>Second ${index}.</p></section>`;
+  const original = await extractPage(`<main>${sections}</main>`);
+  validatePage(original);
+  // The first sections verify the shared parent chain; a later child that the parent omits must still be rejected.
+  const forged = structuredClone(original);
+  const sectionContainers = forged.containers!.filter((container) => container.kind === 'section');
+  const last = sectionContainers.at(-1)!;
+  const parent = forged.containers!.find((container) => container.id === last.parentId)!;
+  parent.paragraphIds = parent.paragraphIds.filter((id) => !last.paragraphIds.includes(id));
+  assert.throws(() => validatePage(forged), /omits descendant/);
+});
