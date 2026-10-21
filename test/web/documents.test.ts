@@ -162,13 +162,13 @@ test('cancellation awaits native host inference ownership before rejecting', asy
 });
 
 test('incremental index updates are indistinguishable from rebuilding the same documents', async () => {
-  type Internal = { state: { chunks: Map<string, { chunk: unknown; length: number }>; postings: Map<string, Map<string, number>>; averageLength: number; snapshot: { documents: { id: string; versionId: string }[] } } };
+  type Internal = { state: { chunks: Map<string, { chunk: unknown; length: number }>; postings: Map<string, { ids: string[]; counts: number[] }>; averageLength: number; snapshot: { documents: { id: string; versionId: string }[] } } };
   const shape = (index: unknown) => {
     const { state } = index as Internal;
     return {
       chunks: [...state.chunks].map(([id, entry]) => [id, entry.length, entry.chunk]),
       // Posting order feeds candidate admission under maxScoredChunks, so it is part of the contract; term insertion order is not.
-      postings: [...state.postings].map(([term, posting]) => [term, [...posting]] as const).sort(([left], [right]) => left < right ? -1 : 1),
+      postings: [...state.postings].map(([term, { ids, counts }]) => [term, ids.map((id, index) => [id, counts[index]])] as const).sort(([left], [right]) => left < right ? -1 : 1),
       averageLength: state.averageLength,
       versions: state.snapshot.documents.map(({ id, versionId }) => [id, versionId]),
     };

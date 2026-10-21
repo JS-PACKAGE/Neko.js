@@ -101,10 +101,13 @@ export interface DocumentIndexSnapshot {
   id: string;
 }
 interface ChunkEntry { chunk: DocumentChunk; length: number; }
+/** Chunk IDs and term frequencies in index (chunk) order. Parallel arrays take about half the memory and build time of a Map per term. */
+interface Posting { readonly ids: string[]; readonly counts: number[]; }
 interface IndexState {
   snapshot: DocumentIndexSnapshot;
   chunks: Map<string, ChunkEntry>;
-  postings: Map<string, Map<string, number>>;
+  /** Never mutated once built: an incremental update shares untouched postings with the previous state. */
+  postings: Map<string, Posting>;
   averageLength: number;
   documents: Map<string, IndexedDocument>;
 }
@@ -284,7 +287,7 @@ async function build(documents: DocumentInput[], options: DocumentIndexConfig, r
       chunks.set(id, entry); totalLength += entry.length;
     }
   }
-  const postings = new Map<string, Map<string, number>>();
+  const postings = new Map<string, Posting>();
   if (incremental) {
     // Postings of untouched terms are immutable and shared with the previous state; only terms of changed, removed or added chunks are rebuilt.
     for (const [term, posting] of previous.postings) postings.set(term, posting);
@@ -300,15 +303,22 @@ async function build(documents: DocumentInput[], options: DocumentIndexConfig, r
     const order = new Map<string, number>(); let position = 0;
     for (const id of chunks.keys()) order.set(id, position++);
     for (const term of touched) {
-      const entries: [string, number][] = [];
-      for (const item of previous.postings.get(term) ?? []) if (!removed.has(item[0])) entries.push(item);
+      const ids: string[] = []; const counts: number[] = [];
+      const prior = previous.postings.get(term);
+      if (prior) for (let index = 0; index < prior.ids.length; index++) if (!removed.has(prior.ids[index]!)) { ids.push(prior.ids[index]!); counts.push(prior.counts[index]!); }
       const added = additions.get(term);
-      if (added) { for (const item of added) entries.push(item); entries.sort((left, right) => order.get(left[0])! - order.get(right[0])!); }
-      if (entries.length) postings.set(term, new Map(entries)); else postings.delete(term);
+      if (added) {
+        const entries = ids.map((id, index): [string, number] => [id, counts[index]!]);
+        for (const item of added) entries.push(item);
+        entries.sort((left, right) => order.get(left[0])! - order.get(right[0])!);
+        ids.length = 0; counts.length = 0;
+        for (const [id, count] of entries) { ids.push(id); counts.push(count); }
+      }
+      if (ids.length) postings.set(term, { ids, counts }); else postings.delete(term);
     }
   } else {
     for (const { id, frequencies } of created) for (const [term, count] of frequencies) {
-      let posting = postings.get(term); if (!posting) { posting = new Map(); postings.set(term, posting); } posting.set(id, count);
+      let posting = postings.get(term); if (!posting) { posting = { ids: [], counts: [] }; postings.set(term, posting); } posting.ids.push(id); posting.counts.push(count);
     }
   }
   Object.freeze(indexed);
@@ -408,14 +418,16 @@ export class DocumentIndex {
     }
     const queryTerms = [...new Set(terms(question))].sort(compare); if (queryTerms.length > 256) throw new RangeError('Search query contains more than 256 lexical terms');
     // Rare terms get admission priority when candidate scoring is capped, retaining late precise matches.
-    queryTerms.sort((a, b) => (this.state.postings.get(a)?.size ?? 0) - (this.state.postings.get(b)?.size ?? 0) || compare(a, b));
+    queryTerms.sort((a, b) => (this.state.postings.get(a)?.ids.length ?? 0) - (this.state.postings.get(b)?.ids.length ?? 0) || compare(a, b));
     const candidates = new Map<string, number>(); const matchedTerms: string[] = []; let candidateLimitReached = false;
     const state = this.state; const eligible = selected ? [...state.chunks.values()].filter(({ chunk }) => selected.has(chunk.documentId)).length : state.chunks.size;
     for (const term of queryTerms) {
       const posting = state.postings.get(term); if (!posting) continue;
       let matched = false;
-      const idf = Math.log(1 + (state.chunks.size - posting.size + 0.5) / (posting.size + 0.5));
-      for (const [id, frequency] of posting) {
+      const documentFrequency = posting.ids.length;
+      const idf = Math.log(1 + (state.chunks.size - documentFrequency + 0.5) / (documentFrequency + 0.5));
+      for (let index = 0; index < documentFrequency; index++) {
+        const id = posting.ids[index]!; const frequency = posting.counts[index]!;
         const entry = state.chunks.get(id)!; if (selected && !selected.has(entry.chunk.documentId)) continue;
         matched = true;
         if (!candidates.has(id) && candidates.size >= maxScored) { candidateLimitReached = true; continue; }
