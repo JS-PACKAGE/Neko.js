@@ -174,7 +174,10 @@ export async function hashBytes(bytes: Uint8Array | Uint8ClampedArray): Promise<
   const crypto: typeof NodeCrypto = await import(`${protocol}crypto`);
   return crypto.createHash('sha256').update(bytes).digest('hex');
 }
-export function hashValue(value: unknown): Promise<string> { return hashBytes(new TextEncoder().encode(canonical(value, new Set()))); }
+/** Canonical JSON: sorted keys, no `undefined` members. Hashing it is what `hashValue` does. */
+export function canonicalJson(value: unknown): string { return canonical(value, new Set()); }
+export function hashText(text: string): Promise<string> { return hashBytes(new TextEncoder().encode(text)); }
+export function hashValue(value: unknown): Promise<string> { return hashText(canonicalJson(value)); }
 
 const ownedPages = new WeakSet<Page>();
 const snapshots = new WeakMap<Page, Promise<PageSnapshot>>();

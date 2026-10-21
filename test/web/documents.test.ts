@@ -160,3 +160,55 @@ test('cancellation awaits native host inference ownership before rejecting', asy
   await entered.promise; controller.abort(); await Promise.resolve(); assert.equal(settled, false);
   release.resolve({ value: { status: 'insufficient-evidence', claims: [] } }); await assert.rejects(operation, { name: 'AbortError' });
 });
+
+test('incremental index updates are indistinguishable from rebuilding the same documents', async () => {
+  type Internal = { state: { chunks: Map<string, { chunk: unknown; length: number }>; postings: Map<string, Map<string, number>>; averageLength: number; snapshot: { documents: { id: string; versionId: string }[] } } };
+  const shape = (index: unknown) => {
+    const { state } = index as Internal;
+    return {
+      chunks: [...state.chunks].map(([id, entry]) => [id, entry.length, entry.chunk]),
+      // Posting order feeds candidate admission under maxScoredChunks, so it is part of the contract; term insertion order is not.
+      postings: [...state.postings].map(([term, posting]) => [term, [...posting]] as const).sort(([left], [right]) => left < right ? -1 : 1),
+      averageLength: state.averageLength,
+      versions: state.snapshot.documents.map(({ id, versionId }) => [id, versionId]),
+    };
+  };
+  const words = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', '漢字', '測試', 'omega'];
+  let seed = 3; const random = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32; };
+  const text = (length: number) => Array.from({ length }, () => words[Math.floor(random() * words.length)]! + (random() < 0.2 ? '.\n' : ' ')).join('');
+  const documents = new Map<string, DocumentInput>();
+  for (let index = 0; index < 12; index++) documents.set(`d${index}`, { id: `d${index}`, text: text(150 + index * 20) });
+  const options = { chunkSize: 200 };
+  const index = await createDocumentIndex([...documents.values()], options);
+  const steps: (() => Promise<void>)[] = [
+    () => { const next = { id: 'd3', text: text(300) }; documents.set('d3', next); return index.updateDocument(next); },
+    () => { const next = { id: 'a-new', text: text(120), title: 'Fresh' }; documents.set('a-new', next); return index.updateDocument(next); },
+    () => { documents.delete('d7'); return index.removeDocument('d7'); },
+    () => { const next = { id: 'zz', text: text(90) }; documents.set('zz', next); return index.updateDocument(next); },
+    // Replacing a document by itself changes nothing in content but must not disturb its neighbours.
+    () => { const same = { ...documents.get('d5')! }; return index.updateDocument(same); },
+    () => { documents.delete('a-new'); documents.delete('zz'); return Promise.all([index.removeDocument('a-new'), index.removeDocument('zz')]).then(() => undefined); },
+  ];
+  for (const [step, apply] of steps.entries()) {
+    await apply();
+    const rebuilt = await createDocumentIndex([...documents.values()], options);
+    assert.deepEqual(shape(index), shape(rebuilt), `after step ${step}`);
+    for (const query of ['alpha omega', '漢字', 'gamma beta delta', 'nothing']) {
+      const actual = index.search(query, { topK: 20 }); const expected = rebuilt.search(query, { topK: 20 });
+      assert.deepEqual(actual.hits.map(({ chunk, score }) => [chunk.id, score]), expected.hits.map(({ chunk, score }) => [chunk.id, score]));
+      assert.deepEqual(actual.coverage.matchedTerms, expected.coverage.matchedTerms);
+    }
+  }
+});
+
+test('snapshot IDs keep their persisted value, whether built from scratch or after an incremental update', async () => {
+  // Values produced by 1.6.1: the ID is a persisted contract (importDocumentIndex verifies it), so assembling the hashed JSON differently must not change it.
+  const index = await createDocumentIndex([
+    { id: 'b', text: 'Hello 漢字.\n\nWorld "quoted" \\ back', title: 'T', url: 'https://e.com/x' },
+    { id: 'a', text: 'Alpha beta', blocks: [{ id: 'k1', startOffset: 0, endOffset: 5, source: { kind: 'text' } }] },
+  ]);
+  assert.equal(index.id, '2c96cb8658617997f2c5abd9383a27e17d3ebcb2e045b310467b6da75a0567ae');
+  await index.updateDocument({ id: 'a', text: 'Alpha gamma' });
+  assert.equal(index.id, '90c122f867b45fa81e01fd8f4e2d4ea2c2b5ed8400d865f77cb80f2c9173a60a');
+  await importDocumentIndex(JSON.parse(JSON.stringify(index.exportSnapshot())));
+});

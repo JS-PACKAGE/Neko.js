@@ -1,5 +1,5 @@
 import type { Page } from '../types.js';
-import { hashValue, validatePage } from '../web/source.js';
+import { canonicalJson, hashText, validatePage } from '../web/source.js';
 import { NekoError } from '../errors.js';
 import { cosineRanking, EmbeddingStore, embedTexts, rankOrder, reciprocalRankFusion, semanticSettings, validateEmbedder, type DocumentEmbedder, type Ranked, type SemanticCoverage, type SemanticSearchSettings } from './semantic.js';
 
@@ -109,24 +109,28 @@ interface IndexState {
 }
 const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const stopwords: Record<string, true | undefined> = { a: true, an: true, and: true, are: true, as: true, at: true, be: true, by: true, for: true, from: true, how: true, in: true, is: true, it: true, of: true, on: true, or: true, that: true, the: true, this: true, to: true, was: true, what: true, when: true, where: true, which: true, who: true, with: true };
-const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const cjkClass = '\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}';
+const cjk = new RegExp(`[${cjkClass}]`, 'u');
+const segments = new RegExp(`([${cjkClass}]+)|[^${cjkClass}]+`, 'gu');
+/** No Han, kana or Hangul code point lies below U+1100, so plain Latin words never need the Unicode-property test. */
+function mayContainCjk(word: string): boolean {
+  for (let i = 0; i < word.length; i++) if (word.charCodeAt(i) >= 0x1100) return cjk.test(word);
+  return false;
+}
+/** Lowercase NFKC words, minus stopwords; CJK runs contribute every character and every adjacent pair. */
 function terms(text: string): string[] {
   const result: string[] = [];
-  for (const match of text.normalize('NFKC').toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
-    let word = ''; let run: string[] = [];
-    const flushRun = (): void => {
-      for (let i = 0; i < run.length; i++) {
-        result.push(run[i]!);
-        if (i + 1 < run.length) result.push(run[i]! + run[i + 1]!);
+  for (const [word] of text.normalize('NFKC').toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
+    // Most matches are plain words; only a match containing CJK needs segmenting.
+    if (!mayContainCjk(word)) { if (!Object.hasOwn(stopwords, word)) result.push(word); continue; }
+    for (const [segment, run] of word.matchAll(segments)) {
+      if (run === undefined) { if (!Object.hasOwn(stopwords, segment)) result.push(segment); continue; }
+      let previous: string | undefined;
+      for (const character of segment) {
+        if (previous !== undefined) result.push(previous + character);
+        result.push(character); previous = character;
       }
-      run = [];
-    };
-    const flushWord = (): void => { if (word && !Object.hasOwn(stopwords, word)) result.push(word); word = ''; };
-    for (const char of match[0]) {
-      if (cjk.test(char)) { flushWord(); run.push(char); }
-      else { flushRun(); word += char; }
     }
-    flushWord(); flushRun();
   }
   return result;
 }
@@ -201,44 +205,116 @@ function ranges(document: DocumentInput): { startOffset: number; endOffset: numb
   if (offset < document.text.length) result.push({ startOffset: offset, endOffset: document.text.length });
   return result;
 }
-async function build(documents: DocumentInput[], options: DocumentIndexConfig, revision: number): Promise<IndexState> {
+/** Indexed documents are deep-frozen snapshots, so their canonical JSON can be cached for the lifetime of the object. */
+const canonicalDocuments = new WeakMap<IndexedDocument, string>();
+function canonicalDocument(document: IndexedDocument): string {
+  let text = canonicalDocuments.get(document);
+  if (text === undefined) { text = canonicalJson(document); canonicalDocuments.set(document, text); }
+  return text;
+}
+interface CreatedChunk { id: string; entry: ChunkEntry; frequencies: Map<string, number>; }
+function chunkDocument(document: DocumentInput, versionId: string, options: DocumentIndexConfig, capacity: number): CreatedChunk[] {
+  const created: CreatedChunk[] = [];
+  for (const range of ranges(document)) {
+    let start = range.startOffset;
+    while (start < range.endOffset) {
+      let end = Math.min(start + options.chunkSize, range.endOffset);
+      if (!boundary(document.text, end)) end--;
+      // Prefer an existing paragraph/sentence boundary, but never drop intervening text.
+      if (end < range.endOffset) {
+        const slice = document.text.slice(start, end); let split = -1;
+        for (const match of slice.matchAll(/\n+|[.!?。！？]\s+/gu)) if (match.index + match[0].length >= options.chunkSize / 2) split = match.index + match[0].length;
+        if (split > 0) end = start + split;
+      }
+      const text = document.text.slice(start, end);
+      if (text.trim()) {
+        if (created.length >= capacity) throw new RangeError('Document index chunk capacity exceeded');
+        const id = JSON.stringify([document.id, start, end]);
+        const chunk: DocumentChunk = Object.freeze({ id, documentId: document.id, documentVersionId: versionId, versionId: `${versionId}:${start}:${end}`, startOffset: start, endOffset: end, text,
+          ...(range.block === undefined ? {} : { blockId: range.block.id, ...(range.block.source === undefined ? {} : { source: range.block.source }) }) });
+        const frequencies = new Map<string, number>(); const tokens = terms(text);
+        for (const term of tokens) frequencies.set(term, (frequencies.get(term) ?? 0) + 1);
+        created.push({ id, entry: { chunk, length: tokens.length }, frequencies });
+      }
+      start = end;
+    }
+  }
+  return created;
+}
+/**
+ * Builds the index state. With `previous` (same options), documents whose content is unchanged keep their version ID, chunks and
+ * postings; only changed, added and removed documents are re-tokenized. The result is identical to a from-scratch build.
+ */
+async function build(documents: DocumentInput[], options: DocumentIndexConfig, revision: number, previous?: IndexState): Promise<IndexState> {
   if (documents.length > options.maxDocuments || documents.reduce((n, doc) => n + doc.text.length, 0) > options.maxCharacters) throw new RangeError('Document index capacity exceeded');
   const sorted = [...documents].sort((a, b) => compare(a.id, b.id));
-  const indexed: IndexedDocument[] = []; const chunks = new Map<string, ChunkEntry>(); const postings = new Map<string, Map<string, number>>(); let totalLength = 0;
+  const priorDocuments = previous?.snapshot.options === options ? new Map(previous.snapshot.documents.map((document) => [document.id, document])) : undefined;
+  const unchanged = (document: DocumentInput): IndexedDocument | undefined => {
+    const prior = priorDocuments?.get(document.id);
+    return prior && prior.text === document.text && prior.title === document.title && prior.url === document.url && prior.blocks === document.blocks ? prior : undefined;
+  };
+  // Patching only pays off while most of the corpus is untouched.
+  let changedCharacters = 0; let totalCharacters = 0;
+  for (const document of sorted) { totalCharacters += document.text.length; if (!unchanged(document)) changedCharacters += document.text.length; }
+  const incremental = previous !== undefined && priorDocuments !== undefined && changedCharacters * 2 < totalCharacters;
+  const priorChunks = new Map<string, ChunkEntry[]>();
+  if (incremental) for (const entry of previous.chunks.values()) { const list = priorChunks.get(entry.chunk.documentId); if (list) list.push(entry); else priorChunks.set(entry.chunk.documentId, [entry]); }
+  const indexed: IndexedDocument[] = []; const chunks = new Map<string, ChunkEntry>(); const created: CreatedChunk[] = []; let totalLength = 0;
+  const keptDocuments = new Set<string>();
   for (const document of sorted) {
     if (indexed.at(-1)?.id === document.id) throw new TypeError('Duplicate document ID');
-    const versionId = await hashValue(document); indexed.push(Object.freeze({ ...document, versionId }));
-    for (const range of ranges(document)) {
-      let start = range.startOffset;
-      while (start < range.endOffset) {
-        let end = Math.min(start + options.chunkSize, range.endOffset);
-        if (!boundary(document.text, end)) end--;
-        // Prefer an existing paragraph/sentence boundary, but never drop intervening text.
-        if (end < range.endOffset) {
-          const slice = document.text.slice(start, end); let split = -1;
-          for (const match of slice.matchAll(/\n+|[.!?。！？]\s+/gu)) if (match.index + match[0].length >= options.chunkSize / 2) split = match.index + match[0].length;
-          if (split > 0) end = start + split;
-        }
-        const text = document.text.slice(start, end);
-        if (text.trim()) {
-          if (chunks.size >= options.maxChunks) throw new RangeError('Document index chunk capacity exceeded');
-          const id = JSON.stringify([document.id, start, end]);
-          const chunk: DocumentChunk = Object.freeze({ id, documentId: document.id, documentVersionId: versionId, versionId: `${versionId}:${start}:${end}`, startOffset: start, endOffset: end, text,
-            ...(range.block === undefined ? {} : { blockId: range.block.id, ...(range.block.source === undefined ? {} : { source: range.block.source }) }) });
-          const frequencies = new Map<string, number>(); const tokens = terms(text);
-          for (const term of tokens) frequencies.set(term, (frequencies.get(term) ?? 0) + 1);
-          chunks.set(id, { chunk, length: tokens.length }); totalLength += tokens.length;
-          for (const [term, count] of frequencies) {
-            let posting = postings.get(term); if (!posting) { posting = new Map(); postings.set(term, posting); } posting.set(id, count);
-          }
-        }
-        start = end;
-      }
+    const prior = incremental ? unchanged(document) : undefined;
+    let versionId: string; let entries: { id: string; entry: ChunkEntry }[]; let canonicalText: string | undefined;
+    if (prior) {
+      versionId = prior.versionId; keptDocuments.add(document.id);
+      entries = (priorChunks.get(document.id) ?? []).map((entry) => ({ id: entry.chunk.id, entry }));
+    } else {
+      canonicalText = canonicalJson(document); versionId = await hashText(canonicalText);
+      const fresh = chunkDocument(document, versionId, options, options.maxChunks - chunks.size);
+      for (const item of fresh) created.push(item);
+      entries = fresh;
+    }
+    const indexedDocument = prior ?? Object.freeze({ ...document, versionId });
+    // 'versionId' sorts after every other document key, so the indexed form is the hashed form with one member appended.
+    if (canonicalText !== undefined) canonicalDocuments.set(indexedDocument, `${canonicalText.slice(0, -1)},"versionId":${JSON.stringify(versionId)}}`);
+    indexed.push(indexedDocument);
+    for (const { id, entry } of entries) {
+      if (chunks.size >= options.maxChunks) throw new RangeError('Document index chunk capacity exceeded');
+      chunks.set(id, entry); totalLength += entry.length;
+    }
+  }
+  const postings = new Map<string, Map<string, number>>();
+  if (incremental) {
+    // Postings of untouched terms are immutable and shared with the previous state; only terms of changed, removed or added chunks are rebuilt.
+    for (const [term, posting] of previous.postings) postings.set(term, posting);
+    const removed = new Set<string>(); const touched = new Set<string>();
+    for (const entry of previous.chunks.values()) {
+      if (keptDocuments.has(entry.chunk.documentId)) continue;
+      removed.add(entry.chunk.id); for (const term of terms(entry.chunk.text)) touched.add(term);
+    }
+    const additions = new Map<string, [string, number][]>();
+    for (const { id, frequencies } of created) for (const [term, count] of frequencies) {
+      touched.add(term); const list = additions.get(term); if (list) list.push([id, count]); else additions.set(term, [[id, count]]);
+    }
+    const order = new Map<string, number>(); let position = 0;
+    for (const id of chunks.keys()) order.set(id, position++);
+    for (const term of touched) {
+      const entries: [string, number][] = [];
+      for (const item of previous.postings.get(term) ?? []) if (!removed.has(item[0])) entries.push(item);
+      const added = additions.get(term);
+      if (added) { for (const item of added) entries.push(item); entries.sort((left, right) => order.get(left[0])! - order.get(right[0])!); }
+      if (entries.length) postings.set(term, new Map(entries)); else postings.delete(term);
+    }
+  } else {
+    for (const { id, frequencies } of created) for (const [term, count] of frequencies) {
+      let posting = postings.get(term); if (!posting) { posting = new Map(); postings.set(term, posting); } posting.set(id, count);
     }
   }
   Object.freeze(indexed);
   const payload = { format: 'neko-document-index' as const, version: 1 as const, algorithm: 'bm25-cjk-v1' as const, revision, options, documents: indexed };
-  return { snapshot: Object.freeze({ ...payload, id: await hashValue(payload) }), chunks, postings, averageLength: chunks.size ? totalLength / chunks.size : 0 };
+  // Equal to hashValue(payload) (keys sorted: algorithm, documents, format, options, revision, version) without re-serializing unchanged documents.
+  const canonicalPayload = `{"algorithm":"bm25-cjk-v1","documents":[${indexed.map(canonicalDocument).join(',')}],"format":"neko-document-index","options":${canonicalJson(options)},"revision":${revision},"version":1}`;
+  return { snapshot: Object.freeze({ ...payload, id: await hashText(canonicalPayload) }), chunks, postings, averageLength: chunks.size ? totalLength / chunks.size : 0 };
 }
 function unversioned(document: IndexedDocument): DocumentInput {
   return { id: document.id, text: document.text, ...(document.title === undefined ? {} : { title: document.title }), ...(document.url === undefined ? {} : { url: document.url }), ...(document.blocks === undefined ? {} : { blocks: document.blocks }) };
@@ -283,7 +359,7 @@ export class DocumentIndex {
     const operation = this.pending.then(async () => {
       integer(this.revision + 1, 1, Number.MAX_SAFE_INTEGER, 'Index revision');
       const next = change(this.state.snapshot.documents.map(unversioned));
-      const state = await build(next, this.state.snapshot.options, this.revision + 1); this.state = state;
+      const state = await build(next, this.state.snapshot.options, this.revision + 1, this.state); this.state = state;
       this.embeddings.retain(new Set([...state.chunks.values()].map(({ chunk }) => chunk.versionId)));
     });
     this.pending = operation.catch(() => undefined); return operation;
