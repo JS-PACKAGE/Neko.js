@@ -24,13 +24,24 @@ const limits = [
 ];
 const values = (text: string, kind: AuditKind) => [...new Set(Array.from(text.matchAll(patterns[kind]), (match) => match[0]))];
 const normalized = (text: string) => text.replace(/\s+/gu, ' ').trim().replace(/[.!?。！？]+$/u, '');
+const byIdCache = new WeakMap<readonly { id: string }[], Map<string, { id: string }>>();
+/** First entry per ID, like `Array.find`. Frozen arrays (SDK snapshots) are indexed once; others are indexed per call so later mutation is never served stale. */
+function byId<T extends { id: string }>(list: readonly T[]): Map<string, T> {
+  let index = byIdCache.get(list) as Map<string, T> | undefined;
+  if (index) return index;
+  index = new Map();
+  for (const item of list) if (!index.has(item.id)) index.set(item.id, item);
+  if (Object.isFrozen(list)) byIdCache.set(list, index);
+  return index;
+}
 
 /** Deliberately recognizes only exact quotations and narrowly aligned lexical conflicts. */
 export function auditClaim(text: string, citations: readonly Citation[], snapshot?: PageSnapshot): ClaimAudit {
+  const paragraphs = snapshot && byId(snapshot.source.paragraphs); const versions = snapshot && byId(snapshot.paragraphs);
   const quotes = citations.filter((citation): citation is Extract<Citation, { kind: 'quote' }> => citation.kind === 'quote').filter((citation) => {
     if (!snapshot) return true;
-    const paragraph = snapshot.source.paragraphs.find(({ id }) => id === citation.paragraphId);
-    return citation.snapshotId === snapshot.id && Number.isSafeInteger(citation.startOffset) && Number.isSafeInteger(citation.endOffset) && citation.startOffset >= 0 && citation.endOffset > citation.startOffset && paragraph !== undefined && citation.endOffset <= paragraph.text.length && citation.versionId === snapshot.paragraphs.find(({ id }) => id === citation.paragraphId)?.versionId && paragraph.text.slice(citation.startOffset, citation.endOffset) === citation.quote;
+    const paragraph = paragraphs!.get(citation.paragraphId);
+    return citation.snapshotId === snapshot.id && Number.isSafeInteger(citation.startOffset) && Number.isSafeInteger(citation.endOffset) && citation.startOffset >= 0 && citation.endOffset > citation.startOffset && paragraph !== undefined && citation.endOffset <= paragraph.text.length && citation.versionId === versions!.get(citation.paragraphId)?.versionId && paragraph.text.slice(citation.startOffset, citation.endOffset) === citation.quote;
   }).map(({ quote }) => quote);
   const exact = text.length > 0 && quotes.some((quote) => quote.includes(text));
   const conflicts = new Set<AuditKind>();
