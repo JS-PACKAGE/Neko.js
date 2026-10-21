@@ -42,6 +42,10 @@ for (const [entryPoint, outfile] of browserEntries) {
       banner: { js: 'const __nekoWorkerModuleUrl = self.name; const __nekoWorkerLocation = new URL(__nekoWorkerModuleUrl);' },
     } : {}),
     sourcemap: true,
+    // Browsers download these bundles; the maps keep stack traces readable. minifySyntax is omitted on purpose: it folds the computed
+    // `${'node:'}crypto` imports into literals, which makes consumers' bundlers try to resolve Node built-ins.
+    minifyWhitespace: true,
+    minifyIdentifiers: true,
     legalComments: 'external',
   });
 }
