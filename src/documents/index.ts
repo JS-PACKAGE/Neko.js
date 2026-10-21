@@ -106,6 +106,7 @@ interface IndexState {
   chunks: Map<string, ChunkEntry>;
   postings: Map<string, Map<string, number>>;
   averageLength: number;
+  documents: Map<string, IndexedDocument>;
 }
 const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const stopwords: Record<string, true | undefined> = { a: true, an: true, and: true, are: true, as: true, at: true, be: true, by: true, for: true, from: true, how: true, in: true, is: true, it: true, of: true, on: true, or: true, that: true, the: true, this: true, to: true, was: true, what: true, when: true, where: true, which: true, who: true, with: true };
@@ -314,7 +315,7 @@ async function build(documents: DocumentInput[], options: DocumentIndexConfig, r
   const payload = { format: 'neko-document-index' as const, version: 1 as const, algorithm: 'bm25-cjk-v1' as const, revision, options, documents: indexed };
   // Equal to hashValue(payload) (keys sorted: algorithm, documents, format, options, revision, version) without re-serializing unchanged documents.
   const canonicalPayload = `{"algorithm":"bm25-cjk-v1","documents":[${indexed.map(canonicalDocument).join(',')}],"format":"neko-document-index","options":${canonicalJson(options)},"revision":${revision},"version":1}`;
-  return { snapshot: Object.freeze({ ...payload, id: await hashText(canonicalPayload) }), chunks, postings, averageLength: chunks.size ? totalLength / chunks.size : 0 };
+  return { snapshot: Object.freeze({ ...payload, id: await hashText(canonicalPayload) }), chunks, postings, averageLength: chunks.size ? totalLength / chunks.size : 0, documents: new Map(indexed.map((document) => [document.id, document])) };
 }
 function unversioned(document: IndexedDocument): DocumentInput {
   return { id: document.id, text: document.text, ...(document.title === undefined ? {} : { title: document.title }), ...(document.url === undefined ? {} : { url: document.url }), ...(document.blocks === undefined ? {} : { blocks: document.blocks }) };
@@ -354,7 +355,7 @@ export class DocumentIndex {
   get chunkCount(): number { return this.state.chunks.size; }
   /** Immutable snapshot; JSON.stringify is suitable for caller-managed local persistence. */
   exportSnapshot(): DocumentIndexSnapshot { return this.state.snapshot; }
-  getDocument(id: string): IndexedDocument | undefined { return this.state.snapshot.documents.find((document) => document.id === id); }
+  getDocument(id: string): IndexedDocument | undefined { return this.state.documents.get(id); }
   private mutate(change: (documents: DocumentInput[]) => DocumentInput[]): Promise<void> {
     const operation = this.pending.then(async () => {
       integer(this.revision + 1, 1, Number.MAX_SAFE_INTEGER, 'Index revision');
