@@ -14,6 +14,18 @@ export interface GrammarSchema {
   enum?: readonly unknown[];
 }
 const anySchema: GrammarSchema = { type: 'any' };
+const sortedStrings = new WeakMap<readonly unknown[], readonly string[]>();
+function sortedEnumStrings(values: readonly unknown[]): readonly string[] {
+  let sorted = sortedStrings.get(values);
+  if (!sorted) { sorted = values.filter((value): value is string => typeof value === 'string').sort(); sortedStrings.set(values, sorted); }
+  return sorted;
+}
+/** Strings sharing a prefix are contiguous from the first entry that is not below it. */
+function anyStartsWith(sorted: readonly string[], prefix: string): boolean {
+  let low = 0; let high = sorted.length;
+  while (low < high) { const middle = (low + high) >>> 1; if (sorted[middle]! < prefix) low = middle + 1; else high = middle; }
+  return low < sorted.length && sorted[low]!.startsWith(prefix);
+}
 const canonical = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value !== null && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`;
@@ -51,7 +63,7 @@ export class JsonGrammarState {
     if (copy.lexeme?.kind === 'number' && !copy.finishNumber()) return false;
     return copy.rootDone && !copy.lexeme;
   }
-  push(bytes: Uint8Array): boolean { for (const byte of bytes) if (!this.pushByte(byte)) return false; return true; }
+  push(bytes: Uint8Array, start = 0, end = bytes.length): boolean { for (let at = start; at < end; at++) if (!this.pushByte(bytes[at]!)) return false; return true; }
   pushByte(byte: number): boolean {
     if (this.utfRemaining) {
       if (byte < 0x80 || byte > 0xbf) return false;
@@ -79,13 +91,15 @@ export class JsonGrammarState {
     const frame = this.frames.at(-1);
     return token.key && frame?.schema.type === 'object'
       ? Object.keys(frame.schema.properties ?? {}).filter((key) => !Object.hasOwn(frame.value, key))
-      : token.schema.enum?.filter((value): value is string => typeof value === 'string');
+      : token.schema.enum && sortedEnumStrings(token.schema.enum) as string[];
   }
   private stringPrefix(): boolean {
     const token = this.lexeme!;
     if (token.schema.maxLength !== undefined && Array.from(token.text).length > token.schema.maxLength) return false;
-    const candidates = this.stringCandidates();
-    return candidates === undefined || candidates.some((value) => value.startsWith(token.text));
+    const frame = this.frames.at(-1);
+    if (token.key && frame?.schema.type === 'object') return this.stringCandidates()!.some((value) => value.startsWith(token.text));
+    // Enumerations can hold thousands of paragraph IDs; test the prefix against a sorted copy built once per enum.
+    return token.schema.enum === undefined || anyStartsWith(sortedEnumStrings(token.schema.enum), token.text);
   }
   private valid(schema: GrammarSchema, value: unknown): boolean {
     if (schema.enum && !schema.enum.some((candidate) => canonical(candidate) === canonical(value))) return false;
@@ -119,9 +133,15 @@ export class JsonGrammarState {
     const parent = this.frames.at(-1);
     if (schema.enum && parent?.schema.uniqueItems && Array.isArray(parent.value)) {
       const usedValues = parent.value;
-      const remaining = schema.enum.filter((candidate) => !usedValues.some((used) => canonical(candidate) === canonical(used)));
-      if (!remaining.length) return false;
-      schema = { ...schema, enum: remaining };
+      if (!usedValues.length) { if (!schema.enum.length) return false; }
+      else {
+        const used = new Set(usedValues.map(canonical));
+        const remaining = schema.enum.filter((candidate) => !used.has(canonical(candidate)));
+        if (!remaining.length) return false;
+        // Filtering keeps order, so the remainder's sorted copy needs no re-sort.
+        sortedStrings.set(remaining, sortedEnumStrings(schema.enum).filter((value) => !used.has(JSON.stringify(value))));
+        schema = { ...schema, enum: remaining };
+      }
     }
     const accepts = (type: GrammarSchema['type']) => schema.type === 'any' || schema.type === type;
     if (character === '{' && accepts('object')) { this.frames.push({ schema, value: {}, phase: 'key' }); return true; }
@@ -227,9 +247,10 @@ class FlatTrie {
     this.edge = new Uint8Array(capacity); this.head = new Int32Array(capacity).fill(-1);
     this.link = new Int32Array(entries).fill(-1);
   }
-  insert(bytes: Uint8Array, entry: number): void {
+  insert(data: Uint8Array, start: number, end: number, entry: number): void {
     let node = 0;
-    for (const byte of bytes) {
+    for (let at = start; at < end; at++) {
+      const byte = data[at]!;
       let child = this.first[node]!;
       while (child !== -1 && this.edge[child] !== byte) child = this.sibling[child]!;
       if (child === -1) { child = this.nodes++; this.edge[child] = byte; this.sibling[child] = this.first[node]!; this.first[node] = child; }
@@ -250,6 +271,16 @@ class FlatTrie {
     visit(0, state);
   }
 }
+/** Non-empty token byte strings packed back to back: entry `i` is `data[offsets[i]..offsets[i + 1]]` for token `ids[i]`. */
+export interface PackedTokenPieces { ids: Int32Array; offsets: Uint32Array; data: Uint8Array; }
+function packPieces(input: Iterable<readonly [number, Uint8Array]>): PackedTokenPieces {
+  const pieces = Array.from(input).filter(([, bytes]) => bytes.length);
+  let total = 0;
+  for (const [, bytes] of pieces) total += bytes.length;
+  const ids = new Int32Array(pieces.length); const offsets = new Uint32Array(pieces.length + 1); const data = new Uint8Array(total);
+  pieces.forEach(([id, bytes], entry) => { ids[entry] = id; data.set(bytes, offsets[entry]!); offsets[entry + 1] = offsets[entry]! + bytes.length; });
+  return { ids, offsets, data };
+}
 export class TokenByteTrie {
   /** Token bytes by ID; entries are views into one shared buffer. */
   readonly pieces: { get(id: number): Uint8Array | undefined; readonly size: number };
@@ -259,45 +290,68 @@ export class TokenByteTrie {
   private readonly structural: Uint8Array;
   private readonly offsets: Uint32Array;
   private readonly data: Uint8Array;
-  private readonly continuations = new Map<number, number[]>();
-  constructor(input: Iterable<readonly [number, Uint8Array]>) {
-    const pieces = Array.from(input).filter(([, bytes]) => bytes.length);
-    let total = 0; let maxId = -1;
-    for (const [id, bytes] of pieces) { total += bytes.length; if (id > maxId) maxId = id; }
-    this.ids = new Int32Array(pieces.length); this.offsets = new Uint32Array(pieces.length + 1);
-    this.data = new Uint8Array(total); this.structural = new Uint8Array(pieces.length);
-    const slots = new Int32Array(maxId + 1).fill(-1);
+  private readonly continuations = new Map<number, Uint8Array>();
+  private readonly slotCount: number;
+  constructor(input: Iterable<readonly [number, Uint8Array]> | PackedTokenPieces) {
+    const { ids, offsets, data } = Symbol.iterator in input ? packPieces(input) : input;
+    const count = ids.length; const total = data.length;
+    this.ids = ids; this.offsets = offsets; this.data = data; this.structural = new Uint8Array(count);
+    let maxId = -1;
+    for (const id of ids) if (id > maxId) maxId = id;
+    const slots = new Int32Array(maxId + 1).fill(-1); this.slotCount = maxId + 1;
     let structuralBytes = 0;
-    pieces.forEach(([id, bytes], entry) => {
-      this.ids[entry] = id; slots[id] = entry; this.data.set(bytes, this.offsets[entry]!); this.offsets[entry + 1] = this.offsets[entry]! + bytes.length;
-      for (const byte of bytes) if (byte < 32 || byte === 34 || byte === 92) { this.structural[entry] = 1; structuralBytes += bytes.length; break; }
-    });
-    const view = (entry: number) => this.data.subarray(this.offsets[entry]!, this.offsets[entry + 1]!);
-    this.pieces = { size: pieces.length, get: (id) => { const entry = id >= 0 && id < slots.length ? slots[id]! : -1; return entry < 0 ? undefined : view(entry); } };
-    this.root = new FlatTrie(total + 1, pieces.length); this.structuralRoot = new FlatTrie(structuralBytes + 1, pieces.length);
-    for (let entry = 0; entry < pieces.length; entry++) {
-      this.root.insert(view(entry), entry);
-      if (this.structural[entry]) this.structuralRoot.insert(view(entry), entry);
+    for (let entry = 0; entry < count; entry++) {
+      slots[ids[entry]!] = entry;
+      for (let at = offsets[entry]!, end = offsets[entry + 1]!; at < end; at++) { const byte = data[at]!; if (byte < 32 || byte === 34 || byte === 92) { this.structural[entry] = 1; structuralBytes += end - offsets[entry]!; break; } }
+    }
+    this.pieces = { size: count, get: (id) => { const entry = id >= 0 && id < slots.length ? slots[id]! : -1; return entry < 0 ? undefined : data.subarray(offsets[entry]!, offsets[entry + 1]!); } };
+    this.root = new FlatTrie(total + 1, count); this.structuralRoot = new FlatTrie(structuralBytes + 1, count);
+    for (let entry = 0; entry < count; entry++) {
+      this.root.insert(data, offsets[entry]!, offsets[entry + 1]!, entry);
+      if (this.structural[entry]) this.structuralRoot.insert(data, offsets[entry]!, offsets[entry + 1]!, entry);
     }
     this.root.trim(); this.structuralRoot.trim();
+  }
+  /** Ordinary string pieces for one pending-UTF-8 class, as a bitmap by token ID; built once and shared by every later token in a string. */
+  private continuation(continuation: number): Uint8Array {
+    let allowed = this.continuations.get(continuation);
+    if (!allowed) {
+      const seed = new JsonGrammarState({ type: 'string' });
+      seed.pushByte(34);
+      if (continuation) seed.pushByte(utfLeadBytes[continuation]!);
+      allowed = new Uint8Array(this.slotCount);
+      for (let entry = 0; entry < this.ids.length; entry++) {
+        if (this.structural[entry]) continue;
+        const start = this.offsets[entry]!; const end = this.offsets[entry + 1]!;
+        // With no UTF-8 sequence pending, every non-structural ASCII piece is accepted; while a continuation byte is owed, a leading ASCII byte is rejected.
+        if (this.data[start]! < 0x80) {
+          if (continuation !== 0) continue;
+          let ascii = true;
+          for (let at = start + 1; at < end; at++) if (this.data[at]! >= 0x80) { ascii = false; break; }
+          if (ascii) { allowed[this.ids[entry]!] = 1; continue; }
+        }
+        if (seed.clone().push(this.data, start, end)) allowed[this.ids[entry]!] = 1;
+      }
+      this.continuations.set(continuation, allowed);
+    }
+    return allowed;
   }
   allowed(state: JsonGrammarState, deliver: (id: number) => void): void {
     const continuation = state.freeStringClass;
     if (continuation !== null) {
-      let allowed = this.continuations.get(continuation);
-      if (!allowed) {
-        const seed = new JsonGrammarState({ type: 'string' });
-        seed.pushByte(34);
-        if (continuation) seed.pushByte(utfLeadBytes[continuation]!);
-        allowed = [];
-        for (let entry = 0; entry < this.ids.length; entry++) {
-          if (!this.structural[entry] && seed.clone().push(this.data.subarray(this.offsets[entry]!, this.offsets[entry + 1]!))) allowed.push(this.ids[entry]!);
-        }
-        this.continuations.set(continuation, allowed);
-      }
-      for (const id of allowed) deliver(id);
+      const allowed = this.continuation(continuation);
+      for (let id = 0; id < allowed.length; id++) if (allowed[id]) deliver(id);
     }
     (continuation === null ? this.root : this.structuralRoot).walk(state, this.ids, deliver);
+  }
+  /** Set `mask[id] = 1` for every allowed token. Equivalent to `allowed`, but a free string is one bulk copy rather than a call per token. */
+  mark(state: JsonGrammarState, mask: Uint8Array): void {
+    const continuation = state.freeStringClass;
+    if (continuation !== null) {
+      const allowed = this.continuation(continuation);
+      mask.set(allowed.length > mask.length ? allowed.subarray(0, mask.length) : allowed);
+    }
+    (continuation === null ? this.root : this.structuralRoot).walk(state, this.ids, (id) => { if (id < mask.length) mask[id] = 1; });
   }
 }
 export interface ByteLevelTokenizer {
@@ -309,23 +363,38 @@ export interface ByteLevelTokenizer {
 export function tokenizerByteTrie(tokenizer: ByteLevelTokenizer): TokenByteTrie {
   const decoder: unknown = tokenizer._tokenizerJSON?.decoder;
   if (typeof decoder !== 'object' || decoder === null || !('type' in decoder) || decoder.type !== 'ByteLevel') throw new NekoError('Constrained decoding requires the pinned ByteLevel tokenizer decoder', 'preprocess', 'SCHEMA_UNSUPPORTED');
-  const visible = Array.from({ length: 256 }, (_, byte) => byte).filter((byte) => byte >= 33 && byte <= 126 || byte >= 161 && byte <= 172 || byte >= 174);
-  const mapping = new Map<string, number>();
-  for (const byte of visible) mapping.set(String.fromCharCode(byte), byte);
-  let code = 256;
-  for (let byte = 0; byte < 256; byte++) if (!visible.includes(byte)) mapping.set(String.fromCharCode(code++), byte);
-  const specials = new Set(tokenizer.all_special_ids);
-  const added = new Map<number, string>();
-  for (const token of tokenizer._tokenizerJSON.added_tokens ?? []) if (!token.special) added.set(token.id, token.content);
-  const pieces: [number, Uint8Array][] = [];
-  for (const [token, id] of tokenizer.get_vocab()) {
-    if (specials.has(id)) continue;
-    if (added.has(id)) { pieces.push([id, new TextEncoder().encode(added.get(id)!)]); continue; }
-    const bytes = Array.from(token, (character) => mapping.get(character));
-    if (bytes.some((byte) => byte === undefined)) throw new NekoError('Tokenizer vocabulary is incompatible with ByteLevel decoding', 'preprocess', 'SCHEMA_UNSUPPORTED');
-    pieces.push([id, Uint8Array.from(bytes as number[])]);
+  const lookup = new Int16Array(0x200).fill(-1);
+  for (let byte = 0, code = 256; byte < 256; byte++) {
+    const visible = byte >= 33 && byte <= 126 || byte >= 161 && byte <= 172 || byte >= 174;
+    lookup[visible ? byte : code++] = byte;
   }
-  return new TokenByteTrie(pieces);
+  const specials = new Set(tokenizer.all_special_ids);
+  const added = new Map<number, Uint8Array>();
+  const encoder = new TextEncoder();
+  for (const token of tokenizer._tokenizerJSON.added_tokens ?? []) if (!token.special) added.set(token.id, encoder.encode(token.content));
+  const vocabulary: (readonly [string, number])[] = [];
+  let total = 0;
+  for (const entry of tokenizer.get_vocab()) {
+    const [token, id] = entry;
+    if (specials.has(id)) continue;
+    const length = added.get(id)?.length ?? token.length;
+    if (!length) continue;
+    vocabulary.push(entry); total += length;
+  }
+  const ids = new Int32Array(vocabulary.length); const offsets = new Uint32Array(vocabulary.length + 1); const data = new Uint8Array(total);
+  let position = 0;
+  vocabulary.forEach(([token, id], entry) => {
+    ids[entry] = id; offsets[entry] = position;
+    const encoded = added.get(id);
+    if (encoded) { data.set(encoded, position); position += encoded.length; return; }
+    for (let index = 0; index < token.length; index++) {
+      const byte = token.charCodeAt(index) < lookup.length ? lookup[token.charCodeAt(index)]! : -1;
+      if (byte < 0) throw new NekoError('Tokenizer vocabulary is incompatible with ByteLevel decoding', 'preprocess', 'SCHEMA_UNSUPPORTED');
+      data[position++] = byte;
+    }
+  });
+  offsets[vocabulary.length] = position;
+  return new TokenByteTrie({ ids, offsets, data });
 }
 interface Logits { dims: number[]; data: ArrayLike<number | bigint>; }
 interface GrammarProcessor { <T extends Logits>(ids: bigint[][], logits: T): T; _call<T extends Logits>(ids: bigint[][], logits: T): T; }
@@ -343,7 +412,7 @@ class GrammarProcessorImplementation extends LogitsProcessor {
     }
     const width = logits.dims.at(-1)!;
     this.mask ??= new Uint8Array(width); this.mask.fill(0);
-    this.trie.allowed(this.state, (id) => { if (id < width) this.mask![id] = 1; });
+    this.trie.mark(this.state, this.mask);
     if (this.state.complete) for (const id of this.eos) if (id < width) this.mask[id] = 1;
     const data = logits.data as Float32Array;
     let possible = false;

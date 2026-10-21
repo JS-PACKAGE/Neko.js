@@ -176,3 +176,19 @@ test('flat token trie exposes exact bytes for sparse IDs, skips empty pieces and
   trie.allowed(string, (id) => inString.push(id));
   assert.deepEqual(inString.sort((a, b) => a - b), [3, 12, 13, 900]);
 });
+
+test('enum string prefixes accept exactly the prefixes of remaining unique values, however large the enumeration', () => {
+  const values = ['p1', 'p10', 'p100', 'p11', 'p2', 'p20', 'q', '', 'é', 'p1x'];
+  const compiled = compileStructuredSchema({ type: 'array', uniqueItems: true, items: { type: 'string', enum: values } }).grammar!;
+  const accepts = (text: string): boolean => new JsonGrammarState(compiled).push(encoder.encode(text));
+  // Every prefix of every candidate (and a few near misses) against a brute-force reference, before and after one value is used.
+  for (const used of [[], ['p1'], ['p1', 'p10']]) {
+    const remaining = values.filter((value) => !used.includes(value));
+    const head = '[' + used.map((value) => JSON.stringify(value)).join(',') + (used.length ? ',' : '');
+    const probes = new Set<string>(['p', 'p3', 'p1000', 'x', 'p1x', 'p1xx', 'é', '']);
+    for (const value of values) for (let length = 0; length <= value.length; length++) probes.add(value.slice(0, length));
+    for (const probe of probes) assert.equal(accepts(`${head}"${probe}`), remaining.some((candidate) => candidate.startsWith(probe)), `${used.join('+')} / "${probe}"`);
+    // A used value is closed to repetition but its extensions that are still unused stay reachable.
+    for (const value of used) assert.equal(accepts(`${head}${JSON.stringify(value)}`), false);
+  }
+});
