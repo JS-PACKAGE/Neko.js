@@ -17,7 +17,7 @@ import { compileStructuredSchema, type SchemaValue } from './core/structured.js'
 import { activeRequestSignal, setActiveRequest, workerExecution } from './runtime/context.js';
 import { inferenceChat, validateInferenceOptions } from './core/preflight.js';
 import { createInferenceStream, type InferStreamOptions, type InferenceStreamEvent } from './runtime/stream.js';
-import { planTextInference } from './core/tokenizer.js';
+import { forgetPinnedTextResources, planTextInference } from './core/tokenizer.js';
 import { createConversationSession, type ConversationSession, type SessionOptions } from './core/session.js';
 import { assertHardDeadlineUnsupported, createRuntimeDiagnostics, validateHealthOptions, type HealthOptions, type RuntimeHealth, type RuntimeDiagnostics } from './runtime/diagnostics.js';
 import { queuedReadable } from './queued-stream.js';
@@ -141,7 +141,7 @@ class LocalNeko implements Neko {
       model: {
         prefetch: (signal) => this.run('cache', signal, (abort) => installation.prefetch(abort)),
         status: (signal) => this.run('cache', signal, (abort) => installation.status(abort)),
-        clear: (signal) => this.run('cache', signal, async (abort) => { await engines.release(); this.readiness = null; abort.throwIfAborted(); await installation.clear(abort); }),
+        clear: (signal) => this.run('cache', signal, async (abort) => { await engines.release(); forgetPinnedTextResources(); this.readiness = null; abort.throwIfAborted(); await installation.clear(abort); }),
         exportBundle: (signal) => {
           this.checkRequest('cache', signal);
           return queuedReadable((abort, operation) => this.run('cache', abort, operation), (abort) => installation.exportBundle(abort), signal);
@@ -149,7 +149,7 @@ class LocalNeko implements Neko {
         importBundle: (source, signal) => this.run('cache', signal, (abort) => installation.importBundle(source, abort)),
         diagnostics: (signal) => this.run('cache', signal, (abort) => installation.diagnostics(abort)),
       },
-      engine: { status: async () => { if (this.closed) throw new NekoError('Neko is disposed', 'cache', 'DISPOSED'); return engines.status(); }, release: () => this.run('cache', undefined, async () => { await engines.release(); this.readiness = null; }) },
+      engine: { status: async () => { if (this.closed) throw new NekoError('Neko is disposed', 'cache', 'DISPOSED'); return engines.status(); }, release: () => this.run('cache', undefined, async () => { await engines.release(); forgetPinnedTextResources(); this.readiness = null; }) },
     };
     this.backend = { current: async () => { if (this.closed) throw new NekoError('Neko is disposed', 'backend', 'DISPOSED'); return backend; }, detect: (device = backend.device, signal) => this.run('backend', signal, () => inspectBackend(device, options.modelProfile)) };
   }

@@ -1,4 +1,4 @@
-import { AutoImageProcessor, Qwen3VLProcessor, TokenizersBackend, Qwen3_5ForConditionalGeneration, RawImage, TextStreamer, Tensor, DynamicCache, InterruptableStoppingCriteria, LogitsProcessorList, cat, type PreTrainedModel, type Processor } from '@huggingface/transformers';
+import { AutoImageProcessor, Qwen3VLProcessor, Qwen3_5ForConditionalGeneration, RawImage, TextStreamer, Tensor, DynamicCache, InterruptableStoppingCriteria, LogitsProcessorList, cat, type PreTrainedModel, type Processor } from '@huggingface/transformers';
 import type * as NodeOs from 'node:os';
 import { type ModelProfileId, type ModelDtype } from '../cache/manifest.js';
 import { getRegisteredModelProfile, type ModelId } from '../cache/registry.js';
@@ -14,7 +14,7 @@ import type { ExecutionInfo, GenerationStateHandle, InferenceReuseOptions, Infer
 import { inferenceChat, validateInferenceOptions } from './preflight.js';
 import { JsonBoundary } from './json-boundary.js';
 import { JsonGrammarProcessor, tokenizerByteTrie, type TokenByteTrie } from './json-grammar.js';
-import { pinnedTokenizerResource, promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
+import { pinnedTextResources, promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
 import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot } from './reuse.js';
 import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
 import { hashValue } from '../web/source.js';
@@ -107,16 +107,13 @@ export class VisionEngine {
       let model: PreTrainedModel;
       let processor: Processor; let context: unknown; let vocabulary: unknown;
       try {
-        const [tokenizerJSON, tokenizerConfig, imageProcessor, chatTemplate, configuration] = await Promise.all([
-          pinnedTokenizerResource('tokenizer.json', selected).then((response) => response.json()), pinnedTokenizerResource('tokenizer_config.json', selected).then((response) => response.json()),
-          AutoImageProcessor.from_pretrained(selected.id, options), pinnedTokenizerResource('chat_template.jinja', selected).then((response) => response.text()), pinnedTokenizerResource('config.json', selected).then((response) => response.json()),
-        ]);
+        const [{ tokenizer, template, configuration }, imageProcessor] = await Promise.all([pinnedTextResources(selected), AutoImageProcessor.from_pretrained(selected.id, options)]);
         signal?.throwIfAborted();
         context = configuration.text_config?.max_position_embeddings;
         if (typeof context !== 'number' || !Number.isSafeInteger(context) || context < 1) throw new Error('Pinned model has no valid text context limit');
         vocabulary = configuration.text_config?.vocab_size;
         if (typeof vocabulary !== 'number' || !Number.isSafeInteger(vocabulary) || vocabulary < 1) throw new Error('Pinned model has no valid vocabulary size');
-        processor = new Qwen3VLProcessor({}, { tokenizer: new TokenizersBackend(tokenizerJSON, tokenizerConfig), image_processor: imageProcessor }, chatTemplate);
+        processor = new Qwen3VLProcessor({}, { tokenizer, image_processor: imageProcessor }, template);
         model = await loading;
       } catch (error) {
         // Never leave a half-built model holding native sessions.

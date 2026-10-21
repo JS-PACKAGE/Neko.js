@@ -1,6 +1,6 @@
 import { Qwen3VLProcessor, TokenizersBackend, Tensor, env } from '@huggingface/transformers';
 import { MODEL_ID, type ModelFileName, type ModelProfileId } from '../cache/manifest.js';
-import { getRegisteredModelProfile, type ModelId } from '../cache/registry.js';
+import { getRegisteredModelProfile, type ModelId, type RegisteredModelProfile } from '../cache/registry.js';
 import type { InferOptions, InferencePlanOptions, InferencePlan } from './engine.js';
 import { inferenceChat, validateInferenceOptions } from './preflight.js';
 import { compileStructuredSchema, type CompiledStructuredSchema } from './structured.js';
@@ -104,18 +104,55 @@ export async function pinnedTokenizerResource(name: ModelFileName, selected = ge
   if (!(response instanceof Response) || !response.ok) throw new Error(`Verified processor resource is missing: ${name}`);
   return response;
 }
+export interface PinnedTextResources {
+  /** Shared and never mutated; engines and planners only encode/decode with it. */
+  readonly tokenizer: TokenizersBackend;
+  readonly template: string;
+  readonly configuration: { text_config?: { max_position_embeddings?: unknown; vocab_size?: unknown } };
+  /** Text-only processor for planning. */
+  readonly processor: Qwen3VLProcessor;
+}
+const textResources = new WeakMap<object, Map<string, Promise<PinnedTextResources>>>();
+async function loadTextResources(selected: RegisteredModelProfile): Promise<PinnedTextResources> {
+  const [tokenizerJSON, tokenizerConfig, template, configuration] = await Promise.all([
+    pinnedTokenizerResource('tokenizer.json', selected).then((response) => response.json()),
+    pinnedTokenizerResource('tokenizer_config.json', selected).then((response) => response.json()),
+    pinnedTokenizerResource('chat_template.jinja', selected).then((response) => response.text()),
+    pinnedTokenizerResource('config.json', selected).then((response) => response.json()),
+  ]);
+  const tokenizer = new TokenizersBackend(tokenizerJSON, tokenizerConfig);
+  return { tokenizer, template, configuration, processor: new Qwen3VLProcessor({}, { tokenizer }, template) };
+}
+/**
+ * Verified tokenizer, chat template and configuration, read, hashed and parsed once per installed verified cache and model.
+ * Re-reading them cost a full SHA-256 of tokenizer.json plus a JSON parse and tokenizer build (seconds) on every text-only plan.
+ * The entry lives as long as the installation's cache object, or until `forgetPinnedTextResources`.
+ */
+export function pinnedTextResources(selected: RegisteredModelProfile): Promise<PinnedTextResources> {
+  const owner = env.customCache;
+  if (!owner) return loadTextResources(selected);
+  let entries = textResources.get(owner);
+  if (!entries) { entries = new Map(); textResources.set(owner, entries); }
+  const key = `${selected.id}@${selected.revision}`;
+  let loading = entries.get(key);
+  if (!loading) {
+    const created = loadTextResources(selected);
+    loading = created;
+    entries.set(key, created);
+    created.catch(() => { if (entries.get(key) === created) entries.delete(key); });
+  }
+  return loading;
+}
+/** Drops the shared text resources of the current installation so their memory can be reclaimed. */
+export function forgetPinnedTextResources(): void { const owner = env.customCache; if (owner) textResources.delete(owner); }
 export async function planTextInference(options: InferencePlanOptions, config: { profile?: ModelProfileId; model?: ModelId } = {}, compiled?: CompiledStructuredSchema): Promise<InferencePlan> {
   validateInferenceOptions(options, true);
   if (inferenceChat(options).images.length) throw new TypeError('Text-only planning cannot accept images');
   const schema = compiled ?? (options.schema === undefined ? undefined : compileStructuredSchema(options.schema, options.structuredMode));
   return atStage('preprocess', options.signal, async () => {
     const selected = getRegisteredModelProfile(config.profile, config.model ?? MODEL_ID);
-    const [tokenizerJSON, tokenizerConfig, template, configuration] = await Promise.all([
-      pinnedTokenizerResource('tokenizer.json', selected).then((response) => response.json()),
-      pinnedTokenizerResource('tokenizer_config.json', selected).then((response) => response.json()),
-      pinnedTokenizerResource('chat_template.jinja', selected).then((response) => response.text()),
-      pinnedTokenizerResource('config.json', selected).then((response) => response.json()),
-    ]);
+    const { processor, template, configuration } = await pinnedTextResources(selected);
+    void template;
     options.signal?.throwIfAborted();
     const context: unknown = configuration.text_config?.max_position_embeddings;
     const vocabulary: unknown = configuration.text_config?.vocab_size;
@@ -123,7 +160,7 @@ export async function planTextInference(options: InferencePlanOptions, config: {
     generationSettings(options.generation, vocabulary);
     const contextLimit = options.contextWindowTokens ?? Math.min(4096, context);
     if (contextLimit > context) throw new RangeError(`contextWindowTokens must be between 32 and ${context}`);
-    const processor = new Qwen3VLProcessor({}, { tokenizer: new TokenizersBackend(tokenizerJSON, tokenizerConfig) }, template);
+    void 0;
     const text = renderInferenceChat(processor, options, schema ? structuredInstruction(schema) : undefined).text;
     const cached = await promptTokenCache(selected).inputs(text, () => processor(text));
     try {
