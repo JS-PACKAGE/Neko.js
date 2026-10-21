@@ -525,7 +525,7 @@ Checkpoint 的 `sectionPlan` 記錄依序排列的 source-fact ID 群組，每�
 
 模型 manifest 固定 Hugging Face revision、必要檔案大小與 SHA-256。每次使用快取前都會驗證；不符時會失敗，不會靜默當作 cache miss。`neko.cache.model.prefetch/status/clear` 僅操作這些固定檔案。瀏覽器 Cache Storage 仍受使用者操作與瀏覽器淘汰策略影響。
 
-在 Node 上，每個 ONNX payload 檔案每個已安裝的 runtime 只雜湊一次：Transformers.js 每次載入會多次要求這些檔案，因此未變動的檔案（device、inode、大小、mtime 與 ctime 皆相同；ctime 無法由呼叫端設定）在該 installation 內不會重複雜湊。新行程、檔案身分改變，以及所有非 ONNX 檔案仍完整驗證。Node session 使用 `os.availableParallelism()` 個 intra-op 執行緒。在一台 Apple M 系列機器（4 效能核心加 6 效率核心）上，416 token 的 prefill 由約 213–238 提升到約 290 tokens/s，decode 由約 28 降到約 25 tokens/s；這只是單機觀察、不是保證，最佳執行緒數取決於硬體。
+在 Node 上，每個 ONNX payload 檔案每個已安裝的 runtime 只雜湊一次：Transformers.js 每次載入會多次要求這些檔案，因此未變動的檔案（device、inode、大小、mtime 與 ctime 皆相同；ctime 無法由呼叫端設定）在該 installation 內不會重複雜湊。新行程、檔案身分改變，以及所有非 ONNX 檔案仍完整驗證，並以 1 MiB 為單位讀取。Node session 使用 `os.availableParallelism()` 個 intra-op 執行緒。在一台 Apple M 系列機器（4 效能核心加 6 效率核心）上，416 token 的 prefill 由約 213–238 提升到約 290 tokens/s，decode 由約 28 降到約 25 tokens/s；這只是單機觀察、不是保證，最佳執行緒數取決於硬體。這些執行緒在 operator 之間會休眠而不是自旋等待（`session.intra_op.allow_spinning=0`）。在與其他繁忙行程共用的機器上，每個生成 token 的 CPU 時間減少一半以上，decode 延遲也下降；在其他方面閒置的機器上，此設定的延遲尚未量測。
 
 ### 並行下載與 validator-bound 續傳
 
