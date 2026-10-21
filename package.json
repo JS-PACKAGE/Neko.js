@@ -46,7 +46,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/test"
   ],
   "scripts": {
     "build": "node scripts/clean.mjs && tsc -p tsconfig.json && node scripts/build.mjs",
