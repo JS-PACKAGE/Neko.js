@@ -96,21 +96,33 @@ export class VisionEngine {
     return atStage('load', signal, async () => {
       const selected = getRegisteredModelProfile(config.profile, config.model);
       const options = { revision: selected.revision, local_files_only: localFilesOnly, ...(progressCallback ? { progress_callback: progressCallback } : {}) };
-      const [tokenizerJSON, tokenizerConfig, imageProcessor, chatTemplate, configuration] = await Promise.all([
-        pinnedTokenizerResource('tokenizer.json', selected).then((response) => response.json()), pinnedTokenizerResource('tokenizer_config.json', selected).then((response) => response.json()),
-        AutoImageProcessor.from_pretrained(selected.id, options), pinnedTokenizerResource('chat_template.jinja', selected).then((response) => response.text()), pinnedTokenizerResource('config.json', selected).then((response) => response.json()),
-      ]);
-      signal?.throwIfAborted();
-      const context: unknown = configuration.text_config?.max_position_embeddings;
-      if (typeof context !== 'number' || !Number.isSafeInteger(context) || context < 1) throw new Error('Pinned model has no valid text context limit');
-      const vocabulary: unknown = configuration.text_config?.vocab_size;
-      if (typeof vocabulary !== 'number' || !Number.isSafeInteger(vocabulary) || vocabulary < 1) throw new Error('Pinned model has no valid vocabulary size');
-      const processor = new Qwen3VLProcessor({}, { tokenizer: new TokenizersBackend(tokenizerJSON, tokenizerConfig), image_processor: imageProcessor }, chatTemplate);
       // Native ONNX Runtime sizes its intra-op pool from physical cores; use every thread the process may run on.
+      // Idle workers park instead of spin-waiting: spinning burns every core between operators and starves the process (and its neighbours) when the machine is shared.
       const threads = backend.runtime === 'node' ? await availableThreads() : undefined;
-      const model = await Qwen3_5ForConditionalGeneration.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device,
-        session_options: { executionProviders: backend.executionProviders, ...(threads ? { intraOpNumThreads: threads } : {}), ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) },
+      // Session creation is native and asynchronous, so it overlaps the main-thread tokenizer parse below instead of waiting for it.
+      const loading = Qwen3_5ForConditionalGeneration.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device,
+        session_options: { executionProviders: backend.executionProviders, ...(threads ? { intraOpNumThreads: threads, extra: { session: { intra_op: { allow_spinning: '0' } } } } : {}), ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) },
       });
+      loading.catch(() => undefined); // The rejection is surfaced by the awaits below; this only prevents it being unhandled while tokenizer work is pending.
+      let model: PreTrainedModel;
+      let processor: Processor; let context: unknown; let vocabulary: unknown;
+      try {
+        const [tokenizerJSON, tokenizerConfig, imageProcessor, chatTemplate, configuration] = await Promise.all([
+          pinnedTokenizerResource('tokenizer.json', selected).then((response) => response.json()), pinnedTokenizerResource('tokenizer_config.json', selected).then((response) => response.json()),
+          AutoImageProcessor.from_pretrained(selected.id, options), pinnedTokenizerResource('chat_template.jinja', selected).then((response) => response.text()), pinnedTokenizerResource('config.json', selected).then((response) => response.json()),
+        ]);
+        signal?.throwIfAborted();
+        context = configuration.text_config?.max_position_embeddings;
+        if (typeof context !== 'number' || !Number.isSafeInteger(context) || context < 1) throw new Error('Pinned model has no valid text context limit');
+        vocabulary = configuration.text_config?.vocab_size;
+        if (typeof vocabulary !== 'number' || !Number.isSafeInteger(vocabulary) || vocabulary < 1) throw new Error('Pinned model has no valid vocabulary size');
+        processor = new Qwen3VLProcessor({}, { tokenizer: new TokenizersBackend(tokenizerJSON, tokenizerConfig), image_processor: imageProcessor }, chatTemplate);
+        model = await loading;
+      } catch (error) {
+        // Never leave a half-built model holding native sessions.
+        await loading.then((loaded) => loaded.dispose(), () => undefined);
+        throw error;
+      }
       try {
         signal?.throwIfAborted();
         if (!processor.tokenizer) throw new Error('Loaded processor has no tokenizer');
