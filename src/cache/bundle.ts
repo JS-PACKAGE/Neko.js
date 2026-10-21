@@ -110,7 +110,7 @@ async function staging(backing: BundleBacking): Promise<BundleStage> {
   const entry = (name: string) => `${path}/${name.replaceAll('/', '_')}`;
   return { path, async match(name) {
     const handle = await fs.open(entry(name), 'r');
-    return Readable.toWeb(handle.createReadStream()) as ReadableStream<Uint8Array>;
+    return Readable.toWeb(handle.createReadStream({ highWaterMark: 1 << 20 })) as ReadableStream<Uint8Array>;
   }, async put(name, body) {
     const handle = await fs.open(entry(name), 'wx', 0o600);
     const reader = body.getReader();

@@ -97,7 +97,7 @@ export async function nodeDownloadStage(options: NodeDownloadStageOptions): Prom
       const handle = await fs.open(partial, constants.O_RDONLY | constants.O_NOFOLLOW);
       const info = await handle.stat();
       if (!info.isFile() || process.getuid && info.uid !== process.getuid()) { await handle.close(); throw new Error('Unsafe model download staging file'); }
-      return Readable.toWeb(handle.createReadStream()) as ReadableStream<Uint8Array<ArrayBuffer>>;
+      return Readable.toWeb(handle.createReadStream({ highWaterMark: 1 << 20 })) as ReadableStream<Uint8Array<ArrayBuffer>>;
     },
     reset,
     async promote() {

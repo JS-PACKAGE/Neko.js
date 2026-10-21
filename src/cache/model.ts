@@ -322,7 +322,8 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
       const handle = await fs.open(entry, constants.O_RDONLY | constants.O_NOFOLLOW);
       const info = await handle.stat();
       const { Readable }: typeof NodeStream = await import(`${protocol}stream`);
-      const stream = Readable.toWeb(handle.createReadStream()) as ReadableStream<Uint8Array<ArrayBuffer>>;
+      // 64 KiB default chunks halve verified-read throughput on multi-hundred-MiB payloads; 1 MiB bounds memory while amortizing stream overhead.
+      const stream = Readable.toWeb(handle.createReadStream({ highWaterMark: 1 << 20 })) as ReadableStream<Uint8Array<ArrayBuffer>>;
       // ctime cannot be set by callers, so an unchanged tuple means this process already hashed these exact bytes.
       const fingerprint = `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
       return { body: stream, headers: new Headers({ 'content-length': String(info.size) }), status: 200, filePath: entry, fingerprint };
