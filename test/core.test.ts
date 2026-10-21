@@ -44,6 +44,36 @@ test('nucleus filtering uses temperature and the top-K sampling distribution', (
   } finally { tensor.dispose(); }
 });
 
+test('nucleus top-K selection matches a full stable sort, including ties and masked logits', () => {
+  const reference = (input: number[], p: number, temperature: number, topK: number) => {
+    const values = Float32Array.from(input);
+    const order = Array.from(values, (_, index) => index).sort((a, b) => values[b]! - values[a]!);
+    const count = topK === 0 ? values.length : Math.min(topK, values.length);
+    const max = values[order[0]!]!;
+    let total = 0;
+    for (let i = 0; i < count; i++) total += Math.exp((values[order[i]!]! - max) / temperature);
+    let cumulative = 0; let kept = 0;
+    do { cumulative += Math.exp((values[order[kept]!]! - max) / temperature); kept++; } while (kept < count && cumulative < p * total);
+    for (let i = kept; i < values.length; i++) values[order[i]!] = -Infinity;
+    return Array.from(values);
+  };
+  let seed = 12345;
+  const random = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32; };
+  for (let round = 0; round < 200; round++) {
+    const width = 20 + Math.floor(random() * 80);
+    // Few distinct levels force ties; -Infinity mimics a grammar mask.
+    const input = Array.from({ length: width }, () => random() < 0.4 ? -Infinity : Math.floor(random() * 6) / 2);
+    if (input.every((value) => value === -Infinity)) input[0] = 0;
+    const topK = [0, 1, 3, 8, 50, 500][round % 6]!;
+    const p = [0.3, 0.7, 0.95, 1][round % 4]!;
+    const tensor = new Tensor('float32', Float32Array.from(input), [1, width]);
+    try {
+      new NucleusProcessor(p, 1.3, topK)._call([], tensor);
+      assert.deepEqual(Array.from(tensor.data), reference(input, p, 1.3, topK), `round ${round}`);
+    } finally { tensor.dispose(); }
+  }
+});
+
 test('generation bounds reject unsupported sampling and invalid stop IDs', () => {
   assert.throws(() => generationSettings({ topP: 0.9 }, 100), TypeError);
   assert.throws(() => generationSettings({ sampling: true, temperature: 0 }, 100), RangeError);

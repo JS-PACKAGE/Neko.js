@@ -37,27 +37,53 @@ interface NucleusFilter {
   <T extends GenerationLogits>(ids: bigint[][], logits: T): T;
   _call<T extends GenerationLogits>(ids: bigint[][], logits: T): T;
 }
+/** Above this top-K, a full sort is cheaper than repeated insertion. */
+const PARTIAL_TOP_K_LIMIT = 256;
 /** Transformers 4.2 has no nucleus warper. Filter using the same temperature/top-K distribution its sampler uses. */
 class NucleusProcessorImplementation extends LogitsProcessor {
   private order?: Uint32Array;
-  constructor(private readonly p: number, private readonly temperature: number, private readonly topK: number) { super(); }
+  private readonly top: Uint32Array;
+  constructor(private readonly p: number, private readonly temperature: number, private readonly topK: number) { super(); this.top = new Uint32Array(topK > 0 && topK <= PARTIAL_TOP_K_LIMIT ? topK : 0); }
+  /** Fill `top` with the `count` largest logits, highest first and lowest index first on ties — the order a stable full sort would give — without sorting the whole vocabulary. */
+  private select(values: Float32Array, offset: number, width: number, count: number): void {
+    const top = this.top;
+    let size = 0;
+    for (let i = 0; i < width; i++) {
+      const value = values[offset + i]!;
+      if (size === count && !(value > values[offset + top[count - 1]!]!)) continue;
+      // Later indices lose ties, so the slot is after every entry that is not smaller.
+      let low = 0; let high = size;
+      while (low < high) { const mid = (low + high) >>> 1; if (values[offset + top[mid]!]! >= value) low = mid + 1; else high = mid; }
+      if (size < count) size++;
+      top.copyWithin(low + 1, low, size - 1);
+      top[low] = i;
+    }
+  }
   override _call<T extends GenerationLogits>(_ids: bigint[][], logits: T): T {
     const width = logits.dims.at(-1)!;
-    this.order ??= new Uint32Array(width);
-    if (this.order.length !== width) throw new Error('Generation vocabulary changed');
     const values = logits.data as Float32Array;
+    const count = this.topK === 0 ? width : Math.min(this.topK, width);
+    const partial = this.top.length > 0 && count < width;
+    if (!partial) {
+      this.order ??= new Uint32Array(width);
+      if (this.order.length !== width) throw new Error('Generation vocabulary changed');
+    }
     for (let offset = 0; offset < values.length; offset += width) {
-      const order = this.order;
-      for (let i = 0; i < width; i++) order[i] = i;
-      order.sort((a, b) => values[offset + b]! - values[offset + a]!);
-      const count = this.topK === 0 ? width : Math.min(this.topK, width);
+      let order: Uint32Array;
+      if (partial) { this.select(values, offset, width, count); order = this.top; }
+      else { order = this.order!; for (let i = 0; i < width; i++) order[i] = i; order.sort((a, b) => values[offset + b]! - values[offset + a]!); }
       const max = values[offset + order[0]!]!;
       let total = 0;
       for (let i = 0; i < count; i++) total += Math.exp((values[offset + order[i]!]! - max) / this.temperature);
       let cumulative = 0;
       let kept = 0;
       do { cumulative += Math.exp((values[offset + order[kept]!]! - max) / this.temperature); kept++; } while (kept < count && cumulative < this.p * total);
-      for (let i = kept; i < width; i++) values[offset + order[i]!] = -Infinity;
+      if (partial) {
+        // Clear the row, then restore only the surviving nucleus entries.
+        const survivors = Array.from(order.subarray(0, kept), (index) => values[offset + index]!);
+        values.fill(-Infinity, offset, offset + width);
+        for (let i = 0; i < kept; i++) values[offset + order[i]!] = survivors[i]!;
+      } else for (let i = kept; i < width; i++) values[offset + order[i]!] = -Infinity;
     }
     return logits;
   }
