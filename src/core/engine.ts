@@ -16,6 +16,7 @@ import { JsonBoundary } from './json-boundary.js';
 import { JsonGrammarProcessor, tokenizerByteTrie, type TokenByteTrie } from './json-grammar.js';
 import { promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
 import { pinnedTextResources } from './text-resources.js';
+import { useFastPatchFlattening } from './vision-patches.js';
 import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot } from './reuse.js';
 import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
 import { hashValue } from '../web/source.js';
@@ -114,6 +115,7 @@ export class VisionEngine {
         if (typeof context !== 'number' || !Number.isSafeInteger(context) || context < 1) throw new Error('Pinned model has no valid text context limit');
         vocabulary = configuration.text_config?.vocab_size;
         if (typeof vocabulary !== 'number' || !Number.isSafeInteger(vocabulary) || vocabulary < 1) throw new Error('Pinned model has no valid vocabulary size');
+        useFastPatchFlattening(imageProcessor);
         processor = new Qwen3VLProcessor({}, { tokenizer, image_processor: imageProcessor }, template);
         model = await loading;
       } catch (error) {
