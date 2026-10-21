@@ -61,7 +61,9 @@ export async function generateExtractiveReport(input: Page, options: DescribeOpt
         checkpoint.attempts.push({ id, phase, attempt: 1, requestHash, outcome: 'complete', errorCode: null, usage: { ...checkpoint.usage }, timings });
       }
       claims.push({ id: `claim-${claims.length + 1}`, target, startOffset: 0, endOffset: fact.citation.quote.length, citations: [{ ...fact.citation }], verification: 'references-validated', audit: auditClaim(fact.citation.quote, [fact.citation], snapshot) });
-      await save();
+      // The checksum covers the whole checkpoint, so hashing it per stage is quadratic; without a callback nobody can observe the intermediate value, and the final/error saves still compute it.
+      checkpoint.elapsedMs = elapsedBefore + performance.now() - started;
+      if (options.onCheckpoint) await save();
       if (options.onEvent) try { await awaitUser(() => options.onEvent!({ type: saved ? 'stage-reused' : 'stage-complete', id, phase, usage: { ...checkpoint.usage }, elapsedMs: checkpoint.elapsedMs }), signal); } catch (cause) { callbackFailed = true; throw cause; }
       return fact.citation.quote;
     };
