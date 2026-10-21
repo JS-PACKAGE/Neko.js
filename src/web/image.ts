@@ -121,21 +121,34 @@ async function localBytes(path: string | URL, maxBytes: number, signal: AbortSig
     const info = await handle.stat();
     if (!info.isFile()) throw new TypeError('Image path must point to a regular file');
     if (info.size > maxBytes) throw new RangeError(`Image exceeds byte limit (${maxBytes})`);
-    const chunks: Uint8Array[] = [];
+    // The size is known up front, so read straight into one exact buffer; a file that grew since stat() falls back to bounded chunked reads.
+    const bytes = new Uint8Array(info.size);
     let size = 0;
+    while (size < bytes.length) {
+      signal.throwIfAborted();
+      const { bytesRead } = await handle.read(bytes, size, bytes.length - size, size);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    const probe = new Uint8Array(Math.min(64 * 1024, maxBytes - size + 1));
+    const { bytesRead: extra } = await handle.read(probe, 0, probe.length, size);
+    if (size === bytes.length && !extra) return bytes;
+    const chunks: Uint8Array[] = [bytes.subarray(0, size)];
+    if (extra) { size += extra; chunks.push(probe.subarray(0, extra)); }
+    if (size > maxBytes) throw new RangeError(`Image exceeds byte limit (${maxBytes})`);
     while (true) {
       signal.throwIfAborted();
       const buffer = new Uint8Array(Math.min(64 * 1024, maxBytes - size + 1));
-      const { bytesRead } = await handle.read(buffer);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, size);
       if (!bytesRead) break;
       size += bytesRead;
       if (size > maxBytes) throw new RangeError(`Image exceeds byte limit (${maxBytes})`);
       chunks.push(buffer.subarray(0, bytesRead));
     }
-    const bytes = new Uint8Array(size);
+    const combined = new Uint8Array(size);
     let offset = 0;
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-    return bytes;
+    for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.length; }
+    return combined;
   } finally { await handle.close(); }
 }
 
