@@ -17,7 +17,8 @@ import { compileStructuredSchema, type SchemaValue } from './core/structured.js'
 import { activeRequestSignal, setActiveRequest, workerExecution } from './runtime/context.js';
 import { inferenceChat, validateInferenceOptions } from './core/preflight.js';
 import { createInferenceStream, type InferStreamOptions, type InferenceStreamEvent } from './runtime/stream.js';
-import { forgetPinnedTextResources, planTextInference } from './core/tokenizer.js';
+import { planTextInference } from './core/tokenizer.js';
+import { forgetPinnedTextResources } from './core/text-resources.js';
 import { createConversationSession, type ConversationSession, type SessionOptions } from './core/session.js';
 import { assertHardDeadlineUnsupported, createRuntimeDiagnostics, validateHealthOptions, type HealthOptions, type RuntimeHealth, type RuntimeDiagnostics } from './runtime/diagnostics.js';
 import { queuedReadable } from './queued-stream.js';

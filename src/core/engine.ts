@@ -14,7 +14,8 @@ import type { ExecutionInfo, GenerationStateHandle, InferenceReuseOptions, Infer
 import { inferenceChat, validateInferenceOptions } from './preflight.js';
 import { JsonBoundary } from './json-boundary.js';
 import { JsonGrammarProcessor, tokenizerByteTrie, type TokenByteTrie } from './json-grammar.js';
-import { pinnedTextResources, promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
+import { promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
+import { pinnedTextResources } from './text-resources.js';
 import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot } from './reuse.js';
 import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
 import { hashValue } from '../web/source.js';
