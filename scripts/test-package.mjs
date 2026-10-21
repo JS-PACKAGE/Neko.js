@@ -37,7 +37,7 @@ try {
     name: 'neko-package-consumer',
     private: true,
     type: 'module',
-    allowScripts: { 'onnxruntime-node@1.30.0': true, 'sharp@0.35.4': true },
+    allowScripts: { 'onnxruntime-node@1.30.0': true, 'sharp@0.35.5': true },
   }, null, 2));
   await runNpm(['install', '--no-audit', '--no-fund', join(temporary, filename)], {
     cwd: consumer,

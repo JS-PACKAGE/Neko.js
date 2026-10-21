@@ -17,7 +17,7 @@ npm ci
 npm run build
 ```
 
-- 使用方也可在本機 clone 並建置目前工作樹後執行 `npm pack`，產生含預建 `dist/` 的 tarball，再以 `npm install /absolute/path/to/<printed-filename>.tgz` 安裝印出的檔案；檔名與版本取自當前 `package.json`。本專案不發佈至 npm。npm 11 的 Git dependency `prepare` 可能需要腳本核准，請使用明確的 clone／`npm ci`／`npm run build` 流程。Node bundle 包含 Transformers.js；直接執行依賴為 pinned ONNX Runtime、sharp、parse5、PDF.js 與預建 native canvas。原生 postinstall 僅核准 `onnxruntime-node@1.30.0`、`sharp@0.35.4`；canvas 不需新增腳本核准，勿一律核准所有依賴。
+- 使用方也可在本機 clone 並建置目前工作樹後執行 `npm pack`，產生含預建 `dist/` 的 tarball，再以 `npm install /absolute/path/to/<printed-filename>.tgz` 安裝印出的檔案；檔名與版本取自當前 `package.json`。本專案不發佈至 npm。npm 11 的 Git dependency `prepare` 可能需要腳本核准，請使用明確的 clone／`npm ci`／`npm run build` 流程。Node bundle 包含 Transformers.js；直接執行依賴為 pinned ONNX Runtime、sharp、parse5、PDF.js 與預建 native canvas。原生 postinstall 僅核准 `onnxruntime-node@1.30.0`、`sharp@0.35.5`；canvas 不需新增腳本核准，勿一律核准所有依賴。
 
 ```js
 import { createNeko } from 'neko.js';
@@ -102,7 +102,7 @@ npm ci
 npm run build
 ```
 
-Consumers may clone and build the working tree, then run `npm pack` and install the printed tarball with `npm install /absolute/path/to/<printed-filename>.tgz`. Its name/version derives from `package.json`; this project is not published to npm. npm 11 may require approval for Git dependency `prepare`, so use explicit clone, `npm ci`, and `npm run build`. The Node bundle includes Transformers.js; direct runtime dependencies are pinned ONNX Runtime, sharp, parse5, PDF.js, and prebuilt native canvas. Approve native postinstall only for `onnxruntime-node@1.30.0` and `sharp@0.35.4`; canvas needs no additional script approval. Never blanket-approve dependency scripts.
+Consumers may clone and build the working tree, then run `npm pack` and install the printed tarball with `npm install /absolute/path/to/<printed-filename>.tgz`. Its name/version derives from `package.json`; this project is not published to npm. npm 11 may require approval for Git dependency `prepare`, so use explicit clone, `npm ci`, and `npm run build`. The Node bundle includes Transformers.js; direct runtime dependencies are pinned ONNX Runtime, sharp, parse5, PDF.js, and prebuilt native canvas. Approve native postinstall only for `onnxruntime-node@1.30.0` and `sharp@0.35.5`; canvas needs no additional script approval. Never blanket-approve dependency scripts.
 
 ```js
 import { createNeko } from 'neko.js';
