@@ -8,7 +8,8 @@ export class EngineCache<T extends CachedEngine> {
   private timer?: Parameters<typeof globalThis.clearTimeout>[0];
   private hits = 0;
   private loads = 0;
-  constructor(private readonly load: (signal?: AbortSignal) => Promise<T>, private readonly enabled = true, private readonly ttlMs = 30 * 60_000) {
+  /** `onRelease` runs whenever the engine is disposed (scheduled, uncached or explicit release), so state tied to it can be dropped too. */
+  constructor(private readonly load: (signal?: AbortSignal) => Promise<T>, private readonly enabled = true, private readonly ttlMs = 30 * 60_000, private readonly onRelease?: () => void) {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 0 || ttlMs > 2_147_483_647) throw new RangeError('engineTtlMs must be an integer between 0 and 2147483647');
   }
   status(): EngineCacheStatus { return { loaded: !!this.engine, sessions: this.engine ? 1 : 0, memory: this.engine ? this.engine.memory : 0, hits: this.hits, loads: this.loads }; }
@@ -26,7 +27,7 @@ export class EngineCache<T extends CachedEngine> {
       else { this.engine = await this.load(signal); this.loads++; }
       try { signal?.throwIfAborted(); return await operation(this.engine); }
       finally {
-        if (!this.enabled || this.ttlMs === 0) { const engine = this.engine; this.engine = undefined; await engine.dispose(); }
+        if (!this.enabled || this.ttlMs === 0) { const engine = this.engine; this.engine = undefined; try { await engine.dispose(); } finally { this.onRelease?.(); } }
         else {
           this.timer = globalThis.setTimeout(() => {
             void this.release().catch(() => { console.warn('Engine cache scheduled release failed'); });
@@ -45,7 +46,7 @@ export class EngineCache<T extends CachedEngine> {
       this.timer = undefined;
       const engine = this.engine;
       this.engine = undefined;
-      await engine?.dispose();
+      try { await engine?.dispose(); } finally { this.onRelease?.(); }
       await afterRelease?.();
     });
     this.queue = work;

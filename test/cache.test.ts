@@ -259,6 +259,23 @@ test('idle TTL renews on use and expires only after the renewed boundary', async
   await cache.release();
 });
 
+test('release hook runs after every engine disposal path: idle expiry, uncached boundaries and explicit release', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const log: string[] = [];
+  const engine = () => ({ memory: 1, dispose: async () => { log.push('dispose'); } });
+  const cached = new EngineCache(async () => engine(), true, 100, () => log.push('release'));
+  await cached.use(async () => undefined);
+  context.mock.timers.tick(100);
+  for (let turn = 0; turn < 4; turn++) await Promise.resolve();
+  assert.deepEqual(log, ['dispose', 'release']);
+  const uncached = new EngineCache(async () => engine(), false, 100, () => log.push('release'));
+  await uncached.use(async () => undefined);
+  assert.deepEqual(log, ['dispose', 'release', 'dispose', 'release']);
+  // An explicit release also drops engine-tied state when no engine is loaded.
+  await uncached.release();
+  assert.deepEqual(log, ['dispose', 'release', 'dispose', 'release', 'release']);
+});
+
 test('verified responses from a different model cannot bypass selected-model hashing after restoration', async () => {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-cross-model-integrity-'));
   const originalFetch = env.fetch;

@@ -141,7 +141,7 @@ class LocalNeko implements Neko {
       model: {
         prefetch: (signal) => this.run('cache', signal, (abort) => installation.prefetch(abort)),
         status: (signal) => this.run('cache', signal, (abort) => installation.status(abort)),
-        clear: (signal) => this.run('cache', signal, async (abort) => { await engines.release(); forgetPinnedTextResources(); this.readiness = null; abort.throwIfAborted(); await installation.clear(abort); }),
+        clear: (signal) => this.run('cache', signal, async (abort) => { await engines.release(); this.readiness = null; abort.throwIfAborted(); await installation.clear(abort); }),
         exportBundle: (signal) => {
           this.checkRequest('cache', signal);
           return queuedReadable((abort, operation) => this.run('cache', abort, operation), (abort) => installation.exportBundle(abort), signal);
@@ -149,7 +149,7 @@ class LocalNeko implements Neko {
         importBundle: (source, signal) => this.run('cache', signal, (abort) => installation.importBundle(source, abort)),
         diagnostics: (signal) => this.run('cache', signal, (abort) => installation.diagnostics(abort)),
       },
-      engine: { status: async () => { if (this.closed) throw new NekoError('Neko is disposed', 'cache', 'DISPOSED'); return engines.status(); }, release: () => this.run('cache', undefined, async () => { await engines.release(); forgetPinnedTextResources(); this.readiness = null; }) },
+      engine: { status: async () => { if (this.closed) throw new NekoError('Neko is disposed', 'cache', 'DISPOSED'); return engines.status(); }, release: () => this.run('cache', undefined, async () => { await engines.release(); this.readiness = null; }) },
     };
     this.backend = { current: async () => { if (this.closed) throw new NekoError('Neko is disposed', 'backend', 'DISPOSED'); return backend; }, detect: (device = backend.device, signal) => this.run('backend', signal, () => inspectBackend(device, options.modelProfile)) };
   }
@@ -426,7 +426,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
       const engines = new EngineCache((signal) => cache.withSignal(signal, async () => {
         const started = performance.now(); await configureRuntime(signal); await atStage('load', signal, () => cache.prefetch(signal));
         return VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}) });
-      }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000);
+      }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000, forgetPinnedTextResources);
       return new LocalNeko(engines, cache, restore, backend, options, admission);
     } catch (error) { if (restore) restore(); else installation?.restore(); throw error; }
   }, (instance) => instance.dispose());

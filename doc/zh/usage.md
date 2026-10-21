@@ -107,7 +107,7 @@ console.log(plan.inputTokens, plan.maxNewTokens, plan.contextLimit,
 if (plan.fits) console.log((await neko.infer(request)).text);
 ```
 
-`planInference(options)` 使用與推理相同的實際 chat template／tokenizer，選填 `schema`／`structuredMode` 會納入結構化指令。**純文字規劃僅下載／讀取已驗證 tokenizer、config 與 template，不建立 ONNX sessions**；離線仍須已有這些固定資產。已驗證的 tokenizer、template 與 config 每個實例只解析一次並與引擎共用（固定 0.8B 模型約佔 70 MB JavaScript heap），直到 `cache.engine.release()`、`cache.model.clear()` 或 dispose。圖片規劃會做真實前處理與圖片 token 展開，可能取得引擎。`availableOutputTokens` 為 `max(0, contextLimit - inputTokens)`；`fits` 比較輸出預算與容量。超出上下文回傳 `fits: false`，實際推理則拒絕；規劃不預留佇列，也不保證生成成功。`preprocessing` metadata 只表示完全相同、SDK 擁有的 rendered prompt tokenization 重用，`kvReuse: false`；不是成長中的對話 prefix 或模型 KV cache 重用。
+`planInference(options)` 使用與推理相同的實際 chat template／tokenizer，選填 `schema`／`structuredMode` 會納入結構化指令。**純文字規劃僅下載／讀取已驗證 tokenizer、config 與 template，不建立 ONNX sessions**；離線仍須已有這些固定資產。已驗證的 tokenizer、template 與 config 每個實例只解析一次並與引擎共用（固定 0.8B 模型約佔 70 MB JavaScript heap），直到引擎被釋放（明確呼叫 `cache.engine.release()` 或 `cache.model.clear()`、`engineTtlMs` 到期，或停用引擎快取時每個請求結束後）或實例 dispose。圖片規劃會做真實前處理與圖片 token 展開，可能取得引擎。`availableOutputTokens` 為 `max(0, contextLimit - inputTokens)`；`fits` 比較輸出預算與容量。超出上下文回傳 `fits: false`，實際推理則拒絕；規劃不預留佇列，也不保證生成成功。`preprocessing` metadata 只表示完全相同、SDK 擁有的 rendered prompt tokenization 重用，`kvReuse: false`；不是成長中的對話 prefix 或模型 KV cache 重用。
 
 ```ts
 const schema = {
