@@ -240,6 +240,9 @@ function extractStructure(root: HtmlNode): Pick<Page, 'paragraphs' | 'containers
       return Number.isSafeInteger(value) ? Math.max(1, Math.min(maximum, value)) : 1;
     };
     let columnCount = 0;
+    // End of each row's contiguous row-group run, so rowspan="0" does not rescan the group for every cell.
+    const groupEnd: number[] = new Array(rows.length);
+    for (let row = rows.length - 1; row >= 0; row--) groupEnd[row] = row + 1 < rows.length && rows[row + 1]!.group === rows[row]!.group ? groupEnd[row + 1]! : row + 1;
     for (let row = 0; row < rows.length; row++) {
       let column = 0;
       const entry = rows[row]!;
@@ -252,8 +255,7 @@ function extractStructure(root: HtmlNode): Pick<Page, 'paragraphs' | 'containers
           fits = true;
           for (let offset = 0; offset < columnSpan; offset++) if ((occupied.get(column + offset) ?? 0) > row) { fits = false; column++; break; }
         }
-        let groupRows = 1;
-        while (row + groupRows < rows.length && rows[row + groupRows]!.group === entry.group) groupRows++;
+        const groupRows = groupEnd[row]! - row;
         const rowSpan = attr(node, 'rowspan')?.trim() === '0' ? groupRows : span(node, 'rowspan', Math.min(65534, groupRows));
         const scope = node.tagName === 'th' ? attr(node, 'scope')?.toLowerCase() : undefined;
         const cell: TableCell = { id: `t${index + 1}r${row + 1}c${column + 1}`, row, rowGroup: rowGroups.get(entry.group)!, column, rowSpan, columnSpan, kind: node.tagName === 'th' ? 'header' : 'data', ...(['row', 'col', 'rowgroup', 'colgroup'].includes(scope ?? '') ? { scope: scope as NonNullable<TableCell['scope']> } : {}), paragraphIds: paragraphNodes.get(node) ?? [], rowHeaderIds: [], columnHeaderIds: [], headerIds: [], source: location(node) };
@@ -268,18 +270,41 @@ function extractStructure(root: HtmlNode): Pick<Page, 'paragraphs' | 'containers
       const id = attr(node, 'id');
       if (id) { if (htmlIds.has(id)) duplicateIds.add(id); else htmlIds.set(id, cell); }
     }
+    // Headers indexed by covered row (scope row or none), covered column (scope col, colgroup or none) and row group (scope rowgroup):
+    // every header the geometry test below can accept is in one of these lists, so each cell examines only nearby compatible headers
+    // instead of the whole table. Matches keep document (cell) order.
+    const order = new Map<TableCell, number>(); const byRow: TableCell[][] = []; const byColumn: TableCell[][] = []; const byGroup: TableCell[][] = [];
+    cells.forEach((header, position) => {
+      if (header.kind !== 'header') return;
+      order.set(header, position);
+      if (!header.scope || header.scope === 'row') for (let row = header.row; row < header.row + header.rowSpan; row++) (byRow[row] ??= []).push(header);
+      if (!header.scope || header.scope === 'col' || header.scope === 'colgroup') for (let column = header.column; column < header.column + header.columnSpan; column++) (byColumn[column] ??= []).push(header);
+      if (header.scope === 'rowgroup') (byGroup[header.rowGroup] ??= []).push(header);
+    });
     for (const [node, cell] of nodes) {
       const explicit = attr(node, 'headers');
-      if (explicit !== undefined) {
-        cell.headerIds = [...new Set(explicit.split(/\s+/).map((id) => duplicateIds.has(id) ? undefined : htmlIds.get(id)).filter((header): header is TableCell => !!header && header.kind === 'header' && header !== cell).map(({ id }) => id))];
-      }
-      for (const header of cells) {
-        if (header.kind !== 'header' || header === cell || (explicit !== undefined && !cell.headerIds.includes(header.id))) continue;
+      const listed = explicit === undefined ? undefined : [...new Set(explicit.split(/\s+/).map((id) => duplicateIds.has(id) ? undefined : htmlIds.get(id)).filter((header): header is TableCell => !!header && header.kind === 'header' && header !== cell))];
+      if (listed) cell.headerIds = listed.map(({ id }) => id);
+      // 1: row header, 2: column header.
+      const matched = new Map<TableCell, number>();
+      const consider = (header: TableCell): void => {
+        if (header === cell || matched.has(header)) return;
         const rowOverlap = header.row < cell.row + cell.rowSpan && cell.row < header.row + header.rowSpan;
         const columnOverlap = header.column < cell.column + cell.columnSpan && cell.column < header.column + header.columnSpan;
-        const sameGroup = rows[header.row]?.group === rows[cell.row]?.group;
-        if ((header.scope === 'rowgroup' && sameGroup) || ((header.scope === 'row' || !header.scope) && rowOverlap && header.column < cell.column)) cell.rowHeaderIds.push(header.id);
-        if (header.scope === 'colgroup' ? columnOverlap : (header.scope === 'col' || !header.scope) && columnOverlap && header.row < cell.row) cell.columnHeaderIds.push(header.id);
+        const sameGroup = header.rowGroup === cell.rowGroup;
+        const kind = ((header.scope === 'rowgroup' && sameGroup) || ((header.scope === 'row' || !header.scope) && rowOverlap && header.column < cell.column) ? 1 : 0)
+          | ((header.scope === 'colgroup' ? columnOverlap : (header.scope === 'col' || !header.scope) && columnOverlap && header.row < cell.row) ? 2 : 0);
+        if (kind) matched.set(header, kind);
+      };
+      if (listed) for (const header of listed) consider(header);
+      else {
+        for (let row = cell.row; row < cell.row + cell.rowSpan; row++) for (const header of byRow[row] ?? []) consider(header);
+        for (let column = cell.column; column < cell.column + cell.columnSpan; column++) for (const header of byColumn[column] ?? []) consider(header);
+        for (const header of byGroup[cell.rowGroup] ?? []) consider(header);
+      }
+      for (const [header, kind] of [...matched].sort((left, right) => order.get(left[0])! - order.get(right[0])!)) {
+        if (kind & 1) cell.rowHeaderIds.push(header.id);
+        if (kind & 2) cell.columnHeaderIds.push(header.id);
       }
       if (explicit === undefined) cell.headerIds = [...new Set([...cell.rowHeaderIds, ...cell.columnHeaderIds])];
     }

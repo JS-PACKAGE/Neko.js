@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import test from 'node:test';
 import { extractPage } from '../../src/web/index.js';
+import type { TableCell } from '../../src/types.js';
 
 test('extracts visible text once in DOM order and retains source offsets', async () => {
   const html = '<html><head><title>Page title</title><script>throw new Error("must not run")</script></head><body><div>Intro <b>text</b></div><h2>Heading</h2><p>Paragraph</p><div>Ending text</div></body></html>';
@@ -149,4 +150,47 @@ test('table rowSpan zero stops at the row group and nested tables retain source 
   const nested = page.paragraphs.find(({ text }) => text === 'Nested')!;
   assert.ok(page.tables![0]!.paragraphIds.includes(nested.id));
   assert.ok(page.tables![1]!.paragraphIds.includes(nested.id));
+});
+
+test('implicit table header association matches a whole-table reference scan', async () => {
+  // Reference: every header cell of the table is tested against every cell, in cell order.
+  const expected = (cells: readonly TableCell[], cell: TableCell) => {
+    const row: string[] = []; const column: string[] = [];
+    for (const header of cells) {
+      if (header.kind !== 'header' || header === cell) continue;
+      const rowOverlap = header.row < cell.row + cell.rowSpan && cell.row < header.row + header.rowSpan;
+      const columnOverlap = header.column < cell.column + cell.columnSpan && cell.column < header.column + header.columnSpan;
+      if ((header.scope === 'rowgroup' && header.rowGroup === cell.rowGroup) || ((header.scope === 'row' || !header.scope) && rowOverlap && header.column < cell.column)) row.push(header.id);
+      if (header.scope === 'colgroup' ? columnOverlap : (header.scope === 'col' || !header.scope) && columnOverlap && header.row < cell.row) column.push(header.id);
+    }
+    return { row, column };
+  };
+  let seed = 11; const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+  const pick = <T>(values: readonly T[]): T => values[Math.floor(random() * values.length)]!;
+  let links = 0;
+  for (let trial = 0; trial < 300; trial++) {
+    let html = '<table>';
+    for (let group = 0; group < 1 + Math.floor(random() * 3); group++) {
+      const tag = pick(['thead', 'tbody', 'tfoot', '']); if (tag) html += `<${tag}>`;
+      for (let row = 0; row < 1 + Math.floor(random() * 5); row++) {
+        html += '<tr>';
+        for (let column = 0; column < 1 + Math.floor(random() * 5); column++) {
+          const header = random() < 0.4; const attributes: string[] = [];
+          if (header && random() < 0.6) attributes.push(`scope="${pick(['row', 'col', 'rowgroup', 'colgroup'])}"`);
+          if (random() < 0.2) attributes.push(`rowspan="${pick(['0', '2', '3'])}"`);
+          if (random() < 0.2) attributes.push(`colspan="${pick(['2', '3'])}"`);
+          html += `<${header ? 'th' : 'td'} ${attributes.join(' ')}>v${row}-${column}</${header ? 'th' : 'td'}>`;
+        }
+        html += '</tr>';
+      }
+      if (tag) html += `</${tag}>`;
+    }
+    const table = (await extractPage(`${html}</table>`)).tables![0]!;
+    for (const cell of table.cells) {
+      const { row, column } = expected(table.cells, cell);
+      assert.deepEqual({ row: cell.rowHeaderIds, column: cell.columnHeaderIds, headers: cell.headerIds }, { row, column, headers: [...new Set([...row, ...column])] });
+      links += row.length + column.length;
+    }
+  }
+  assert.ok(links > 1000);
 });
