@@ -192,3 +192,32 @@ test('enum string prefixes accept exactly the prefixes of remaining unique value
     for (const value of used) assert.equal(accepts(`${head}${JSON.stringify(value)}`), false);
   }
 });
+
+test('maxLength string masks equal a per-piece reference at every code-point budget and pending UTF-8 class', () => {
+  let seed = 11; const random = (n: number) => (seed = (seed * 1664525 + 1013904223) >>> 0) % n;
+  // Whole characters of every UTF-8 width (including the E0/ED/F0/F4 lead classes), their byte fragments, and structural bytes.
+  const characters = ['a', ' ', 'é', '漢', 'ࠀ', '퟿', '😀', '𐀀', '􏿿'];
+  const fragments = characters.flatMap((character) => { const bytes = encoder.encode(character); return Array.from({ length: bytes.length }, (_, start) => bytes.slice(start, start + 1 + random(bytes.length - start))); });
+  const pieces: [number, Uint8Array][] = [];
+  const parts = [...characters.map((character) => encoder.encode(character)), ...fragments, encoder.encode('"'), encoder.encode('\\'), Uint8Array.of(10), encoder.encode('",')];
+  for (let id = 0; id < 600; id++) pieces.push([id * 3 + 1, Uint8Array.from(Array.from({ length: 1 + random(4) }, () => Array.from(parts[random(parts.length)]!)).flat())]);
+  const trie = new TokenByteTrie(pieces);
+  const tokens = ['a', '漢', '😀', '\\n', '\\u0041', '\\ud83d', '\\ud83d\\ude00'];
+  let checked = 0;
+  for (let trial = 0; trial < 400; trial++) {
+    const maxLength = random(6);
+    const state = new JsonGrammarState(compileStructuredSchema({ type: 'object', additionalProperties: false, properties: { t: { type: 'string', maxLength } } }).grammar!);
+    assert.equal(state.push(encoder.encode('{"t":"')), true);
+    for (let step = random(maxLength + 2); step > 0; step--) { const next = state.clone(); if (next.push(encoder.encode(tokens[random(tokens.length)]!))) Object.assign(state, next); }
+    // Leave a multi-byte character open by one to three bytes.
+    const open = encoder.encode(characters[2 + random(characters.length - 2)]!).slice(0, random(3) + 1);
+    if (random(2)) { const next = state.clone(); if (next.push(open.slice(0, Math.min(open.length, 3)))) Object.assign(state, next); }
+    const expected = pieces.filter(([, bytes]) => state.clone().push(bytes)).map(([id]) => id).sort((a, b) => a - b);
+    const mask = new Uint8Array(1801); trie.mark(state, mask);
+    assert.deepEqual(Array.from(mask.keys()).filter((id) => mask[id]), expected, `maxLength ${maxLength}`);
+    const delivered: number[] = []; trie.allowed(state, (id) => delivered.push(id));
+    assert.deepEqual(delivered.sort((a, b) => a - b), expected);
+    if (state.freeStringClass !== null && state.freeStringBudget < Infinity) checked++;
+  }
+  assert.ok(checked > 200, `bounded free-string states exercised: ${checked}`);
+});

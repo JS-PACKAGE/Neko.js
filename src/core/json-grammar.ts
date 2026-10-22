@@ -49,13 +49,18 @@ export class JsonGrammarState {
     state.rootDone = this.rootDone; state.utfRemaining = this.utfRemaining; state.utfCode = this.utfCode; state.utfMin = this.utfMin;
     return state;
   }
-  /** Ordinary string bytes depend only on the pending UTF-8 prefix; delimiters still use the full state. */
+  /** Ordinary string bytes depend only on the pending UTF-8 prefix (and, under `maxLength`, the code points left); delimiters still use the full state. */
   get freeStringClass(): number | null {
     const token = this.lexeme;
-    if (token?.kind !== 'string' || token.key || token.escape || token.unicode !== null || token.schema.enum !== undefined || token.schema.maxLength !== undefined) return null;
+    if (token?.kind !== 'string' || token.key || token.escape || token.unicode !== null || token.schema.enum !== undefined) return null;
     if (this.utfRemaining === 2) return this.utfCode === 0 ? 4 : this.utfCode === 13 ? 5 : 2;
     if (this.utfRemaining === 3) return this.utfCode === 0 ? 6 : this.utfCode === 4 ? 7 : 3;
     return this.utfRemaining;
+  }
+  /** Code points the open string may still gain; only meaningful while `freeStringClass` is not null. */
+  get freeStringBudget(): number {
+    const token = this.lexeme;
+    return token?.schema.maxLength === undefined ? Infinity : token.schema.maxLength - Array.from(token.text).length;
   }
   get complete(): boolean {
     if (this.utfRemaining) return false;
@@ -291,6 +296,7 @@ export class TokenByteTrie {
   private readonly offsets: Uint32Array;
   private readonly data: Uint8Array;
   private readonly continuations = new Map<number, Uint8Array>();
+  private readonly widths = new Map<number, Uint16Array>();
   private readonly slotCount: number;
   constructor(input: Iterable<readonly [number, Uint8Array]> | PackedTokenPieces) {
     const { ids, offsets, data } = Symbol.iterator in input ? packPieces(input) : input;
@@ -336,11 +342,34 @@ export class TokenByteTrie {
     }
     return allowed;
   }
+  /**
+   * Per token ID, the code points an ordinary string piece adds under one pending-UTF-8 class, plus one for a sequence it opens but
+   * leaves pending (a lead byte is refused once the string is full). A piece fits a `maxLength` string exactly when this is within the budget.
+   */
+  private codePoints(continuation: number): Uint16Array {
+    let widths = this.widths.get(continuation);
+    if (!widths) {
+      const pending = continuation === 0 ? 0 : continuation === 1 ? 1 : continuation === 2 || continuation === 4 || continuation === 5 ? 2 : 3;
+      widths = new Uint16Array(this.slotCount);
+      for (let entry = 0; entry < this.ids.length; entry++) {
+        if (this.structural[entry]) continue;
+        let owed = pending; let count = 0; let opened = false;
+        for (let at = this.offsets[entry]!, end = this.offsets[entry + 1]!; at < end; at++) {
+          const byte = this.data[at]!;
+          if (owed) { if (--owed === 0) count++; } else if (byte < 0x80) count++; else { owed = byte >= 0xf0 ? 3 : byte >= 0xe0 ? 2 : 1; opened = true; }
+        }
+        widths[this.ids[entry]!] = Math.min(count + (owed && opened ? 1 : 0), 0xffff);
+      }
+      this.widths.set(continuation, widths);
+    }
+    return widths;
+  }
   allowed(state: JsonGrammarState, deliver: (id: number) => void): void {
     const continuation = state.freeStringClass;
     if (continuation !== null) {
-      const allowed = this.continuation(continuation);
-      for (let id = 0; id < allowed.length; id++) if (allowed[id]) deliver(id);
+      const allowed = this.continuation(continuation); const budget = state.freeStringBudget;
+      const widths = budget === Infinity ? undefined : this.codePoints(continuation);
+      for (let id = 0; id < allowed.length; id++) if (allowed[id] && (!widths || widths[id]! <= budget)) deliver(id);
     }
     (continuation === null ? this.root : this.structuralRoot).walk(state, this.ids, deliver);
   }
@@ -348,8 +377,12 @@ export class TokenByteTrie {
   mark(state: JsonGrammarState, mask: Uint8Array): void {
     const continuation = state.freeStringClass;
     if (continuation !== null) {
-      const allowed = this.continuation(continuation);
-      mask.set(allowed.length > mask.length ? allowed.subarray(0, mask.length) : allowed);
+      const allowed = this.continuation(continuation); const budget = state.freeStringBudget;
+      if (budget === Infinity) mask.set(allowed.length > mask.length ? allowed.subarray(0, mask.length) : allowed);
+      else {
+        const widths = this.codePoints(continuation);
+        for (let id = 0, end = Math.min(allowed.length, mask.length); id < end; id++) if (allowed[id] && widths[id]! <= budget) mask[id] = 1;
+      }
     }
     (continuation === null ? this.root : this.structuralRoot).walk(state, this.ids, (id) => { if (id < mask.length) mask[id] = 1; });
   }
