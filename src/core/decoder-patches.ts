@@ -1,4 +1,4 @@
-import { Tensor, type PreTrainedModel } from '@huggingface/transformers';
+import { LogitsProcessor, Tensor, type PreTrainedModel } from '@huggingface/transformers';
 
 interface DecoderValue { location?: string; data?: unknown }
 interface DecoderSession { inputNames: readonly string[]; run(feeds: Record<string, { data: ArrayLike<unknown> }>, ...rest: unknown[]): Promise<unknown> }
@@ -51,4 +51,19 @@ export function releaseConsumedDecoderOutputs(model: PreTrainedModel): void {
     }
     return outputs;
   } });
+}
+
+/**
+ * Each generation step, Transformers.js copies the last position's logits (about 1 MB) for the logits processors and sampler, and the
+ * copy is garbage once the step has sampled. Like the decoder outputs above, it is released when the next step's logits arrive, so
+ * it does not feed V8's external-memory GC heuristics. Append it last, so that it sees the tensor the sampler reads. Node CPU only.
+ */
+export class PreviousLogitsRelease extends LogitsProcessor {
+  private previous: ArrayBuffer | undefined;
+  override _call<T extends DecoderValue>(_ids: bigint[][], logits: T): T {
+    const buffer = ownedBuffer(logits);
+    if (this.previous && this.previous !== buffer && !this.previous.detached) this.previous.transfer(0);
+    this.previous = buffer;
+    return logits;
+  }
 }

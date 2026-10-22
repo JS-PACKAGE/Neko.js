@@ -17,7 +17,7 @@ import { JsonGrammarProcessor, tokenizerByteTrie, type TokenByteTrie } from './j
 import { promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
 import { pinnedTextResources } from './text-resources.js';
 import { encodeImagesSeparately, useFastPatchFlattening } from './vision-patches.js';
-import { keepLastLogits, releaseConsumedDecoderOutputs } from './decoder-patches.js';
+import { PreviousLogitsRelease, keepLastLogits, releaseConsumedDecoderOutputs } from './decoder-patches.js';
 import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot } from './reuse.js';
 import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
 import { hashValue } from '../web/source.js';
@@ -393,6 +393,7 @@ export class VisionEngine {
       processors.push(new JsonGrammarProcessor(compiled.grammar, constrainedTrie, inputTokens, eosIds));
     }
     if (settings.sampling && settings.topP < 1) processors.push(new NucleusProcessor(settings.topP, settings.temperature, settings.topK));
+    if (this.backend.runtime === 'node') processors.push(new PreviousLogitsRelease());
     try {
       if (this.generating) throw new NekoError('Engine already has active inference', 'generate', 'RUNTIME_BUSY');
       this.generating = true; ownsGeneration = true;

@@ -1,4 +1,4 @@
-import { copyFile, cp, mkdir } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,32 @@ const nodeEntries = {
   documents: 'src/documents/index.ts',
 };
 
+// Transformers.js 4.2.0's greedy sampler takes the argmax with its shared `max()`, whose call sites see arrays of many element types, so
+// V8 runs it as a slow polymorphic loop: about 0.8 ms per token over the 248,320-entry vocabulary, against about 0.1 ms for a loop that
+// only ever sees Float32Array. Same comparisons and first-index tie-breaking; the build fails if the upstream line ever changes.
+const greedyArgmax = {
+  name: 'neko-greedy-argmax',
+  setup(build) {
+    build.onLoad({ filter: /[\\/]@huggingface[\\/]transformers[\\/]dist[\\/]transformers\.(node\.mjs|web\.js)$/ }, async ({ path }) => {
+      const source = await readFile(path, 'utf8');
+      const target = 'const argmax = max(logits.data)[1];';
+      if (source.split(target).length !== 2) throw new Error(`Greedy sampler argmax not found exactly once in ${path}`);
+      return { loader: 'js', contents: `${source.replace(target, 'const argmax = nekoGreedyArgmax(logits.data);')}
+function nekoGreedyArgmax(data) {
+  if (data.length === 0) throw Error("Array must not be empty");
+  let best = data[0];
+  let index = 0;
+  for (let i = 1; i < data.length; ++i) {
+    const value = data[i];
+    if (value > best) { best = value; index = i; }
+  }
+  return index;
+}
+` };
+    });
+  },
+};
+
 await mkdir(join(dist, 'browser'), { recursive: true });
 for (const [entryPoint, outfile] of browserEntries) {
   await build({
@@ -31,6 +57,7 @@ for (const [entryPoint, outfile] of browserEntries) {
     entryPoints: [entryPoint],
     outfile: join(dist, 'browser', outfile),
     bundle: true,
+    plugins: [greedyArgmax],
     format: 'esm',
     platform: 'browser',
     target: ['es2022'],
@@ -55,6 +82,7 @@ await build({
   entryPoints: nodeEntries,
   outdir: join(dist, 'node'),
   bundle: true,
+  plugins: [greedyArgmax],
   splitting: true,
   format: 'esm',
   platform: 'node',

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { PreTrainedModel } from '@huggingface/transformers';
-import { releaseConsumedDecoderOutputs } from '../src/core/decoder-patches.js';
+import { PreviousLogitsRelease, releaseConsumedDecoderOutputs } from '../src/core/decoder-patches.js';
 
 type Value = { location: string; data: Float32Array<ArrayBuffer> };
 const cpu = (length = 4): Value => ({ location: 'cpu', data: new Float32Array(length).fill(1) });
@@ -47,4 +47,24 @@ test('decoder output release leaves GPU-resident and failed-run state alone', as
   await run({ 'past_recurrent.0': first['present_recurrent.0'] });
   assert.equal(first['present_recurrent.0']!.data.buffer.detached, true);
   assert.equal(gpu.data.buffer.detached, false);
+});
+
+test('previous-step logits are released only once the next step has its own, and never when shared', () => {
+  const release = new PreviousLogitsRelease();
+  const step = (value: Value) => (release as unknown as (ids: bigint[][], logits: Value) => Value)([], value);
+  const first = cpu(); const second = cpu();
+  assert.equal(step(first), first);
+  assert.equal(first.data.buffer.detached, false);
+  // The same tensor seen again (for example a processor list re-run) is not the previous step's copy.
+  step(first);
+  assert.equal(first.data.buffer.detached, false);
+  step(second);
+  assert.equal(first.data.buffer.detached, true);
+  assert.equal(second.data.buffer.detached, false);
+  // A view into a larger buffer may be shared with something else; it is left to the garbage collector.
+  const shared = new Float32Array(new ArrayBuffer(32));
+  step({ location: 'cpu', data: shared.subarray(0, 4) });
+  assert.equal(second.data.buffer.detached, true);
+  step(cpu());
+  assert.equal(shared.buffer.detached, false);
 });
