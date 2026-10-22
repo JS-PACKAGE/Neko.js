@@ -5,7 +5,7 @@ import { hashValue, selectPage, snapshotPage } from '../web/source.js';
 import { auditClaim } from './audit.js';
 import { reportChecksum, sourceCoverage, validateSourceFacts } from './evidence.js';
 import { renderMarkdown } from './markdown.js';
-import { validateStructuredReport } from './validate.js';
+import { validateReportContents } from './validate.js';
 import { ReportError, validateDescribeOptions, validateReportCheckpoint, type DescribeOptions, type InternalReportContext, type ReportCheckpoint, type ReportPlan, type ReportPhase } from './generate.js';
 
 export interface ExtractiveReportContext extends InternalReportContext { model: ModelIdentity; execution: ExecutionInfo; }
@@ -42,9 +42,11 @@ export async function generateExtractiveReport(input: Page, options: DescribeOpt
     }
     const elapsedBefore = checkpoint.elapsedMs; const claims: ReportClaim[] = []; let resumedStages = 0; let callbackFailed = false;
     const used = new Set<string>();
-    const save = async (notify = true) => {
+    // The checksum is observable only through `onCheckpoint` or a ReportError's checkpoint (whose save recomputes it), so the final
+    // save of a successful report without a callback skips hashing the whole checkpoint.
+    const save = async (notify = true, checksum = true) => {
       checkpoint.elapsedMs = elapsedBefore + performance.now() - started;
-      checkpoint.checksum = await hashValue({ ...checkpoint, checksum: undefined });
+      if (checksum) checkpoint.checksum = await hashValue({ ...checkpoint, checksum: undefined });
       if (notify && options.onCheckpoint) try { await awaitUser(() => options.onCheckpoint!(structuredClone(checkpoint)), signal); } catch (cause) { callbackFailed = true; throw cause; }
     };
     const retain = async (id: string, phase: ReportPhase, fact: ReportSourceFact, target: string) => {
@@ -73,9 +75,9 @@ export async function generateExtractiveReport(input: Page, options: DescribeOpt
       const summary = await retain('summary', 'summary', sourceFacts[0]!, 'page.summary');
       const conclusion = await retain('conclusion', 'conclusion', sourceFacts[sourceFacts.length - 1]!, 'conclusion');
       if (Object.keys(checkpoint.completed).some((id) => !used.has(id))) throw new NekoError('Extractive checkpoint contains unplanned stages', 'report', 'CHECKPOINT_INVALID');
-      await save();
+      await save(true, options.onCheckpoint !== undefined);
       const report: StructuredReport = { schemaVersion: 3, mode: 'extractive', integrity: { algorithm: 'sha256', checksum: '' }, sourceFacts, language, imageFailurePolicy, page: { url: page.url, ...(page.title === undefined ? {} : { title: page.title }), summary }, sections, images: page.images.map(({ id, url, alt }) => ({ status: 'retained', imageId: id, url, ...(alt === undefined ? {} : { alt }), source: { kind: 'image', imageId: id } })), conclusion, snapshot, claims, metadata: { model: internal.model, backend: null, usage: { ...checkpoint.usage }, timings: { ...checkpoint.timings, totalMs: checkpoint.elapsedMs }, memory: { jsHeapBytes: null, gpuBytes: null }, execution: internal.execution, resumedStages, retryAttempts: 0, evidence: 'references-validated-heuristic-audit', coverage: sourceCoverage(snapshot, sourceFacts, claims, 'retained-source', 'extractive') } };
-      report.integrity.checksum = await reportChecksum(report); await validateStructuredReport(report, page); signal?.throwIfAborted();
+      await validateReportContents(report, page); report.integrity.checksum = await reportChecksum(report); signal?.throwIfAborted();
       return options.format === 'markdown' ? renderMarkdown(report) : report;
     } catch (cause) {
       await save(!callbackFailed && !signal?.aborted);

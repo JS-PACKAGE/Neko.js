@@ -4,7 +4,7 @@ import type { VisionEngine, InferenceBudget, InferenceResult, ModelIdentity, Pre
 import { generationSettings, type GenerationOptions } from '../core/generation.js';
 import { atStage, awaitUser, NekoError, ERROR_CODES } from '../errors.js';
 import { hashValue, selectPage, snapshotPage } from '../web/source.js';
-import { validateStructuredReport } from './validate.js';
+import { validateReportContents } from './validate.js';
 import { renderMarkdown } from './markdown.js';
 import { validateGeneratedLanguage } from './language.js';
 import { compileStructuredSchema } from '../core/structured.js';
@@ -513,8 +513,8 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         if (['STRUCTURED_OUTPUT', 'MODEL_OUTPUT'].includes(attempt.errorCode ?? '')) failedOutputs.add(attempt.id);
       }
       const report: StructuredReport = { schemaVersion: 3, mode, integrity: { algorithm: 'sha256', checksum: '' }, sourceFacts, language, imageFailurePolicy, page: { url: page.url, ...(page.title === undefined ? {} : { title: page.title }), summary }, sections, images, conclusion, snapshot, claims, metadata: { model: engine.identity, backend, usage: checkpoint.usage, timings: { ...checkpoint.timings, totalMs: elapsed() }, memory: { jsHeapBytes: null, gpuBytes: null }, execution: internal.execution ?? { mode: 'inline', runtime: backend.runtime }, resumedStages, retryAttempts, evidence: 'references-validated-heuristic-audit', coverage: sourceCoverage(snapshot, sourceFacts, claims, conclusionBasis) } };
-      report.integrity.checksum = await reportChecksum(report);
-      await validateStructuredReport(report, page); signal?.throwIfAborted(); return format === 'markdown' ? renderMarkdown(report) : report;
+      await validateReportContents(report, page); report.integrity.checksum = await reportChecksum(report);
+      signal?.throwIfAborted(); return format === 'markdown' ? renderMarkdown(report) : report;
     } catch (cause) {
       if (!callbackFailed && !signal?.aborted) await save(); else await recordCheckpoint();
       const error = cause instanceof NekoError ? cause : signal?.aborted && !callbackFailed ? new NekoError('Report was cancelled', 'report', 'ABORTED', { cause: signal.reason }) : new NekoError(cause instanceof Error ? cause.message : String(cause), 'report', 'OPERATION_FAILED', { cause });

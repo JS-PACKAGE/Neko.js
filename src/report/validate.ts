@@ -192,18 +192,27 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
   for (const key of ['selectedTextCharacters', 'retainedQuoteCount', 'retainedTextCharacters', 'semanticRetention'] as const) if (coverage[key] !== expectedCoverage[key]) throw new TypeError(`Report ${key} coverage is inconsistent`);
 }
 
-/** Validates hashes, exact references and reproducible limited lexical audits, never real-world truth. */
-export async function validateStructuredReport(report: unknown, page?: Page): Promise<StructuredReport> {
+/**
+ * Everything `validateStructuredReport` checks except the integrity checksum. Report generation validates its own report with this
+ * and then computes the checksum once, instead of hashing the whole report (megabytes for long pages) a second time to re-check it.
+ */
+export async function validateReportContents(report: unknown, page?: Page): Promise<StructuredReport> {
   object(report, 'Report');
   if (report.schemaVersion !== 3) throw new TypeError('Unsupported StructuredReport schemaVersion; expected 3');
   object(report.snapshot, 'Report snapshot'); validatePage(report.snapshot.source);
   const [expected, external] = await Promise.all([snapshotPage(report.snapshot.source), page === undefined || page === report.snapshot.source ? undefined : snapshotPage(page)]);
   if (external && external.id !== expected.id) throw new TypeError('Report source differs from the supplied selected Page');
   validateReportBody(report, expected.source); validateEvidence(report, expected);
-  object(report.integrity, 'Report integrity');
-  digest(report.integrity.checksum, 'Report checksum');
-  if (report.integrity.algorithm !== 'sha256' || report.integrity.checksum !== await reportChecksum(report)) throw new TypeError('Report checksum is invalid; checksums are not authentication');
   return report;
+}
+
+/** Validates hashes, exact references and reproducible limited lexical audits, never real-world truth. */
+export async function validateStructuredReport(report: unknown, page?: Page): Promise<StructuredReport> {
+  const checked = await validateReportContents(report, page);
+  object(checked.integrity, 'Report integrity');
+  digest(checked.integrity.checksum, 'Report checksum');
+  if (checked.integrity.algorithm !== 'sha256' || checked.integrity.checksum !== await reportChecksum(checked)) throw new TypeError('Report checksum is invalid; checksums are not authentication');
+  return checked;
 }
 
 export async function serializeStructuredReport(report: unknown, page?: Page): Promise<string> {
