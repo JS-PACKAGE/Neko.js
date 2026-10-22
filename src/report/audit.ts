@@ -52,12 +52,16 @@ export function auditClaim(text: string, citations: readonly Citation[], snapsho
     return citation.snapshotId === snapshot.id && Number.isSafeInteger(citation.startOffset) && Number.isSafeInteger(citation.endOffset) && citation.startOffset >= 0 && citation.endOffset > citation.startOffset && paragraph !== undefined && citation.endOffset <= paragraph.text.length && citation.versionId === versions!.get(citation.paragraphId)?.versionId && paragraph.text.slice(citation.startOffset, citation.endOffset) === citation.quote;
   }).map(({ quote }) => quote);
   const exact = text.length > 0 && quotes.some((quote) => quote.includes(text));
+  // The claim's values per kind are used for every candidate sentence and again for the checks, and a quote equal to the claim (extractive
+  // reports) reuses them. Callers only read these arrays, and each check below gets its own copy.
+  const claimValues = new Map<AuditKind, string[]>();
+  const claimOf = (kind: AuditKind): string[] => { let found = claimValues.get(kind); if (!found) claimValues.set(kind, found = values(text, kind)); return found; };
   const conflicts = new Set<AuditKind>();
   if (!exact) for (const quote of quotes) {
     const candidates = [quote, ...Array.from(new Intl.Segmenter('en', { granularity: 'sentence' }).segment(quote), ({ segment }) => segment)];
     for (const candidate of candidates) {
       for (const kind of Object.keys(patterns) as AuditKind[]) {
-        const a = values(text, kind); const b = values(candidate, kind);
+        const a = claimOf(kind); const b = values(candidate, kind);
         if (kind === 'negation') {
           if ((a.length === 0) !== (b.length === 0) && normalized(text.replace(patterns.negation, '')) === normalized(candidate.replace(patterns.negation, ''))) conflicts.add(kind);
         } else if (a.filter((value) => !b.includes(value)).length === 1 && b.filter((value) => !a.includes(value)).length === 1 && a.length === b.length && normalized(text.replace(patterns[kind], '<fact>')) === normalized(candidate.replace(patterns[kind], '<fact>'))) conflicts.add(kind);
@@ -67,7 +71,7 @@ export function auditClaim(text: string, citations: readonly Citation[], snapsho
   return {
     version: 1, method: 'conservative-lexical-v1', status: exact ? 'supported' : conflicts.size ? 'contradicted' : 'unknown',
     checks: (Object.keys(patterns) as AuditKind[]).map((kind) => {
-      const claim = values(text, kind); const evidence = [...new Set(quotes.flatMap((quote) => values(quote, kind)))];
+      const claim = [...claimOf(kind)]; const evidence = [...new Set(quotes.flatMap((quote) => quote === text ? claimOf(kind) : values(quote, kind)))];
       return { kind, status: conflicts.has(kind) ? 'conflict' : !claim.length ? 'absent' : exact ? 'matched' : 'unresolved', claim, evidence };
     }), limits: [...limits],
   };
