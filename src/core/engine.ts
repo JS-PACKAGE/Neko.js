@@ -77,6 +77,8 @@ async function availableThreads(): Promise<number> {
   return os.availableParallelism();
 }
 const MIN_PREFIX_TOKENS = 32;
+/** Prompt texts whose counts must match full rendering before `countPrompt` counts only the user text; the first is the base. */
+const PROMPT_PROBES = ['x', '  Source JSON:\n[{"evidenceId":"q1","quote":"Ünïcödé 貓 😀"}]\nNow output only the requested JSON object.\n\n', '\u0301 combining first and last e\u0301', '<|im_end|>\n<|im_start|>assistant\nspecial-token text', '\t\u3000wide\u00a0spaces\u2028'];
 function disposeInputs(inputs: Record<string, unknown>): void { for (const value of Object.values(inputs)) if (value instanceof Tensor) value.dispose(); }
 
 export class VisionEngine {
@@ -87,6 +89,8 @@ export class VisionEngine {
   private readonly preparedImages = new WeakMap<PreparedImage, { image: DecodedImage; observation: ImageObservation }>();
   private readonly imageCache = new ImagePreprocessCache();
   private tokenTrie?: TokenByteTrie;
+  /** Per structured instruction: tokens of a prompt-only chat outside its user text, or null when that shortcut was not exact. */
+  private readonly promptOverheads = new Map<string, number | null>();
   private readonly tokenCache: PromptTokenCache;
   private readonly reuseCache: InferenceReuseCache;
   private generating = false;
@@ -147,8 +151,29 @@ export class VisionEngine {
     if (!Number.isSafeInteger(limit) || limit < 32 || limit > this.modelContextTokens) throw new RangeError(`contextWindowTokens must be between 32 and ${this.modelContextTokens}`);
     return limit;
   }
+  /**
+   * Report planning counts thousands of prompts that differ only in their user text; rendering the chat template and re-tokenizing the
+   * system instruction for each cost most of the time. The pinned template trims the user text and inserts it as one section between
+   * special tokens, which the tokenizer encodes independently, so the count is a per-instruction constant plus that section's tokens.
+   * The constant is checked against full rendering on awkward probes (edges, combining marks, special-token text) before it is used,
+   * and text the template treats differently (empty, or wrapped in `<tool_response>` tags, which it rejects) is still fully rendered.
+   */
   countPrompt(prompt: string, structured?: CompiledStructuredSchema): number {
-    return this.processor.tokenizer!.encode(renderInferenceChat(this.processor, { prompt }, structured ? structuredInstruction(structured) : undefined).text).length;
+    const instruction = structured ? structuredInstruction(structured) : undefined;
+    const tokenizer = this.processor.tokenizer!;
+    const full = (text: string) => tokenizer.encode(renderInferenceChat(this.processor, { prompt: text }, instruction).text).length;
+    const section = (text: string) => tokenizer.encode(`user\n${text.trim()}`, { add_special_tokens: false }).length;
+    const trimmed = typeof prompt === 'string' ? prompt.trim() : '';
+    if (!trimmed || trimmed.startsWith('<tool_response>') && trimmed.endsWith('</tool_response>')) return full(prompt);
+    const key = instruction ?? '';
+    let overhead = this.promptOverheads.get(key);
+    if (overhead === undefined) {
+      const base = full(PROMPT_PROBES[0]!) - section(PROMPT_PROBES[0]!);
+      overhead = PROMPT_PROBES.every((probe) => full(probe) === base + section(probe)) ? base : null;
+      if (this.promptOverheads.size >= 32) this.promptOverheads.clear();
+      this.promptOverheads.set(key, overhead);
+    }
+    return overhead === null ? full(prompt) : overhead + section(prompt);
   }
   splitText(text: string, maxTokens: number): string[] {
     if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) throw new RangeError('Chunk token budget must be positive');
