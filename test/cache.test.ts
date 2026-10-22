@@ -27,6 +27,21 @@ test('corrupt native cache content cannot reach the Transformers config loader o
   } finally { installation.restore(); env.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });
 
+test('int8 decoder graphs are patched only after verification and resolve external data from the pinned onnx directory', async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-int8-graph-'));
+  const graph = 'onnx/decoder_model_merged_q4.onnx';
+  await mkdir(join(directory, MODEL_ID, MODEL_REVISION, 'onnx'), { recursive: true });
+  await writeFile(join(directory, MODEL_ID, MODEL_REVISION, graph), new Uint8Array(MODEL_FILES[graph].size));
+  const installation = await installVerifiedCache({ cacheDir: directory, localFilesOnly: true, int8MatMul: true });
+  try {
+    assert.equal(installation.externalDataDirectory, join(directory, MODEL_ID, MODEL_REVISION, 'onnx'));
+    const response = await env.customCache!.match(modelFileUrl(graph)) as Response;
+    await assert.rejects(response.arrayBuffer(), ModelIntegrityError);
+  } finally { installation.restore(); await rm(directory, { recursive: true, force: true }); }
+  const plain = await installVerifiedCache({ cacheDir: directory });
+  try { assert.equal(plain.externalDataDirectory, undefined); } finally { plain.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('bounded native cache writes reject oversized and hash-mismatched resources without promoting an entry', async () => {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-onnx-bounds-'));
   const installation = await installVerifiedCache({ cacheDir: directory });

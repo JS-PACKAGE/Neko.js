@@ -95,16 +95,21 @@ export class VisionEngine {
   reuseCacheInfo() { return this.reuseCache.info(); }
   releaseGenerationState(handle: GenerationStateHandle): void { if (this.generating) throw new NekoError('Cannot release generation state during inference', 'generate', 'RUNTIME_BUSY'); this.reuseCache.release(handle); }
   clearReuseCaches(): void { if (this.generating) throw new NekoError('Cannot clear reuse caches during inference', 'generate', 'RUNTIME_BUSY'); this.reuseCache.clear(); }
-  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now(), config: { profile?: ModelProfileId; model?: ModelId; policy?: ResourcePolicy; reuseCacheLimits?: ReuseCacheLimits } = {}): Promise<VisionEngine> {
+  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now(), config: { profile?: ModelProfileId; model?: ModelId; policy?: ResourcePolicy; reuseCacheLimits?: ReuseCacheLimits; externalDataDirectory?: string } = {}): Promise<VisionEngine> {
     return atStage('load', signal, async () => {
       const selected = getRegisteredModelProfile(config.profile, config.model);
       const options = { revision: selected.revision, local_files_only: localFilesOnly, ...(progressCallback ? { progress_callback: progressCallback } : {}) };
       // Native ONNX Runtime sizes its intra-op pool from physical cores; use every thread the process may run on.
       // Idle workers park instead of spin-waiting: spinning burns every core between operators and starves the process (and its neighbours) when the machine is shared.
       const threads = backend.runtime === 'node' ? await availableThreads() : undefined;
+      const external = config.externalDataDirectory;
+      // Graphs served from memory (VerifiedCacheOptions.int8MatMul) resolve external data against `external` instead of a model path.
+      // ONNX Runtime 1.30's KleidiAI int8 MatMulNBits kernels run in Arm SME streaming mode on chips such as Apple M5, where a signal delivered
+      // mid-kernel (for example a sampling profiler's SIGPROF) killed the process with SIGILL; MLAS's own int8 kernels measured as fast.
+      const extra = { session: { intra_op: { allow_spinning: '0' }, ...(external ? { model_external_initializers_file_folder_path: external } : {}) }, ...(external ? { mlas: { disable_kleidiai: '1' } } : {}) };
       // Session creation is native and asynchronous, so it overlaps the main-thread tokenizer parse below instead of waiting for it.
       const loading = Qwen3_5ForConditionalGeneration.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device,
-        session_options: { executionProviders: backend.executionProviders, ...(threads ? { intraOpNumThreads: threads, extra: { session: { intra_op: { allow_spinning: '0' } } } } : {}), ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) },
+        session_options: { executionProviders: backend.executionProviders, ...(threads ? { intraOpNumThreads: threads, extra } : {}), ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) },
       });
       loading.catch(() => undefined); // The rejection is surfaced by the awaits below; this only prevents it being unhandled while tokenizer work is pending.
       let model: PreTrainedModel;

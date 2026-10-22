@@ -398,7 +398,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
     if (backend.runtime === 'browser' && backend.device === 'cpu') throw new NekoError('CPU/WASM cannot execute this pinned model: GatherBlockQuantized(1) is unavailable. Use a supported WebGPU browser; no automatic fallback is performed.', 'backend', 'UNSUPPORTED_BACKEND');
     let installation: VerifiedCacheInstallation | undefined; let restore: (() => void) | undefined;
     try {
-      installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly, model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.downloadConcurrency === undefined ? {} : { downloadConcurrency: options.downloadConcurrency }), ...(options.resumeDownloads === undefined ? {} : { resumeDownloads: options.resumeDownloads }), ...(options.onCacheProgress ?? options.progressCallback ? { onProgress: options.onCacheProgress ?? options.progressCallback } : {}) });
+      installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly, model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.downloadConcurrency === undefined ? {} : { downloadConcurrency: options.downloadConcurrency }), ...(options.resumeDownloads === undefined ? {} : { resumeDownloads: options.resumeDownloads }), ...(options.onCacheProgress ?? options.progressCallback ? { onProgress: options.onCacheProgress ?? options.progressCallback } : {}), int8MatMul: backend.runtime === 'node' && backend.device === 'cpu' });
       const cache = installation; const previousWasmCache = env.useWasmCache; const wasm = env.backends.onnx.wasm;
       const previous = wasm && { paths: wasm.wasmPaths, binary: wasm.wasmBinary, threads: wasm.numThreads, proxy: wasm.proxy };
       let moduleUrl: string | undefined;
@@ -426,7 +426,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
       options.signal?.throwIfAborted();
       const engines = new EngineCache((signal) => cache.withSignal(signal, async () => {
         const started = performance.now(); await configureRuntime(signal); await atStage('load', signal, () => cache.prefetch(signal));
-        return VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}) });
+        return VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}), ...(cache.externalDataDirectory === undefined ? {} : { externalDataDirectory: cache.externalDataDirectory }) });
       }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000, forgetPinnedTextResources);
       return new LocalNeko(engines, cache, restore, backend, options, admission);
     } catch (error) { if (restore) restore(); else installation?.restore(); throw error; }

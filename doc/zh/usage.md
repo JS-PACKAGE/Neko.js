@@ -527,6 +527,8 @@ Checkpoint 的 `sectionPlan` 記錄依序排列的 source-fact ID 群組，每�
 
 在 Node 上，每個 ONNX payload 檔案每個已安裝的 runtime 只雜湊一次：Transformers.js 每次載入會多次要求這些檔案，因此未變動的檔案（device、inode、大小、mtime 與 ctime 皆相同；ctime 無法由呼叫端設定）在該 installation 內不會重複雜湊。新行程、檔案身分改變，以及所有非 ONNX 檔案仍完整驗證，並以 1 MiB 為單位讀取。Node session 使用 `os.availableParallelism()` 個 intra-op 執行緒。在一台 Apple M 系列機器（4 效能核心加 6 效率核心）上，416 token 的 prefill 由約 213–238 提升到約 290 tokens/s，decode 由約 28 降到約 25 tokens/s；這只是單機觀察、不是保證，最佳執行緒數取決於硬體。這些執行緒在 operator 之間會休眠而不是自旋等待（`session.intra_op.allow_spinning=0`）。在與其他繁忙行程共用的機器上，每個生成 token 的 CPU 時間減少一半以上，decode 延遲也下降；在其他方面閒置的機器上，此設定的延遲尚未量測。
 
+Node CPU 上，decoder 的 4-bit `MatMulNBits` 層會將 activation 逐 block 量化為 int8（ONNX Runtime `accuracy_level` 4）。固定的 graph 未設定 level，否則 ONNX Runtime 會以 fp32 相乘。Graph 在通過 SHA-256 驗證後於記憶體中修補，不修改快取檔案。在一台負載中的 Apple M5 單次量測中，decode 由約 63–114 降到約 22–30 ms/token，每個生成 token 的行程 CPU 時間由約 310 降到約 100 ms，1,409 token 提示的首個 token 由約 7.5 s 降到約 4.4 s。**輸出與 fp32 activation 並非逐位元相同：**六個 greedy 請求中，三個較短的文字／圖片／結構化請求相同，三個較長生成在數十個 token 後分歧；品質 fixture 的 claim 評分相同。ONNX Runtime 1.30 的 KleidiAI int8 kernel 在 Arm SME 硬體上若收到訊號（例如取樣 profiler 的 `SIGPROF`）會以 `SIGILL` 終止行程，因此 Node CPU session 停用 KleidiAI；這使本機 fp16 vision encoder 變慢（圖片首個 token 由約 1.7–1.8 s 變為約 2.4–3.3 s）。瀏覽器 WebGPU 與 Node WebGPU 不受影響。
+
 ### 並行下載與 validator-bound 續傳
 
 ```ts

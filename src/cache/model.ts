@@ -16,6 +16,7 @@ import { nodeDownloadStage } from './node-download.js';
 import { browserDownloadStage } from './browser-download.js';
 import { withBrowserInstallLock, withNodeInstallLock } from './lock.js';
 import type { AsyncLocalStorage } from 'node:async_hooks';
+import { INT8_MATMUL_GRAPHS, withInt8MatMulNBits } from './graph-patch.js';
 
 const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
 
@@ -53,6 +54,8 @@ export interface VerifiedCacheOptions {
   downloadConcurrency?: number;
   /** Preserve interrupted, validator-bound staging for the next explicit installation. Defaults to true. */
   resumeDownloads?: boolean;
+  /** Node CPU only: serve verified decoder graphs with int8 MatMulNBits activations from memory. */
+  int8MatMul?: boolean;
 }
 export interface ModelCacheStatus { downloaded: boolean; verified: boolean; bytes: number; totalBytes: number; path: string; files: { name: ModelFileName; present: boolean; verified: boolean; bytes: number }[]; }
 export interface ModelCacheDiagnostics {
@@ -73,6 +76,8 @@ export interface VerifiedCacheInstallation {
   importBundle(source: ModelBundleSource, signal?: AbortSignal): Promise<void>;
   diagnostics(signal?: AbortSignal): Promise<ModelCacheDiagnostics>;
   withSignal<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T>;
+  /** Set when `int8MatMul` serves graphs from memory: ONNX Runtime must resolve their external data here. */
+  readonly externalDataDirectory?: string;
 }
 
 type ResourceSpec = { readonly size: number; readonly sha256: string };
@@ -84,6 +89,8 @@ type NativeCache = {
   stage(request: string): Promise<DownloadStage>;
   withLock<T>(request: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   path: string;
+  /** Node directory holding the pinned `onnx/` files. */
+  onnxDirectory?: string;
 };
 type NodeHash = { update(bytes: Uint8Array): NodeHash; digest(encoding: 'hex'): string };
 let nodeCrypto: Promise<{ createHash(algorithm: string): NodeHash }> | undefined;
@@ -302,6 +309,7 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
   await secureDirectory();
   return {
     path: root,
+    onnxDirectory: path.join(root, model.id, model.revision, 'onnx'),
     async stage(request) {
       return nodeDownloadStage({
         directory: root, key: await coordinationKey(request), validate: secureDirectory, validateFile: secureAuxiliary,
@@ -394,6 +402,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   let browserSignalDepth = 0;
   const currentSignal = () => signalContext?.getStore()?.signal ?? activeSignal;
   const hashedFiles = new Map<string, string>();
+  const externalDataDirectory = options.int8MatMul ? backing.onnxDirectory : undefined;
   const verifiedCache = {
     async match(request: string, signal = currentSignal()): Promise<Response | string | undefined> {
       signal?.throwIfAborted();
@@ -404,6 +413,11 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       try {
         response = await backing.match(nativeKey(request, model, name));
         if (!response || !name) return response as Response | undefined;
+        if (externalDataDirectory && Object.hasOwn(INT8_MATMUL_GRAPHS, name)) {
+          // Patch exactly the bytes just verified; ONNX Runtime opens the unchanged external data from `externalDataDirectory`.
+          const graph = withInt8MatMulNBits(new Uint8Array(await (await readVerified(response, name, model.allFiles[name], options, 'verify', signal)).arrayBuffer()));
+          return new Response(graph, { status: 200, headers: { 'content-length': String(graph.byteLength) } });
+        }
         if (isNode && name.startsWith('onnx/') && response.filePath) {
           // Transformers.js asks for each ONNX file several times per load; hash unchanged bytes once per installation.
           if (response.fingerprint !== undefined && hashedFiles.get(response.filePath) === response.fingerprint) {
@@ -599,6 +613,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     },
   };
   return {
+    ...(externalDataDirectory === undefined ? {} : { externalDataDirectory }),
     restore() {
       if (restored) return;
       restored = true;
