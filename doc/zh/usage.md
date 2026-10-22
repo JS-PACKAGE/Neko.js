@@ -178,7 +178,9 @@ try {
 
 `inferStream` 回傳有界 `AsyncIterable`，事件為 `token`／最後的 `result`；完整 usage 在 result。消費者過慢溢位為 `STREAM_OVERFLOW` 並取消生成；提前 `break`／iterator return 亦取消，不默默丟棄片段。串流在 EOF／取消前保留佇列所有權。
 
-Session 的 `send(content, options?)`／`plan(content, options?)` 接受文字或 chat content array。操作序列化；只有成功完成的 user／assistant turn 才交易式寫入 history，規劃不提交。`contextPolicy: 'error'` 是預設；`'drop-oldest'` 只移除完整最舊 turn，保留 system。`maxHistoryMessages` 包含 system 且至多 128。同步 `history()` 提供擁有副本；branch 有獨立 history，但共用 host。`reset()` 保留 system；`export()`／`import(snapshot)` 使用 model-bound `version: 1` snapshot。圖片匯出只接受可攜 raster data URL／擁有 raw pixels；外部 URL／path 被拒絕，匯出不為此讀檔或 fetch。Snapshot 可能含敏感對話／像素，須安全保存。Dispose session 不 dispose host。每次生成仍處理整段對話；只可能重用 plan/send 的完全相同 tokenization，並非 KV／跨 turn prefix 重用。
+Session 的 `send(content, options?)`／`plan(content, options?)` 接受文字或 chat content array。操作序列化；只有成功完成的 user／assistant turn 才交易式寫入 history，規劃不提交。`contextPolicy: 'error'` 是預設；`'drop-oldest'` 只移除完整最舊 turn，保留 system。`maxHistoryMessages` 包含 system 且至多 128。同步 `history()` 提供擁有副本；branch 有獨立 history，但共用 host。`reset()` 保留 system；`export()`／`import(snapshot)` 使用 model-bound `version: 1` snapshot。圖片匯出只接受可攜 raster data URL／擁有 raw pixels；外部 URL／path 被拒絕，匯出不為此讀檔或 fetch。Snapshot 可能含敏感對話／像素，須安全保存。Dispose session 不 dispose host。
+
+預設每次 send 都 prefill 整段對話。`neko.session({ reuseState: true })` 會在每個成功提交的 turn 後保留 decoder state 並交給下一次 send，因此只需 prefill 上一個 user turn 之後的歷史。在負載中的 Apple M5（Node CPU）六輪對話中，914 token 的第六輪首個 token 由約 3.9–8.2 s 降到約 0.8–1.2 s（inline 與 worker）。State 存在引擎有界的 reuse cache（`reuseCache` 上限；預設 4 筆／512 MiB；每筆含兩份約 20 MB 加每 token 24 KB 的 snapshot），並於下一次提交、`reset()`、`import()` 與 `dispose()` 釋放；未提交的串流會釋放其新 state。若 `drop-oldest` 移除了 turn 或新 turn 含圖片則不使用 state；被淘汰、已釋放或無法延伸的 state 會退回一次完整 prefill。Branch 不繼承 state。因提示分段 prefill，greedy 輸出可能與完整 prefill 略有不同。
 
 ### 結構化、報告與問答串流
 
@@ -258,7 +260,7 @@ try {
 
 ### Decoder state 與 vision 重用
 
-`infer`／`inferStructured` 接受 `reuse: { retainState?, state?, vision? }`。`retainState: true` 的成功結果可提供 `result.reuse.state`；將不透明 handle 作為 `state` 傳入相容且 token prefix 精確延伸的請求。`vision: true` 啟用處理後的 vision encoder features 重用。這和 normalized pixels／rendered prompt tokenization 快取不同，也不是 session 自動 KV 重用。
+`infer`／`inferStructured` 接受 `reuse: { retainState?, state?, vision? }`。`retainState: true` 的成功結果可提供 `result.reuse.state`；將不透明 handle 作為 `state` 傳入相容且 token prefix 精確延伸的請求。`vision: true` 啟用處理後的 vision encoder features 重用。這和 normalized pixels／rendered prompt tokenization 快取不同；session 只有在 `reuseState: true` 時才使用 decoder state 重用。
 
 ```ts
 const retained = await neko.infer({

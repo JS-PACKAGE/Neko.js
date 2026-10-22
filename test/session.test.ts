@@ -305,3 +305,34 @@ test('normal stream exhaustion atomically seals a committed turn before later ca
   assert.deepEqual(setup.session.history().map(({ content }) => content), ['committed', setup.result.text]);
   assert.deepEqual((await setup.session.export()).messages, setup.session.history());
 });
+
+test('reuseState sessions continue from the last committed turn, prefill fully when the state is rejected or cannot extend, and release superseded state', async () => {
+  let issued = 0; const released: string[] = []; let rejectState = false;
+  const setup = fixture({ reuseState: true, contextPolicy: 'drop-oldest' }, async (options) => {
+    if (rejectState && options.reuse?.state) throw new NekoError('Generation state is not owned by this engine, has been released, or was evicted', 'generate', 'INVALID_INPUT');
+    return { ...setup.result, reuse: { reusedDecoderTokens: 0, visionEncoderHits: 0, visionEncoderMisses: 0, state: { id: `state-${++issued}` } } };
+  });
+  setup.host.releaseGenerationState = async (handle) => { released.push(handle.id); };
+  const states = () => setup.inferred.map((options) => options.reuse?.state?.id ?? null);
+  await setup.session.send('one'); await setup.session.send('two');
+  assert.deepEqual(states(), [null, 'state-1']);
+  assert.ok(setup.inferred.every((options) => options.reuse?.retainState === true));
+  rejectState = true;
+  await setup.session.send('three');
+  assert.deepEqual(states(), [null, 'state-1', 'state-2', null], 'a rejected state is retried once with a full prefill');
+  rejectState = false;
+  setup.setFits((options) => options.messages!.length <= 5);
+  await setup.session.send('four');
+  assert.equal(states().at(-1), null, 'dropping the oldest turn means the retained state no longer prefixes the prompt');
+  setup.setFits(() => true);
+  const rolledBack = setup.session.sendStream('five');
+  for await (const event of rolledBack) if (event.type === 'result') break;
+  await setup.session.send([{ type: 'text', text: 'six' }]);
+  assert.equal(states().at(-1), 'state-4', 'an uncommitted stream neither adopts its state nor discards the committed one');
+  await setup.session.reset(); await setup.session.dispose();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(released, ['state-1', 'state-2', 'state-3', 'state-5', 'state-4', 'state-6']);
+  const plain = fixture();
+  await plain.session.send('one'); await plain.session.send('two');
+  assert.ok(plain.inferred.every((options) => options.reuse === undefined));
+});

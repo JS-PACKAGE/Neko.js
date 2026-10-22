@@ -1,4 +1,5 @@
 import type { ChatContent, ChatMessage, InferOptions, InferencePlan, InferenceResult, ModelIdentity } from './engine.js';
+import type { GenerationStateHandle } from '../types.js';
 import type { ImageInput } from '../web/image.js';
 import { awaitUser, NekoError } from '../errors.js';
 import { validateInferenceOptions } from './preflight.js';
@@ -8,6 +9,8 @@ import type { InferenceStreamEvent } from '../runtime/stream.js';
 export interface SessionHost {
   infer(options: InferOptions): Promise<InferenceResult>;
   planInference(options: InferOptions): Promise<InferencePlan>;
+  /** Used by `reuseState` sessions to drop superseded decoder state; failures are ignored. */
+  releaseGenerationState?(handle: GenerationStateHandle): Promise<void>;
 }
 export type SessionDefaults = Pick<InferOptions, 'maxNewTokens' | 'contextWindowTokens' | 'generation' | 'maxImageBytes' | 'timeoutMs' | 'hardDeadlineMs'>;
 export interface SessionOptions extends SessionDefaults {
@@ -15,6 +18,11 @@ export interface SessionOptions extends SessionDefaults {
   contextPolicy?: 'error' | 'drop-oldest';
   /** Includes the system message and reserves space for each complete user/assistant turn. */
   maxHistoryMessages?: number;
+  /**
+   * Retain decoder state after each turn so the next send prefills only the history after the previous user turn. Uses the engine's
+   * bounded reuse cache; an evicted, released or non-extending state falls back to a full prefill. Outputs can differ slightly from a full prefill.
+   */
+  reuseState?: boolean;
 }
 export type SessionSendOptions = SessionDefaults & Pick<InferOptions, 'signal' | 'onToken' | 'validateDestination'>;
 export type SessionSendStreamOptions = SessionSendOptions & StreamBufferOptions;
@@ -62,7 +70,8 @@ function copyOptions<T extends SessionDefaults>(options: T): T {
 }
 function settings(input: SessionOptions): SessionOptions {
   if (!record(input)) throw new TypeError('Session options must be an object');
-  keys(input, ['system', 'contextPolicy', 'maxHistoryMessages', 'maxNewTokens', 'contextWindowTokens', 'generation', 'maxImageBytes', 'timeoutMs', 'hardDeadlineMs']);
+  keys(input, ['system', 'contextPolicy', 'maxHistoryMessages', 'reuseState', 'maxNewTokens', 'contextWindowTokens', 'generation', 'maxImageBytes', 'timeoutMs', 'hardDeadlineMs']);
+  if (input.reuseState !== undefined && typeof input.reuseState !== 'boolean') throw new TypeError('reuseState must be a boolean');
   if (input.system !== undefined && typeof input.system !== 'string') throw new TypeError('Session system must be a string');
   if (input.contextPolicy !== undefined && input.contextPolicy !== 'error' && input.contextPolicy !== 'drop-oldest') throw new TypeError('Invalid session context policy');
   const maximum = input.maxHistoryMessages ?? 128;
@@ -162,6 +171,8 @@ export class ConversationSession {
   private closed = false;
   private tail: Promise<void> = Promise.resolve();
   private disposal?: Promise<void>;
+  /** Decoder state retained after the last committed turn of `messages` (reuseState only). */
+  private state?: GenerationStateHandle;
   constructor(private readonly host: SessionHost, model: ModelIdentity, options: SessionOptions = {}) {
     this.model = structuredClone(model);
     this.options = settings(options);
@@ -199,7 +210,7 @@ export class ConversationSession {
       messages.splice(start, 2);
     };
     while (messages.length + 1 > this.options.maxHistoryMessages!) drop();
-    const defaults = Object.fromEntries(Object.entries(this.options).filter(([key]) => !['system', 'contextPolicy', 'maxHistoryMessages'].includes(key))) as SessionDefaults;
+    const defaults = Object.fromEntries(Object.entries(this.options).filter(([key]) => !['system', 'contextPolicy', 'maxHistoryMessages', 'reuseState'].includes(key))) as SessionDefaults;
     const options: InferOptions = copyOptions({ ...defaults, ...overrides, signal });
     const planning = { ...options };
     delete planning.onToken;
@@ -217,15 +228,43 @@ export class ConversationSession {
     const usage = result.usage;
     if (!usage || !Number.isSafeInteger(usage.inputTokens) || usage.inputTokens < 0 || !Number.isSafeInteger(usage.outputTokens) || usage.outputTokens < 0 || !Number.isSafeInteger(usage.totalTokens) || usage.totalTokens !== usage.inputTokens + usage.outputTokens) throw new NekoError('Conversation inference returned invalid usage', 'generate', 'MODEL_OUTPUT');
   }
+  private release(handle: GenerationStateHandle | undefined): void {
+    if (handle) void this.host.releaseGenerationState?.(handle).catch(() => {});
+  }
+  /** Replaces the retained state after a committed turn. */
+  private adopt(handle: GenerationStateHandle | undefined): void {
+    if (!handle || handle === this.state) return;
+    this.release(this.state); this.state = handle;
+  }
+  private forget(): void { this.release(this.state); delete this.state; }
+  private async generate(prepared: { messages: ChatMessage[]; options: InferOptions }, onToken = prepared.options.onToken): Promise<InferenceResult> {
+    let emitted = false;
+    const request = (state?: GenerationStateHandle): InferOptions => ({
+      ...copyOptions(prepared.options), messages: cloneMessages(prepared.messages),
+      ...(onToken ? { onToken: (text: string) => { emitted = true; onToken(text); } } : {}),
+      ...(this.options.reuseState ? { reuse: { retainState: true, ...(state ? { state } : {}) } } : {}),
+    });
+    // The state covers committed history, so it can only extend a prompt that dropped no turns and adds no new vision tokens.
+    const latest = prepared.messages.at(-1)!.content;
+    const state = this.options.reuseState && prepared.messages.length === this.messages.length + 1 && (typeof latest === 'string' || latest.every((part) => part.type === 'text')) ? this.state : undefined;
+    if (!state) return this.host.infer(request());
+    try { return await this.host.infer(request(state)); }
+    catch (error) {
+      // Evicted, released with its engine, or no longer an exact token prefix: rejected before any token, so prefill everything instead.
+      if (emitted || !(error instanceof NekoError) || error.code !== 'INVALID_INPUT') throw error;
+      return this.host.infer(request());
+    }
+  }
   send(content: string | ChatContent[], options: SessionSendOptions = {}): Promise<InferenceResult> {
     let captured: CapturedSend;
     try { captured = this.capture(content, options); } catch (error) { return Promise.reject(error); }
     return this.enqueue(captured.options.signal, async (signal) => {
       const prepared = await this.prepare(captured.user, captured.options, signal);
-      const result = await this.host.infer({ ...copyOptions(prepared.options), messages: cloneMessages(prepared.messages) });
-      this.check(signal);
-      this.validateResult(result);
+      const result = await this.generate(prepared);
+      const retained = result?.reuse?.state;
+      try { this.check(signal); this.validateResult(result); } catch (error) { this.release(retained); throw error; }
       this.messages = [...prepared.messages, { role: 'assistant', content: result.text }];
+      this.adopt(retained);
       return result;
     });
   }
@@ -246,16 +285,16 @@ export class ConversationSession {
     }, async (sink) => {
       await this.enqueue(sink.signal, async (signal) => {
         const prepared = await this.prepare(captured.user, captured.options, signal);
-        const result = await this.host.infer({
-          ...copyOptions(prepared.options), messages: cloneMessages(prepared.messages),
-          onToken: (text) => { sink.emit({ type: 'token', text }); captured.options.onToken?.(text); },
-        });
-        this.check(signal); this.validateResult(result);
+        const result = await this.generate(prepared, (text) => { sink.emit({ type: 'token', text }); captured.options.onToken?.(text); });
+        const retained = result?.reuse?.state;
+        try { this.check(signal); this.validateResult(result); } catch (error) { this.release(retained); throw error; }
         // Own commit data before exposing a mutable result to the consumer.
         const text = result.text;
-        commit = () => { this.check(signal); this.messages = [...prepared.messages, { role: 'assistant', content: text }]; };
+        let committed = false;
+        commit = () => { this.check(signal); this.messages = [...prepared.messages, { role: 'assistant', content: text }]; this.adopt(retained); committed = true; };
         sink.finish({ type: 'result', result, usage: result.usage });
         await consumed.promise;
+        if (!committed) this.release(retained);
       });
     });
   }
@@ -265,7 +304,7 @@ export class ConversationSession {
     return this.enqueue(captured.options.signal, async (signal) => (await this.prepare(captured.user, captured.options, signal)).plan);
   }
   reset(options: SessionControlOptions = {}): Promise<void> {
-    return this.enqueue(options.signal, async () => { this.messages = this.initialMessages(); });
+    return this.enqueue(options.signal, async () => { this.messages = this.initialMessages(); this.forget(); });
   }
   branch(options: SessionControlOptions = {}): Promise<ConversationSession> {
     return this.enqueue(options.signal, async () => {
@@ -293,10 +332,10 @@ export class ConversationSession {
   import(snapshot: unknown, options: SessionControlOptions = {}): Promise<void> {
     let captured: RestoredSession;
     try { this.check(options.signal); captured = readSnapshot(snapshot, this.model); } catch (error) { return Promise.reject(error); }
-    return this.enqueue(options.signal, async () => { this.options = captured.options; this.messages = captured.messages; });
+    return this.enqueue(options.signal, async () => { this.options = captured.options; this.messages = captured.messages; this.forget(); });
   }
   dispose(): Promise<void> {
-    if (!this.disposal) { this.closed = true; this.lifetime.abort(new NekoError('Conversation session is disposed', 'generate', 'DISPOSED')); this.disposal = this.tail.then(() => { this.messages = []; }); }
+    if (!this.disposal) { this.closed = true; this.lifetime.abort(new NekoError('Conversation session is disposed', 'generate', 'DISPOSED')); this.disposal = this.tail.then(() => { this.messages = []; this.forget(); }); }
     return this.disposal;
   }
   [Symbol.asyncDispose](): Promise<void> { return this.dispose(); }

@@ -161,7 +161,9 @@ try {
 
 `inferStream` is a bounded `AsyncIterable` of decoded `token` events followed by one `result` with final usage. Slow-consumer overflow cancels generation with `STREAM_OVERFLOW`; breaking iteration/early return also cancels. Chunk counts are not token usage.
 
-Session operations are serialized and transactional: only successful completed turns enter history. `plan` does not commit; failure/cancellation does not append partial history. Default `contextPolicy: 'error'` rejects overflow; `'drop-oldest'` removes whole oldest turns while preserving system. `maxHistoryMessages` includes system and is at most 128. History/branches are owned copies. `export()`/`import(snapshot)` use model-bound version-1 snapshots with portable raw pixels/raster data URLs (raster Blobs are embedded); external URL/path images are rejected on export without IO. Reset preserves system/defaults. Session disposal never disposes its host. Sessions do not provide KV/prefix reuse.
+Session operations are serialized and transactional: only successful completed turns enter history. `plan` does not commit; failure/cancellation does not append partial history. Default `contextPolicy: 'error'` rejects overflow; `'drop-oldest'` removes whole oldest turns while preserving system. `maxHistoryMessages` includes system and is at most 128. History/branches are owned copies. `export()`/`import(snapshot)` use model-bound version-1 snapshots with portable raw pixels/raster data URLs (raster Blobs are embedded); external URL/path images are rejected on export without IO. Reset preserves system/defaults. Session disposal never disposes its host.
+
+By default each send prefills the whole conversation. `neko.session({ reuseState: true })` retains decoder state after every committed turn and passes it to the next send, so only the history after the previous user turn is prefilled. In a six-turn exercise on a loaded Apple M5 (Node CPU), the 914-token sixth turn's first token took about 0.8-1.2 s instead of about 3.9-8.2 s (inline and worker). States live in the engine's bounded reuse cache (`reuseCache` limits; default 4 entries/512 MiB; each entry holds two snapshots of roughly 20 MB plus 24 KB per token) and are released on the next commit, `reset()`, `import()` and `dispose()`; a stream that is not committed releases its new state. A state is skipped when `drop-oldest` dropped turns or the new turn contains images, and an evicted, released or non-extending state falls back to one full prefill. Branches start without state. Greedy outputs can differ slightly from a full prefill because the prompt is prefilled in pieces.
 
 For an unsupported grammar constraint, explicitly opt in:
 
@@ -260,7 +262,7 @@ Each configuration owns an independent worker/runtime; concurrent owners may eac
 
 ### Decoder state and vision reuse
 
-`infer`/`inferStructured` accept `reuse: { retainState?, state?, vision? }`. With `retainState: true`, a successful result may expose `result.reuse.state`; pass that opaque handle as `state` with a compatible, exactly extending token prefix. `vision: true` opts into processed vision-encoder feature reuse. This is separate from normalized-pixel and rendered-prompt tokenization caches, and is not automatic session KV reuse.
+`infer`/`inferStructured` accept `reuse: { retainState?, state?, vision? }`. With `retainState: true`, a successful result may expose `result.reuse.state`; pass that opaque handle as `state` with a compatible, exactly extending token prefix. `vision: true` opts into processed vision-encoder feature reuse. This is separate from normalized-pixel and rendered-prompt tokenization caches; sessions use decoder-state reuse only with `reuseState: true`.
 
 ```ts
 const retained = await neko.infer({
