@@ -1,4 +1,4 @@
-import { AutoImageProcessor, Qwen3VLProcessor, Qwen3_5ForConditionalGeneration, RawImage, TextStreamer, Tensor, DynamicCache, InterruptableStoppingCriteria, LogitsProcessorList, cat, type PreTrainedModel, type Processor } from '@huggingface/transformers';
+import { AutoImageProcessor, Qwen3VLProcessor, Qwen3_5ForCausalLM, PreTrainedModel, RawImage, TextStreamer, Tensor, DynamicCache, InterruptableStoppingCriteria, LogitsProcessorList, cat, type Processor } from '@huggingface/transformers';
 import type * as NodeOs from 'node:os';
 import { type ModelProfileId, type ModelDtype } from '../cache/manifest.js';
 import { getRegisteredModelProfile, type ModelId } from '../cache/registry.js';
@@ -76,6 +76,7 @@ async function availableThreads(): Promise<number> {
   const os: typeof NodeOs = await import(`${protocol}os`);
   return os.availableParallelism();
 }
+type PretrainedConfigOption = NonNullable<NonNullable<Parameters<typeof PreTrainedModel.from_pretrained>[1]>['config']>;
 const MIN_PREFIX_TOKENS = 32;
 /** Prompt texts whose counts must match full rendering before `countPrompt` counts only the user text; the first is the base. */
 const PROMPT_PROBES = ['x', '  Source JSON:\n[{"evidenceId":"q1","quote":"Ünïcödé 貓 😀"}]\nNow output only the requested JSON object.\n\n', '\u0301 combining first and last e\u0301', '<|im_end|>\n<|im_start|>assistant\nspecial-token text', '\t\u3000wide\u00a0spaces\u2028'];
@@ -94,12 +95,13 @@ export class VisionEngine {
   private readonly tokenCache: PromptTokenCache;
   private readonly reuseCache: InferenceReuseCache;
   private generating = false;
-  private constructor(private readonly model: PreTrainedModel, private readonly processor: Processor, readonly backend: BackendInfo, private readonly loadMs: number, private readonly profiling: boolean, readonly modelContextTokens: number, private readonly vocabularySize: number, readonly identity: ModelIdentity, private readonly policy: ResourcePolicy | undefined, private readonly offline: boolean, reuseCacheLimits?: ReuseCacheLimits) { this.tokenCache = promptTokenCache(identity); this.reuseCache = new InferenceReuseCache(reuseCacheLimits); }
+  private visionLoading: Promise<void> | undefined;
+  private constructor(private readonly model: PreTrainedModel, private readonly processor: Processor, readonly backend: BackendInfo, private readonly loadMs: number, private readonly profiling: boolean, readonly modelContextTokens: number, private readonly vocabularySize: number, readonly identity: ModelIdentity, private readonly policy: ResourcePolicy | undefined, private readonly offline: boolean, reuseCacheLimits?: ReuseCacheLimits, private readonly loadVisionSession?: () => Promise<unknown>) { this.tokenCache = promptTokenCache(identity); this.reuseCache = new InferenceReuseCache(reuseCacheLimits); }
   preprocessingCacheInfo() { return this.tokenCache.info(); }
   reuseCacheInfo() { return this.reuseCache.info(); }
   releaseGenerationState(handle: GenerationStateHandle): void { if (this.generating) throw new NekoError('Cannot release generation state during inference', 'generate', 'RUNTIME_BUSY'); this.reuseCache.release(handle); }
   clearReuseCaches(): void { if (this.generating) throw new NekoError('Cannot clear reuse caches during inference', 'generate', 'RUNTIME_BUSY'); this.reuseCache.clear(); }
-  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now(), config: { profile?: ModelProfileId; model?: ModelId; policy?: ResourcePolicy; reuseCacheLimits?: ReuseCacheLimits; externalDataDirectory?: string } = {}): Promise<VisionEngine> {
+  static async load(backend: BackendInfo, localFilesOnly: boolean, signal?: AbortSignal, progressCallback?: (event: unknown) => void, profilePrefix?: string, started = performance.now(), config: { profile?: ModelProfileId; model?: ModelId; policy?: ResourcePolicy; reuseCacheLimits?: ReuseCacheLimits; externalDataDirectory?: string; guard?: <T>(operation: () => Promise<T>) => Promise<T> } = {}): Promise<VisionEngine> {
     return atStage('load', signal, async () => {
       const selected = getRegisteredModelProfile(config.profile, config.model);
       const options = { revision: selected.revision, local_files_only: localFilesOnly, ...(progressCallback ? { progress_callback: progressCallback } : {}) };
@@ -110,13 +112,14 @@ export class VisionEngine {
       // Graphs served from memory (VerifiedCacheOptions.graphPatches) resolve external data against `external` instead of a model path.
       // ONNX Runtime 1.30's KleidiAI kernels (int8 MatMulNBits and those the fp16 vision encoder uses) run in Arm SME streaming mode on chips such as
       // Apple M5, where a signal delivered mid-kernel (for example a sampling profiler's SIGPROF) killed the process with SIGILL; MLAS's int8 kernels measured as fast.
-      // MLAS's fp16 GEMM is slower, so `cpuVisionPrecision: 'fp32'` can patch the vision MatMuls to fp32.
+      // MLAS's fp16 GEMM is slower, so `cpuVisionPrecision: 'fp32'` (the pinned 0.8B default) patches the vision MatMuls to fp32.
       const extra = { session: { intra_op: { allow_spinning: '0' }, ...(external ? { model_external_initializers_file_folder_path: external } : {}) }, ...(external ? { mlas: { disable_kleidiai: '1' } } : {}) };
       // Node's onnxruntime binding builds sessions synchronously on the main thread; the tokenizer parse is usually already
       // running or done (index.ts starts it while worker threads hash the payloads), so it does not delay session creation.
-      const loading = Qwen3_5ForConditionalGeneration.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device,
-        session_options: { executionProviders: backend.executionProviders, ...(threads ? { intraOpNumThreads: threads, extra } : {}), ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) },
-      });
+      const sessionOptions = { executionProviders: backend.executionProviders, ...(threads ? { intraOpNumThreads: threads, extra } : {}), ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) };
+      // The text-only class (a subclass of the conditional-generation model) builds only the embedding and decoder sessions; the vision
+      // encoder session is created on the first request with images (see `ensureVision`), so text-only use never pays for it.
+      const loading = Qwen3_5ForCausalLM.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device, session_options: sessionOptions });
       loading.catch(() => undefined); // The rejection is surfaced by the awaits below; this only prevents it being unhandled while tokenizer work is pending.
       let model: PreTrainedModel;
       let processor: Processor; let context: unknown; let vocabulary: unknown;
@@ -141,8 +144,17 @@ export class VisionEngine {
       try {
         signal?.throwIfAborted();
         if (!processor.tokenizer) throw new Error('Loaded processor has no tokenizer');
+        // The same verified cache, graph patches, device, dtype and session options as the text sessions, for just the vision graph.
+        const loaded = model;
+        const loadVisionSession = async (): Promise<unknown> => {
+          const vision = await PreTrainedModel.from_pretrained(selected.id, { revision: selected.revision, local_files_only: localFilesOnly, model_file_name: 'vision_encoder', dtype: selected.dtype, device: backend.device, session_options: sessionOptions,
+            // A `custom` model type selects the generic single-session loader, which names the session `model`.
+            config: { ...loaded.config, model_type: 'custom' } as unknown as PretrainedConfigOption });
+          return vision.sessions.model;
+        };
         return new VisionEngine(model, processor, backend, performance.now() - started, !!profilePrefix && backend.runtime === 'node', context, vocabulary,
-          { id: selected.id, revision: selected.revision, profile: selected.profile, dtype: selected.dtype }, config.policy, localFilesOnly, config.reuseCacheLimits);
+          { id: selected.id, revision: selected.revision, profile: selected.profile, dtype: selected.dtype }, config.policy, localFilesOnly, config.reuseCacheLimits,
+          config.guard ? () => config.guard!(loadVisionSession) : loadVisionSession);
       } catch (error) { await model.dispose(); throw error; }
     }, (engine) => engine.dispose());
   }
@@ -226,6 +238,21 @@ export class VisionEngine {
         return inputs;
       } catch (error) { disposeInputs(inputs); throw error; }
     } finally { for (const part of parts) disposeInputs(part); }
+  }
+  /** Creates the vision encoder session on first use; concurrent callers share one load, and a failed load is retried next time. */
+  private ensureVision(signal?: AbortSignal): Promise<void> {
+    const load = this.loadVisionSession;
+    if (!load || Object.hasOwn(this.model.sessions, 'vision_encoder')) return Promise.resolve();
+    this.visionLoading ??= (async () => {
+      const session = await load();
+      if (this.disposePromise) {
+        await (session as { release?: () => Promise<unknown> }).release?.();
+        throw new NekoError('Engine was disposed while its vision encoder was loading', 'load', 'DISPOSED');
+      }
+      (this.model.sessions as Record<string, unknown>).vision_encoder = session;
+    })().finally(() => { this.visionLoading = undefined; });
+    const loading = this.visionLoading;
+    return atStage('load', signal, () => loading);
   }
   private loadedBackend(): LoadedBackend {
     const sessions = Object.entries(this.model.sessions).map(([name, value]: [string, unknown]) => {
@@ -344,6 +371,7 @@ export class VisionEngine {
       throw error;
     });
     const { inputs, inputTokens, checkpointTokens, prefixTokens, maxNewTokens, settings, images } = prepared;
+    if (images.length) await this.ensureVision(signal).catch((error: unknown) => { disposeInputs(inputs); throw error; });
     const prefixKey = prefixTokens?.join(',');
     // Best-effort internal prefix reuse: it must never fail or change the shape of an ordinary request.
     const reuseActive = options.reuse !== undefined || prefixTokens !== undefined;

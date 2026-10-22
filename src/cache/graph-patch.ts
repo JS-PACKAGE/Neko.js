@@ -5,7 +5,7 @@
  * - The pinned q4 decoder leaves MatMulNBits `accuracy_level` unset (0), so ONNX Runtime multiplies fp32 activations
  *   against dequantized weights. Level 4 lets it quantize each activation block to int8 and use integer dot-product
  *   kernels, which is several times faster on the decoder's per-token matrix-vector products.
- * - Opt-in (`NekoOptions.cpuVisionPrecision: 'fp32'`): the fp16 vision encoder's MatMuls otherwise run ONNX Runtime's CPU
+ * - `NekoOptions.cpuVisionPrecision: 'fp32'` (the default for the pinned 0.8B model): the fp16 vision encoder's MatMuls otherwise run ONNX Runtime's CPU
  *   fp16 GEMM, which (with KleidiAI disabled, see `VisionEngine.load`) measured about 2.5 times slower than its fp32 SGEMM.
  *   Casting each fp16 weight initializer to fp32 lets session creation constant-fold fp32 weights (about 300 MB more
  *   resident memory after load); activations are cast around each MatMul.

@@ -77,7 +77,10 @@ export interface NekoOptions {
   reuseCache?: ReuseCacheLimits;
   downloadConcurrency?: number;
   resumeDownloads?: boolean;
-  /** Node CPU vision encoder MatMul precision. `'fp32'` is faster but keeps about 300 MB more memory resident; other backends ignore it. Defaults to `'fp16'`. */
+  /**
+   * Node CPU vision encoder MatMul precision; other backends ignore it. `'fp32'` is faster but keeps about 300 MB more memory resident
+   * once the vision encoder is loaded. Defaults to `'fp32'` for the default pinned 0.8B model and `'fp16'` for other models.
+   */
   cpuVisionPrecision?: 'fp16' | 'fp32';
   onCacheProgress?: (event: CacheProgress) => void;
   onEvent?: (event: NekoEvent) => void;
@@ -403,7 +406,8 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
     if (backend.runtime === 'browser' && backend.device === 'cpu') throw new NekoError('CPU/WASM cannot execute this pinned model: GatherBlockQuantized(1) is unavailable. Use a supported WebGPU browser; no automatic fallback is performed.', 'backend', 'UNSUPPORTED_BACKEND');
     let installation: VerifiedCacheInstallation | undefined; let restore: (() => void) | undefined;
     try {
-      const graphPatches = backend.runtime === 'node' && backend.device === 'cpu' ? cpuGraphPatches(options.cpuVisionPrecision === 'fp32', options.model === MODEL_ID)
+      const fp32Vision = options.cpuVisionPrecision === undefined ? options.model === MODEL_ID : options.cpuVisionPrecision === 'fp32';
+      const graphPatches = backend.runtime === 'node' && backend.device === 'cpu' ? cpuGraphPatches(fp32Vision, options.model === MODEL_ID)
         // Measured on the pinned 0.8B graphs only; other models keep their published vision graphs.
         : backend.runtime === 'browser' && backend.device === 'webgpu' && options.model === MODEL_ID ? WEBGPU_GRAPH_PATCHES : undefined;
       installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly, model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.downloadConcurrency === undefined ? {} : { downloadConcurrency: options.downloadConcurrency }), ...(options.resumeDownloads === undefined ? {} : { resumeDownloads: options.resumeDownloads }), ...(options.onCacheProgress ?? options.progressCallback ? { onProgress: options.onCacheProgress ?? options.progressCallback } : {}), ...(graphPatches ? { graphPatches } : {}) });
@@ -438,7 +442,9 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
         pinnedTextResources(getRegisteredModelProfile(options.modelProfile, options.model)).catch(() => undefined);
         // Browser cache hits are fully verified when the loader reads them; verifying them here as well would read and hash every payload twice.
         await atStage('load', signal, () => cache.prefetch(signal, undefined, backend.runtime === 'node'));
-        return cache.failOnIntegrity(() => VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}), ...(cache.externalDataDirectory === undefined ? {} : { externalDataDirectory: cache.externalDataDirectory }) }));
+        return cache.failOnIntegrity(() => VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}), ...(cache.externalDataDirectory === undefined ? {} : { externalDataDirectory: cache.externalDataDirectory }),
+          // The deferred vision session reads verified files too, and needs the same surfacing of dropped integrity failures.
+          guard: (operation) => cache.failOnIntegrity(operation) }));
       }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000, forgetPinnedTextResources);
       return new LocalNeko(engines, cache, restore, backend, options, admission);
     } catch (error) { if (restore) restore(); else installation?.restore(); throw error; }
