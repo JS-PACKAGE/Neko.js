@@ -14,7 +14,8 @@ const patterns: Record<AuditKind, RegExp> = {
   dates: /\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,?\s+\d{4})?\b|\d{4}年\d{1,2}月\d{1,2}日/giu,
   entities: /\b[A-Z][\p{L}\p{N}]*(?:\s+[A-Z][\p{L}\p{N}]*)*\b/gu,
   negation: /\b(?:not|never|no|without|cannot|can't|doesn't|didn't|isn't|wasn't)\b|並非|不是|沒有|未曾|不會|不/giu,
-  ranges: /\d+(?:\.\d+)?\s*(?:[-–—]|to|至|到)\s*\d+(?:\.\d+)?/giu,
+  // A range never starts inside a digit run (the run's first digit gives the same match), and skipping those starts keeps a long run linear instead of quadratic.
+  ranges: /(?<!\d)\d+(?:\.\d+)?\s*(?:[-–—]|to|至|到)\s*\d+(?:\.\d+)?/giu,
 };
 const limits = [
   'Support means exact cited text retention, not real-world truth or semantic entailment.',
@@ -23,7 +24,14 @@ const limits = [
   'Lexical detection is incomplete and language-dependent; absence of a conflict is not support.',
 ];
 const values = (text: string, kind: AuditKind) => [...new Set(Array.from(text.matchAll(patterns[kind]), (match) => match[0]))];
-const normalized = (text: string) => text.replace(/\s+/gu, ' ').trim().replace(/[.!?。！？]+$/u, '');
+const sentenceEnd = new Set(['.', '!', '?', '。', '！', '？']);
+/** Trailing punctuation is trimmed by a scan: `/[.!?。！？]+$/` re-scans a long punctuation run from every start inside it. */
+const normalized = (text: string) => {
+  const collapsed = text.replace(/\s+/gu, ' ').trim();
+  let end = collapsed.length;
+  while (end > 0 && sentenceEnd.has(collapsed[end - 1]!)) end--;
+  return collapsed.slice(0, end);
+};
 const byIdCache = new WeakMap<readonly { id: string }[], Map<string, { id: string }>>();
 /** First entry per ID, like `Array.find`. Frozen arrays (SDK snapshots) are indexed once; others are indexed per call so later mutation is never served stale. */
 function byId<T extends { id: string }>(list: readonly T[]): Map<string, T> {

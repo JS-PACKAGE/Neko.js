@@ -25,3 +25,12 @@ test('audits expose exact retention, aligned lexical conflicts and explicit unce
   assert.equal(auditClaim('A red square.', []).status, 'unknown');
   assert.equal(auditClaim('Admission costs 8 dollars.', [quote('Admission costs 7 dollars. Admission costs 8 dollars.')]).status, 'supported');
 });
+
+test('audits of quotes with long digit or punctuation runs finish in linear time with the same verdicts', { timeout: 20_000 }, () => {
+  // Quadratic before: a range could start at every digit of a run, and trailing punctuation was re-scanned from every position.
+  const digits = '7'.repeat(200_000);
+  assert.equal(auditClaim(`Range ${digits}-9 m.`, [quote(`Range ${digits}-8 m.`)]).status, 'contradicted');
+  assert.equal(auditClaim(`Value ${digits}x units.`, [quote(`Value ${digits}x units.`)]).status, 'supported');
+  const dots = '.'.repeat(200_000);
+  assert.equal(auditClaim(`Pets are allowed${dots}`, [quote(`Pets are not allowed${dots}x. Pets are not allowed${dots}`)]).status, 'contradicted');
+});

@@ -37,6 +37,15 @@ test('extracts image sources with provenance, resolves relative URLs, and ignore
   assert.ok(imageByUrl.get('https://example.test/inline.jpg')?.discoveredBy.includes('background'));
 });
 
+test('hostile CSS url() and srcset runs extract in linear time with the same URLs', { timeout: 20_000 }, async () => {
+  // The previous backtracking patterns took minutes here: `url(` plus whitespace was cubic, a srcset comma run quadratic.
+  const run = 200_000;
+  const data = `data:image/gif;base64,R0lGOD${','.repeat(run)}x`;
+  const html = `<html><body><div style="background: url(${' '.repeat(run)}"></div><div style="background-image: url( '/quoted.png' ) , url(  /bare one.png  ), url(&quot;/dq.png&quot;)"></div><img srcset="${data} 1x, /b.png 2x" src="/a.png"><p>Body.</p></body></html>`;
+  const page = await extractPage(html, { baseUrl: 'https://example.test/' });
+  assert.deepEqual(page.images.map((image) => image.url).sort(), [data, 'https://example.test/a.png', 'https://example.test/b.png', 'https://example.test/bare%20one.png', 'https://example.test/dq.png', 'https://example.test/quoted.png'].sort());
+});
+
 test('fails rather than truncating images or oversized HTML and rejects non-web schemes', async () => {
   await assert.rejects(extractPage('<img src="/one.png"><img src="/two.png">', { baseUrl: 'https://example.test', maxImages: 1 }), RangeError);
   await assert.rejects(extractPage('<p>too long</p>', { maxHtmlBytes: 4 }), RangeError);

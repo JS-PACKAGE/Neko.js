@@ -67,7 +67,10 @@ function parseSrcset(value: string): string[] {
     } else {
       while (cursor < value.length && !/[\s,]/.test(value[cursor]!)) cursor++;
     }
-    const url = value.slice(start, cursor).replace(/,+$/, '');
+    let end = cursor;
+    // A manual trim: `/,+$/` re-scans a long comma run from every start inside it (quadratic on hostile srcset values).
+    while (end > start && value[end - 1] === ',') end--;
+    const url = value.slice(start, end);
     if (url) urls.push(url);
     while (cursor < value.length && value[cursor] !== ',') cursor++;
     if (value[cursor] === ',') cursor++;
@@ -75,16 +78,39 @@ function parseSrcset(value: string): string[] {
   return urls;
 }
 
+/** The contents of a CSS `url(...)`, with the same matches as `/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)/gi` but in linear time: that pattern backtracks cubically on `url(` followed by a long whitespace run without `)`. */
+function cssUrls(value: string): string[] {
+  const urls: string[] = [];
+  const space = (index: number) => index < value.length && /\s/.test(value[index]!);
+  const opening = /url\(/gi;
+  for (let match = opening.exec(value); match; match = opening.exec(value)) {
+    let at = opening.lastIndex;
+    while (space(at)) at++;
+    let url: string | undefined;
+    const quote = value[at];
+    if (quote === '"' || quote === "'") {
+      const close = value.indexOf(quote, at + 1);
+      let after = close + 1;
+      while (close >= 0 && space(after)) after++;
+      if (close >= 0 && value[after] === ')') { url = value.slice(at + 1, close); opening.lastIndex = after + 1; }
+    }
+    if (url === undefined) {
+      const close = value.indexOf(')', at);
+      // Every later `url(` needs a `)` after it too.
+      if (close < 0) break;
+      let end = close;
+      while (end > at && space(end - 1)) end--;
+      url = value.slice(at, end); opening.lastIndex = close + 1;
+    }
+    if (url.trim()) urls.push(url.trim());
+  }
+  return urls;
+}
+
 function cssImageUrls(value: string): string[] {
   const urls: string[] = [];
   const declarations = /(?:^|[;{])\s*(?:background(?:-image)?|border-image(?:-source)?)\s*:\s*([^;}]+)/gi;
-  for (const declaration of value.matchAll(declarations)) {
-    const pattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)/gi;
-    for (const match of declaration[1]!.matchAll(pattern)) {
-      const url = (match[1] ?? match[2] ?? match[3] ?? '').trim();
-      if (url) urls.push(url);
-    }
-  }
+  for (const declaration of value.matchAll(declarations)) urls.push(...cssUrls(declaration[1]!));
   return urls;
 }
 
