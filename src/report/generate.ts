@@ -370,13 +370,15 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
     const elapsed = () => elapsedBefore + performance.now() - started;
     const check = () => { signal?.throwIfAborted(); if (performance.now() >= budget.deadline) throw new NekoError('Report aggregate duration budget exhausted', 'report', 'BUDGET_EXCEEDED'); };
     const notify = async (event: ReportEvent) => { const callback = options.onEvent; if (!callback) return; try { await awaitUser(() => callback(structuredClone(event)), signal); } catch (cause) { callbackFailed = true; throw cause; } };
-    const recordCheckpoint = async () => {
+    // The checksum is observable only through `onCheckpoint` or a ReportError's checkpoint, whose paths below recompute it first,
+    // so per-stage saves without a callback only keep usage and elapsed time current instead of hashing the whole checkpoint.
+    const recordCheckpoint = async (withChecksum = true) => {
       checkpoint.usage = { inputTokens: budget.inputTokens, outputTokens: budget.outputTokens, totalTokens: budget.inputTokens + budget.outputTokens }; checkpoint.elapsedMs = elapsed();
-      checkpoint.checksum = await checksum(checkpoint);
+      if (withChecksum) checkpoint.checksum = await checksum(checkpoint);
     };
     const save = async () => {
-      await recordCheckpoint();
       const callback = options.onCheckpoint;
+      await recordCheckpoint(callback !== undefined);
       if (callback) try { await awaitUser(() => callback(copyCheckpoint(checkpoint)), signal); } catch (cause) { callbackFailed = true; throw cause; }
     };
     const appendClaims = (items: EvidenceClaim[], target: string): string => {
@@ -516,7 +518,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
       await validateReportContents(report, page); report.integrity.checksum = await reportChecksum(report);
       signal?.throwIfAborted(); return format === 'markdown' ? renderMarkdown(report) : report;
     } catch (cause) {
-      if (!callbackFailed && !signal?.aborted) await save(); else await recordCheckpoint();
+      if (!callbackFailed && !signal?.aborted && options.onCheckpoint) await save(); else await recordCheckpoint();
       const error = cause instanceof NekoError ? cause : signal?.aborted && !callbackFailed ? new NekoError('Report was cancelled', 'report', 'ABORTED', { cause: signal.reason }) : new NekoError(cause instanceof Error ? cause.message : String(cause), 'report', 'OPERATION_FAILED', { cause });
       throw new ReportError(error, copyCheckpoint(checkpoint));
     }
