@@ -734,7 +734,8 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
         else await remove();
       }
     },
-    async prefetch(signal?: AbortSignal, files: readonly ModelFileName[] = Object.keys(selectedFiles) as ModelFileName[]) {
+    // Largest first: on Node the multi-hundred-MiB payloads then start hashing on worker threads before main-thread work (such as the tokenizer parse) can delay scheduling them.
+    async prefetch(signal?: AbortSignal, files: readonly ModelFileName[] = (Object.keys(selectedFiles) as ModelFileName[]).sort((a, b) => model.allFiles[b].size - model.allFiles[a].size)) {
       if (restored) throw new Error('Verified cache installation has been restored');
       if (files.some((name) => !Object.hasOwn(selectedFiles, name))) throw new ModelIntegrityError('Cannot prefetch an unpinned selected-model file');
       const controller = new AbortController();
