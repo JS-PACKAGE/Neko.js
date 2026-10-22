@@ -531,6 +531,8 @@ Checkpoint 的 `sectionPlan` 記錄依序排列的 source-fact ID 群組，每�
 
 Node CPU 上，decoder 的 4-bit `MatMulNBits` 層會將 activation 逐 block 量化為 int8（ONNX Runtime `accuracy_level` 4）。固定的 graph 未設定 level，否則 ONNX Runtime 會以 fp32 相乘。Graph 在通過 SHA-256 驗證後於記憶體中修補，不修改快取檔案。在一台負載中的 Apple M5 單次量測中，decode 由約 63–114 降到約 22–30 ms/token，每個生成 token 的行程 CPU 時間由約 310 降到約 100 ms，1,409 token 提示的首個 token 由約 7.5 s 降到約 4.4 s。**輸出與 fp32 activation 並非逐位元相同：**六個 greedy 請求中，三個較短的文字／圖片／結構化請求相同，三個較長生成在數十個 token 後分歧；品質 fixture 的 claim 評分相同。ONNX Runtime 1.30 的 KleidiAI kernel（int8 kernel 與 fp16 vision encoder 使用者）在 Arm SME 硬體上若收到訊號（例如取樣 profiler 的 `SIGPROF`）會以 `SIGILL` 終止行程，因此 Node CPU session 停用 KleidiAI。這使本機 vision encoder 變慢（圖片首個 token 由約 1.1–1.8 s 變為約 2.0–3.3 s）。瀏覽器 WebGPU 與 Node WebGPU 不受影響。
 
+可選的 `NekoOptions.cpuVisionPrecision: 'fp32'`（預設 `'fp16'`；其他 backend 忽略）可在 Node CPU 上找回部分 vision 成本。停用 KleidiAI 後，ONNX Runtime CPU 的 fp16 GEMM 實測約比 fp32 GEMM 慢 2.5 倍，因此驗證後的 vision graph 會在記憶體中改寫：每個 fp16 MatMul 權重 cast 為 fp32（於建立 session 時一次 fold），並以 fp32 計算這些 MatMul；快取檔案不變。在同一台負載中的 Apple M5 交替量測，640×400 圖片的 vision encoding 由約 2.1–2.6 s 降到約 1.2–1.75 s，4000×3000 圖片由約 11.5–15.0 s 降到約 8.5–11.4 s。**常駐記憶體約多 300 MB：**載入後 RSS 由約 0.86–0.94 GB 變為約 1.18–1.23 GB，模型載入約多 0.25 s。五張測試圖片的 greedy 描述與預設相同。僅在預設 0.8B profile 量測。
+
 ### 並行下載與 validator-bound 續傳
 
 ```ts

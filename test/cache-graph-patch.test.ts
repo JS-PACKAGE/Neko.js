@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import ort from 'onnxruntime-node';
-import { withInt8MatMulNBits } from '../src/cache/graph-patch.js';
+import { withFp32MatMul, withInt8MatMulNBits } from '../src/cache/graph-patch.js';
 
 // Minimal ONNX protobuf writer: enough for a MatMulNBits graph that native ONNX Runtime can execute.
 const utf8 = new TextEncoder();
@@ -49,4 +49,48 @@ test('int8 MatMulNBits patch keeps the graph executable and numerically close, a
   const explicit = model(1);
   assert.equal(withInt8MatMulNBits(explicit), explicit);
   assert.throws(() => withInt8MatMulNBits(original.slice(0, original.length - 3)), TypeError);
+});
+
+// fp16 bits of a float32 that fp16 represents exactly (Node 22 has no Float16Array).
+const halfBits = (value: number) => { const bits = new Uint32Array(Float32Array.of(value).buffer)[0]!; const exponent = ((bits >>> 23) & 0xff) - 112; return ((bits >>> 16) & 0x8000) | (exponent > 0 ? (exponent << 10) | ((bits >>> 13) & 0x3ff) : 0); };
+
+/** sum = MatMul(half(X), W1) + MatMul(half(X), W2), with the weights stored as `type` (fp16 = 10, fp32 = 1). */
+function halfModel(type = 10): Uint8Array<ArrayBuffer> {
+  const weight = (seed: number) => {
+    const values = Array.from({ length: K * N }, (_, index) => ((index * 5 + seed) % 17 - 8) / 16);
+    return type === 10 ? new Uint8Array(Uint16Array.from(values, halfBits).buffer) : new Uint8Array(Float32Array.from(values).buffer);
+  };
+  const half = type === 10 ? 'Xh' : 'X';
+  const graph = [
+    ...(type === 10 ? bytes(1, [...str(1, 'X'), ...str(2, 'Xh'), ...str(4, 'Cast'), ...intAttribute('to', 10)]) : []),
+    ...bytes(1, [...str(1, half), ...str(1, 'W1'), ...str(2, 'Y1'), ...str(3, 'first'), ...str(4, 'MatMul')]),
+    ...bytes(1, [...str(1, half), ...str(1, 'W2'), ...str(2, 'Y2'), ...str(4, 'MatMul')]),
+    ...bytes(1, [...str(1, 'Y1'), ...str(1, 'Y2'), ...str(2, 'S'), ...str(4, 'Add')]),
+    ...(type === 10 ? bytes(1, [...str(1, 'S'), ...str(2, 'sum'), ...str(4, 'Cast'), ...intAttribute('to', 1)]) : bytes(1, [...str(1, 'S'), ...str(2, 'sum'), ...str(4, 'Identity')])),
+    ...str(2, 'g'),
+    ...tensor('W1', type, [K, N], weight(1)), ...tensor('W2', type, [K, N], weight(2)),
+    ...valueInfo(11, 'X', [2, K]), ...valueInfo(12, 'sum', [2, N]),
+  ];
+  return Uint8Array.from([...int(1, 8), ...bytes(8, [...str(1, ''), ...int(2, 17)]), ...bytes(7, graph)]);
+}
+
+test('fp32 MatMul patch computes fp16-weight MatMuls in fp32, casts shared inputs once and ignores fp32 weights', async () => {
+  const original = halfModel();
+  const patched = withFp32MatMul(original);
+  assert.notEqual(patched, original);
+  assert.equal(withFp32MatMul(patched), patched, 'patched MatMuls no longer read fp16 initializers');
+  const exact = halfModel(1);
+  assert.equal(withFp32MatMul(exact), exact);
+  const input = Float32Array.from({ length: 2 * K }, (_, index) => ((index * 7) % 13 - 6) / 4);
+  const evaluate = async (graph: Uint8Array) => {
+    const session = await ort.InferenceSession.create(graph);
+    try { return (await session.run({ X: new ort.Tensor('float32', input, [2, K]) })).sum!.data as Float32Array; } finally { await session.release(); }
+  };
+  const [reference, half, fp32] = await Promise.all([evaluate(exact), evaluate(original), evaluate(patched)]);
+  // Inputs and weights are exact in fp16; the graphs differ from the fp32 reference only by fp16 intermediate and output rounding.
+  for (let index = 0; index < 2 * N; index++) {
+    const tolerance = 0.01 * Math.max(1, Math.abs(reference[index]!));
+    assert.ok(Math.abs(fp32[index]! - reference[index]!) <= tolerance, `fp32 output ${index}: ${fp32[index]} vs ${reference[index]}`);
+    assert.ok(Math.abs(half[index]! - reference[index]!) <= tolerance, `fp16 output ${index}: ${half[index]} vs ${reference[index]}`);
+  }
 });

@@ -16,7 +16,7 @@ import { nodeDownloadStage } from './node-download.js';
 import { browserDownloadStage } from './browser-download.js';
 import { withBrowserInstallLock, withNodeInstallLock } from './lock.js';
 import type { AsyncLocalStorage } from 'node:async_hooks';
-import { INT8_MATMUL_GRAPHS, withInt8MatMulNBits } from './graph-patch.js';
+import type { GraphPatch } from './graph-patch.js';
 
 const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
 
@@ -54,8 +54,8 @@ export interface VerifiedCacheOptions {
   downloadConcurrency?: number;
   /** Preserve interrupted, validator-bound staging for the next explicit installation. Defaults to true. */
   resumeDownloads?: boolean;
-  /** Node CPU only: serve verified decoder graphs with int8 MatMulNBits activations from memory. */
-  int8MatMul?: boolean;
+  /** Node only: serve these verified graphs, keyed by pinned file name, rewritten in memory (see `cpuGraphPatches`). */
+  graphPatches?: Readonly<Record<string, GraphPatch>>;
 }
 export interface ModelCacheStatus { downloaded: boolean; verified: boolean; bytes: number; totalBytes: number; path: string; files: { name: ModelFileName; present: boolean; verified: boolean; bytes: number }[]; }
 export interface ModelCacheDiagnostics {
@@ -76,7 +76,7 @@ export interface VerifiedCacheInstallation {
   importBundle(source: ModelBundleSource, signal?: AbortSignal): Promise<void>;
   diagnostics(signal?: AbortSignal): Promise<ModelCacheDiagnostics>;
   withSignal<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T>;
-  /** Set when `int8MatMul` serves graphs from memory: ONNX Runtime must resolve their external data here. */
+  /** Set when `cpuGraphPatches` serves graphs from memory: ONNX Runtime must resolve their external data here. */
   readonly externalDataDirectory?: string;
 }
 
@@ -402,7 +402,8 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   let browserSignalDepth = 0;
   const currentSignal = () => signalContext?.getStore()?.signal ?? activeSignal;
   const hashedFiles = new Map<string, string>();
-  const externalDataDirectory = options.int8MatMul ? backing.onnxDirectory : undefined;
+  const graphPatches = options.graphPatches;
+  const externalDataDirectory = graphPatches ? backing.onnxDirectory : undefined;
   const verifiedCache = {
     async match(request: string, signal = currentSignal()): Promise<Response | string | undefined> {
       signal?.throwIfAborted();
@@ -413,9 +414,10 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       try {
         response = await backing.match(nativeKey(request, model, name));
         if (!response || !name) return response as Response | undefined;
-        if (externalDataDirectory && Object.hasOwn(INT8_MATMUL_GRAPHS, name)) {
+        const patch = graphPatches && externalDataDirectory && Object.hasOwn(graphPatches, name) ? graphPatches[name] : undefined;
+        if (patch) {
           // Patch exactly the bytes just verified; ONNX Runtime opens the unchanged external data from `externalDataDirectory`.
-          const graph = withInt8MatMulNBits(new Uint8Array(await (await readVerified(response, name, model.allFiles[name], options, 'verify', signal)).arrayBuffer()));
+          const graph = patch(new Uint8Array(await (await readVerified(response, name, model.allFiles[name], options, 'verify', signal)).arrayBuffer()));
           return new Response(graph, { status: 200, headers: { 'content-length': String(graph.byteLength) } });
         }
         if (isNode && name.startsWith('onnx/') && response.filePath) {

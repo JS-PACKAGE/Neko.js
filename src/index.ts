@@ -1,6 +1,7 @@
 import { env } from '@huggingface/transformers';
 import { EngineCache, type EngineCacheStatus } from './cache/engine.js';
 import { captureModelSource, installVerifiedCache, type VerifiedCacheInstallation, type ModelCacheStatus, type ModelCacheDiagnostics, type ModelSource, type CacheProgress } from './cache/model.js';
+import { cpuGraphPatches } from './cache/graph-patch.js';
 import { inspectBackend, type BackendInfo, type BackendDevice } from './backend/index.js';
 import { VisionEngine, type InferOptions, type InferenceResult, type InferencePlanOptions, type InferencePlan, type StructuredInferOptions, type StructuredInferenceResult, type RuntimeReadiness } from './core/engine.js';
 import { generateReport, planReport as generateReportPlan, validateDescribeOptions, ReportError, type DescribeOptions, type ReportPlan } from './report/generate.js';
@@ -75,6 +76,8 @@ export interface NekoOptions {
   reuseCache?: ReuseCacheLimits;
   downloadConcurrency?: number;
   resumeDownloads?: boolean;
+  /** Node CPU vision encoder MatMul precision. `'fp32'` is faster but keeps about 300 MB more memory resident; other backends ignore it. Defaults to `'fp16'`. */
+  cpuVisionPrecision?: 'fp16' | 'fp32';
   onCacheProgress?: (event: CacheProgress) => void;
   onEvent?: (event: NekoEvent) => void;
   localFilesOnly?: boolean;
@@ -389,6 +392,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
     const profile = getRegisteredModelProfile(configuration.modelProfile, configuration.model);
     if (configuration.execution !== undefined && configuration.execution !== 'inline' && configuration.execution !== 'worker') throw new TypeError('execution must be inline or worker');
     if (configuration.onEvent !== undefined && typeof configuration.onEvent !== 'function') throw new TypeError('onEvent must be a function');
+    if (configuration.cpuVisionPrecision !== undefined && configuration.cpuVisionPrecision !== 'fp16' && configuration.cpuVisionPrecision !== 'fp32') throw new TypeError('cpuVisionPrecision must be fp16 or fp32');
     const { policy, modelSource, ...settings } = configuration;
     const source = captureModelSource(modelSource);
     const options: OwnedNekoOptions = { ...settings, model: profile.id, modelProfile: profile.profile, ...(source === undefined ? {} : { modelSource: source }), policy: capturePolicy(policy), localFilesOnly: settings.localFilesOnly ?? false, cache: { ...settings.cache }, queue: { ...settings.queue }, ...(settings.reuseCache === undefined ? {} : { reuseCache: Object.freeze({ ...settings.reuseCache }) }) };
@@ -398,7 +402,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
     if (backend.runtime === 'browser' && backend.device === 'cpu') throw new NekoError('CPU/WASM cannot execute this pinned model: GatherBlockQuantized(1) is unavailable. Use a supported WebGPU browser; no automatic fallback is performed.', 'backend', 'UNSUPPORTED_BACKEND');
     let installation: VerifiedCacheInstallation | undefined; let restore: (() => void) | undefined;
     try {
-      installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly, model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.downloadConcurrency === undefined ? {} : { downloadConcurrency: options.downloadConcurrency }), ...(options.resumeDownloads === undefined ? {} : { resumeDownloads: options.resumeDownloads }), ...(options.onCacheProgress ?? options.progressCallback ? { onProgress: options.onCacheProgress ?? options.progressCallback } : {}), int8MatMul: backend.runtime === 'node' && backend.device === 'cpu' });
+      installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly, model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.downloadConcurrency === undefined ? {} : { downloadConcurrency: options.downloadConcurrency }), ...(options.resumeDownloads === undefined ? {} : { resumeDownloads: options.resumeDownloads }), ...(options.onCacheProgress ?? options.progressCallback ? { onProgress: options.onCacheProgress ?? options.progressCallback } : {}), ...(backend.runtime === 'node' && backend.device === 'cpu' ? { graphPatches: cpuGraphPatches(options.cpuVisionPrecision === 'fp32') } : {}) });
       const cache = installation; const previousWasmCache = env.useWasmCache; const wasm = env.backends.onnx.wasm;
       const previous = wasm && { paths: wasm.wasmPaths, binary: wasm.wasmBinary, threads: wasm.numThreads, proxy: wasm.proxy };
       let moduleUrl: string | undefined;
