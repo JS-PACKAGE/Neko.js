@@ -78,6 +78,11 @@ export interface VerifiedCacheInstallation {
   importBundle(source: ModelBundleSource, signal?: AbortSignal): Promise<void>;
   diagnostics(signal?: AbortSignal): Promise<ModelCacheDiagnostics>;
   withSignal<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T>;
+  /**
+   * Rejects with the first model integrity failure the verified cache reports while `operation` runs. Transformers.js 4.2.0 loads external
+   * data inside an `async` Promise executor, so a rejected read there is never propagated and the model load would stay pending forever.
+   */
+  failOnIntegrity<T>(operation: () => Promise<T>): Promise<T>;
   /** Set when `cpuGraphPatches` serves graphs from memory: ONNX Runtime must resolve their external data here. */
   readonly externalDataDirectory?: string;
 }
@@ -141,6 +146,38 @@ function verifiedResponse(bytes: ArrayBuffer, response: CachedResponse, spec: Re
   return new Response(body, { status: response.status, headers });
 }
 async function readVerified(response: CachedResponse, name: ModelFileName, spec: ResourceSpec, options: VerifiedCacheOptions, phase: CacheProgress['phase'], signal?: AbortSignal): Promise<Response> {
+  const verified = verifiedResponse((await readVerifiedBytes(response, name, spec, options, phase, signal)).buffer, response, spec);
+  verifiedResponses.set(verified, spec);
+  return verified;
+}
+/**
+ * A cached response verified when its body is first read instead of when it is matched: header-only consumers (Transformers.js 4.2.0
+ * reads cached sizes for its progress totals, and checks presence before storing) no longer read and hash whole payloads, while a reader
+ * still receives the bytes only after the size and SHA-256 checks, and an integrity failure errors the body.
+ */
+function lazilyVerified(response: CachedResponse, name: ModelFileName, spec: ResourceSpec, options: VerifiedCacheOptions, signal: AbortSignal | undefined, report: (error: unknown) => void): Response {
+  checkLength(response, name, spec);
+  const headers = new Headers(response.headers);
+  headers.set('content-length', String(spec.size));
+  let failure: unknown;
+  // A zero high-water mark keeps the stream from pulling (and verifying) before anyone reads it.
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try { controller.enqueue(await readVerifiedBytes(response, name, spec, options, 'verify', signal)); controller.close(); }
+      catch (error) { failure = error; report(error); throw error; }
+    },
+    cancel(reason) { return response.body?.cancel(reason); },
+  }, { highWaterMark: 0 });
+  const verified = new Response(body, { status: response.status, headers });
+  // Chromium's native body readers replace stream errors with TypeError('Failed to fetch'); surface the integrity error instead.
+  for (const method of ['arrayBuffer', 'bytes', 'blob', 'text', 'json'] as const) {
+    const read = verified[method] as (() => Promise<unknown>) | undefined;
+    if (typeof read === 'function') Object.defineProperty(verified, method, { value: async () => { try { return await read.call(verified); } catch (error) { throw failure ?? error; } } });
+  }
+  verifiedResponses.set(verified, spec);
+  return verified;
+}
+async function readVerifiedBytes(response: CachedResponse, name: ModelFileName, spec: ResourceSpec, options: VerifiedCacheOptions, phase: CacheProgress['phase'], signal?: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
   checkLength(response, name, spec);
   signal?.throwIfAborted();
   const bytes = new Uint8Array(spec.size);
@@ -172,9 +209,7 @@ async function readVerified(response: CachedResponse, name: ModelFileName, spec:
     }
     signal?.throwIfAborted();
     if (digest !== spec.sha256) throw integrity(name, 'SHA-256');
-    const verified = verifiedResponse(bytes.buffer, response, spec);
-    verifiedResponses.set(verified, spec);
-    return verified;
+    return bytes;
   } catch (error) {
     await reader.cancel(error).catch(() => undefined);
     throw error;
@@ -450,10 +485,12 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
   let browserSignalDepth = 0;
   const currentSignal = () => signalContext?.getStore()?.signal ?? activeSignal;
   const hashedFiles = new Map<string, string>();
+  const integrityWatchers = new Set<(error: ModelIntegrityError) => void>();
+  const report = (error: unknown) => { if (error instanceof ModelIntegrityError) for (const watcher of integrityWatchers) watcher(error); };
   const graphPatches = options.graphPatches;
   const externalDataDirectory = graphPatches ? backing.onnxDirectory : undefined;
   const verifiedCache = {
-    async match(request: string, signal = currentSignal()): Promise<Response | string | undefined> {
+    async match(request: string, signal = currentSignal(), lazy = false): Promise<Response | string | undefined> {
       signal?.throwIfAborted();
       const name = fileName(request, model);
       if (!name && !isRuntimeAsset(request)) return undefined;
@@ -466,7 +503,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
         if (patch) {
           // Patch exactly the bytes just verified. Node ONNX Runtime opens the unchanged external data from `externalDataDirectory`;
           // browser sessions receive it as named buffers.
-          const graph = patch(new Uint8Array(await (await readVerified(response, name, model.allFiles[name], options, 'verify', signal)).arrayBuffer()));
+          const graph = patch(await readVerifiedBytes(response, name, model.allFiles[name], options, 'verify', signal));
           return new Response(graph, { status: 200, headers: { 'content-length': String(graph.byteLength) } });
         }
         if (isNode && name.startsWith('onnx/') && response.filePath) {
@@ -479,9 +516,10 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
           if (response.fingerprint !== undefined) hashedFiles.set(response.filePath, response.fingerprint);
           return response.filePath;
         }
-        return await readVerified(response, name, model.allFiles[name], options, 'verify', signal);
+        return lazy ? lazilyVerified(response, name, model.allFiles[name], options, signal, report) : await readVerified(response, name, model.allFiles[name], options, 'verify', signal);
       } catch (error) {
         if (error instanceof ModelIntegrityError) {
+          report(error);
           await response?.body?.cancel(error).catch(() => undefined);
           return rejectedResponse(error);
         }
@@ -636,11 +674,14 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
     return readVerified(response, name, model.allFiles[name], options, 'download', signal);
   };
   Object.assign(env, {
-    customCache: verifiedCache, useCustomCache: true, useBrowserCache: false, useFSCache: false,
+    // Transformers.js reads what it matches only when it needs the bytes; internal callers (status, prefetch) keep eager verification.
+    // `put` takes no third argument: 4.2.0 passes a progress callback there, which must not become the abort signal.
+    customCache: { match: (request: string) => verifiedCache.match(request, currentSignal(), true), put: (request: string, response: Response) => verifiedCache.put(request, response) },
+    useCustomCache: true, useBrowserCache: false, useFSCache: false,
     // 4.2.0 requires local-model access for local_files_only cache hits. Disable its raw filesystem bypass.
     allowLocalModels: true, useFS: false, allowRemoteModels: !options.localFilesOnly,
     remoteHost: 'https://huggingface.co/', remotePathTemplate: '{model}/resolve/{revision}/',
-    fetch: fetchVerified,
+    fetch: async (input: string | URL, init?: RequestInit) => { try { return await fetchVerified(input, init); } catch (error) { report(error); throw error; } },
   });
   if (isNode) env.cacheDir = backing.path;
   let restored = false;
@@ -670,6 +711,12 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       restored = true;
       Object.assign(env, previous);
       installed = false;
+    },
+    async failOnIntegrity(operation) {
+      let watcher!: (error: ModelIntegrityError) => void;
+      const failure = new Promise<never>((_, reject) => { watcher = reject; });
+      integrityWatchers.add(watcher);
+      try { return await Promise.race([operation(), failure]); } finally { integrityWatchers.delete(watcher); }
     },
     async withSignal(signal, operation) {
       if (restored) throw new Error('Verified cache installation has been restored');

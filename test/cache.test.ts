@@ -28,6 +28,40 @@ test('corrupt native cache content cannot reach the Transformers config loader o
   } finally { installation.restore(); env.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });
 
+test('Transformers.js cache matches verify on first read: header-only probes read nothing, readers still get the integrity failure', async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-lazy-verify-'));
+  const file = 'config.json'; const size = MODEL_FILES[file].size;
+  await mkdir(join(directory, MODEL_ID, MODEL_REVISION), { recursive: true });
+  await writeFile(join(directory, MODEL_ID, MODEL_REVISION, file), 'x'.repeat(size));
+  const progress: number[] = [];
+  const installation = await installVerifiedCache({ cacheDir: directory, localFilesOnly: true, onProgress: (event) => { if (event.file === file) progress.push(event.loaded); } });
+  try {
+    // Transformers.js 4.2.0 reads only these headers for its progress totals.
+    const probe = await env.customCache!.match(modelFileUrl(file)) as Response;
+    assert.equal(probe.headers.get('content-length'), String(size));
+    assert.deepEqual(progress, []);
+    const read = await env.customCache!.match(modelFileUrl(file)) as Response;
+    await assert.rejects(read.arrayBuffer(), ModelIntegrityError);
+    assert.equal(progress.at(-1), size, 'the whole file was read before the digest was compared');
+    // Internal status checks still verify eagerly.
+    await assert.rejects(installation.status(), ModelIntegrityError);
+  } finally { installation.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('an integrity failure that the loader drops still fails the operation instead of leaving it pending', { timeout: 10_000 }, async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-dropped-integrity-'));
+  const file = 'config.json';
+  await mkdir(join(directory, MODEL_ID, MODEL_REVISION), { recursive: true });
+  await writeFile(join(directory, MODEL_ID, MODEL_REVISION, file), 'x'.repeat(MODEL_FILES[file].size));
+  const installation = await installVerifiedCache({ cacheDir: directory, localFilesOnly: true });
+  try {
+    // Like Transformers.js 4.2.0's external-data loader: the read fails inside a detached async step and the outer promise never settles.
+    const operation = () => new Promise<never>(() => { void (async () => { await (await env.customCache!.match(modelFileUrl(file)) as Response).arrayBuffer(); })().catch(() => undefined); });
+    await assert.rejects(installation.failOnIntegrity(operation), ModelIntegrityError);
+    assert.equal(await installation.failOnIntegrity(async () => 'ok'), 'ok');
+  } finally { installation.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('CPU graph patches apply only after verification and resolve external data from the pinned onnx directory', async () => {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-int8-graph-'));
   const graph = 'onnx/decoder_model_merged_q4.onnx';

@@ -438,7 +438,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
         pinnedTextResources(getRegisteredModelProfile(options.modelProfile, options.model)).catch(() => undefined);
         // Browser cache hits are fully verified when the loader reads them; verifying them here as well would read and hash every payload twice.
         await atStage('load', signal, () => cache.prefetch(signal, undefined, backend.runtime === 'node'));
-        return VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}), ...(cache.externalDataDirectory === undefined ? {} : { externalDataDirectory: cache.externalDataDirectory }) });
+        return cache.failOnIntegrity(() => VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}), ...(cache.externalDataDirectory === undefined ? {} : { externalDataDirectory: cache.externalDataDirectory }) }));
       }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000, forgetPinnedTextResources);
       return new LocalNeko(engines, cache, restore, backend, options, admission);
     } catch (error) { if (restore) restore(); else installation?.restore(); throw error; }
