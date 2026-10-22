@@ -33,7 +33,28 @@ async function loadTextResources(selected: RegisteredModelProfile): Promise<Pinn
     pinnedTokenizerResource('config.json', selected).then((response) => response.json()),
   ]);
   const tokenizer = new TokenizersBackend(tokenizerJSON, tokenizerConfig);
+  releaseConstructionJSON(tokenizer);
   return { tokenizer, template, configuration, processor: new Qwen3VLProcessor({}, { tokenizer }, template) };
+}
+type BuiltTokenizer = TokenizersBackend & {
+  _tokenizerJSON: Record<string, unknown>;
+  _tokenizer: { tokenizer: unknown; model: { config: Record<string, unknown>; merges?: unknown } };
+};
+/**
+ * Transformers.js 4.2.0 tokenizers keep their parsed tokenizer.json (the 248k-entry vocabulary object and 247k merge pairs) after building
+ * the vocabulary Map and BPE ranks they actually use: about 30 of 65 MB of JavaScript heap, which every major GC then re-marks. Only the
+ * constructors read these fields; the decoder and added tokens stay for `tokenizerByteTrie`.
+ */
+function releaseConstructionJSON(tokenizer: TokenizersBackend): void {
+  const built = tokenizer as BuiltTokenizer;
+  const json = built._tokenizerJSON;
+  const retained = { decoder: json.decoder, added_tokens: json.added_tokens };
+  built._tokenizerJSON = retained;
+  built._tokenizer.tokenizer = retained;
+  const modelConfig = { ...built._tokenizer.model.config };
+  delete modelConfig.vocab; delete modelConfig.merges;
+  built._tokenizer.model.config = modelConfig;
+  delete built._tokenizer.model.merges;
 }
 /**
  * Verified tokenizer, chat template and configuration, read, hashed and parsed once per installed verified cache and model.
