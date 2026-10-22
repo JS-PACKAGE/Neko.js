@@ -312,6 +312,8 @@ export class JsonGrammarState {
   }
 }
 const utfLeadBytes = [0, 0xc2, 0xe1, 0xf1, 0xe0, 0xed, 0xf0, 0xf4] as const;
+/** A trie node that reaches this many children gets a byte-indexed lookup table while the trie is built. */
+const WIDE_TRIE_NODE = 16;
 /** Child/sibling trie in typed arrays: one object per vocabulary entry would cost hundreds of MB for a 248k-token vocabulary. */
 class FlatTrie {
   private first: Int32Array;
@@ -320,26 +322,44 @@ class FlatTrie {
   private head: Int32Array;
   private readonly link: Int32Array;
   private nodes = 1;
+  // Construction-only index for nodes with many children (the root and common prefixes such as a leading space have hundreds):
+  // scanning their sibling lists dominated building the 248k-token trie. Children are still linked in the same order.
+  private fanout: Uint16Array | undefined;
+  private wide: Int32Array | undefined;
+  private wideTables: Int32Array[] = [];
   constructor(capacity: number, entries: number) {
     this.first = new Int32Array(capacity).fill(-1); this.sibling = new Int32Array(capacity).fill(-1);
     this.edge = new Uint8Array(capacity); this.head = new Int32Array(capacity).fill(-1);
     this.link = new Int32Array(entries).fill(-1);
+    this.fanout = new Uint16Array(capacity); this.wide = new Int32Array(capacity).fill(-1);
   }
   insert(data: Uint8Array, start: number, end: number, entry: number): void {
+    const fanout = this.fanout!; const wide = this.wide!;
     let node = 0;
     for (let at = start; at < end; at++) {
       const byte = data[at]!;
-      let child = this.first[node]!;
-      while (child !== -1 && this.edge[child] !== byte) child = this.sibling[child]!;
-      if (child === -1) { child = this.nodes++; this.edge[child] = byte; this.sibling[child] = this.first[node]!; this.first[node] = child; }
+      const slot = wide[node]!;
+      let child: number;
+      if (slot >= 0) child = this.wideTables[slot]![byte]!;
+      else { child = this.first[node]!; while (child !== -1 && this.edge[child] !== byte) child = this.sibling[child]!; }
+      if (child === -1) {
+        child = this.nodes++; this.edge[child] = byte; this.sibling[child] = this.first[node]!; this.first[node] = child;
+        if (slot >= 0) this.wideTables[slot]![byte] = child;
+        else if (++fanout[node]! === WIDE_TRIE_NODE) {
+          const table = new Int32Array(256).fill(-1);
+          for (let sibling = this.first[node]!; sibling !== -1; sibling = this.sibling[sibling]!) table[this.edge[sibling]!] = sibling;
+          wide[node] = this.wideTables.push(table) - 1;
+        }
+      }
       node = child;
     }
     this.link[entry] = this.head[node]!; this.head[node] = entry;
   }
-  /** Release the worst-case capacity once every piece is inserted. */
+  /** Release the worst-case capacity and the construction index once every piece is inserted. */
   trim(): void {
     this.first = this.first.slice(0, this.nodes); this.sibling = this.sibling.slice(0, this.nodes);
     this.edge = this.edge.slice(0, this.nodes); this.head = this.head.slice(0, this.nodes);
+    this.fanout = undefined; this.wide = undefined; this.wideTables = [];
   }
   walk(state: JsonGrammarState, ids: Int32Array, deliver: (id: number) => void): void {
     const visit = (node: number, current: JsonGrammarState) => {
