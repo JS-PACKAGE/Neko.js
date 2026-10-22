@@ -1,7 +1,8 @@
 import { env } from '@huggingface/transformers';
 import { EngineCache, type EngineCacheStatus } from './cache/engine.js';
 import { captureModelSource, installVerifiedCache, type VerifiedCacheInstallation, type ModelCacheStatus, type ModelCacheDiagnostics, type ModelSource, type CacheProgress } from './cache/model.js';
-import { cpuGraphPatches } from './cache/graph-patch.js';
+import { cpuGraphPatches, WEBGPU_GRAPH_PATCHES } from './cache/graph-patch.js';
+import { MODEL_ID } from './cache/manifest.js';
 import { inspectBackend, type BackendInfo, type BackendDevice } from './backend/index.js';
 import { VisionEngine, type InferOptions, type InferenceResult, type InferencePlanOptions, type InferencePlan, type StructuredInferOptions, type StructuredInferenceResult, type RuntimeReadiness } from './core/engine.js';
 import { generateReport, planReport as generateReportPlan, validateDescribeOptions, ReportError, type DescribeOptions, type ReportPlan } from './report/generate.js';
@@ -402,7 +403,10 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
     if (backend.runtime === 'browser' && backend.device === 'cpu') throw new NekoError('CPU/WASM cannot execute this pinned model: GatherBlockQuantized(1) is unavailable. Use a supported WebGPU browser; no automatic fallback is performed.', 'backend', 'UNSUPPORTED_BACKEND');
     let installation: VerifiedCacheInstallation | undefined; let restore: (() => void) | undefined;
     try {
-      installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly, model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.downloadConcurrency === undefined ? {} : { downloadConcurrency: options.downloadConcurrency }), ...(options.resumeDownloads === undefined ? {} : { resumeDownloads: options.resumeDownloads }), ...(options.onCacheProgress ?? options.progressCallback ? { onProgress: options.onCacheProgress ?? options.progressCallback } : {}), ...(backend.runtime === 'node' && backend.device === 'cpu' ? { graphPatches: cpuGraphPatches(options.cpuVisionPrecision === 'fp32') } : {}) });
+      const graphPatches = backend.runtime === 'node' && backend.device === 'cpu' ? cpuGraphPatches(options.cpuVisionPrecision === 'fp32')
+        // Measured on the pinned 0.8B graphs only; other models keep their published vision graphs.
+        : backend.runtime === 'browser' && backend.device === 'webgpu' && options.model === MODEL_ID ? WEBGPU_GRAPH_PATCHES : undefined;
+      installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly, model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.downloadConcurrency === undefined ? {} : { downloadConcurrency: options.downloadConcurrency }), ...(options.resumeDownloads === undefined ? {} : { resumeDownloads: options.resumeDownloads }), ...(options.onCacheProgress ?? options.progressCallback ? { onProgress: options.onCacheProgress ?? options.progressCallback } : {}), ...(graphPatches ? { graphPatches } : {}) });
       const cache = installation; const previousWasmCache = env.useWasmCache; const wasm = env.backends.onnx.wasm;
       const previous = wasm && { paths: wasm.wasmPaths, binary: wasm.wasmBinary, threads: wasm.numThreads, proxy: wasm.proxy };
       let moduleUrl: string | undefined;

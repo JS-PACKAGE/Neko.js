@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Qwen2VLImageProcessor, RawImage, Tensor } from '@huggingface/transformers';
-import { permuteData, useFastPatchFlattening } from '../src/core/vision-patches.js';
+import { encodeImagesSeparately, permuteData, useFastPatchFlattening } from '../src/core/vision-patches.js';
 
 // Same values as the pinned Qwen3.5 preprocessor_config.json.
 const config = { size: { longest_edge: 16777216, shortest_edge: 65536 }, patch_size: 16, temporal_patch_size: 2, merge_size: 2, image_mean: [0.5, 0.5, 0.5], image_std: [0.5, 0.5, 0.5] };
@@ -31,4 +31,28 @@ test('fast patch flattening yields bit-identical processor output and leaves oth
     assert.deepEqual(actual.image_grid_thw.data, expected.image_grid_thw.data);
     assert.deepEqual([actual.original_sizes, actual.reshaped_input_sizes], [expected.original_sizes, expected.reshaped_input_sizes]);
   }
+});
+
+test('multi-image encoding runs one image per call and concatenates features in image order', async () => {
+  const calls: { patches: number; first: number; grid: bigint[] }[] = [];
+  const model = {
+    async encode_image({ pixel_values, image_grid_thw }: Record<string, unknown>) {
+      const pixels = pixel_values as Tensor; const grid = image_grid_thw as Tensor;
+      calls.push({ patches: pixels.dims[0]!, first: (pixels.data as Float32Array)[0]!, grid: Array.from(grid.data as BigInt64Array) });
+      // One merged feature row per 4 patches, tagged with the first pixel of the call.
+      return new Tensor('float32', new Float32Array(pixels.dims[0]! / 4).fill((pixels.data as Float32Array)[0]!), [pixels.dims[0]! / 4, 1]);
+    },
+  };
+  encodeImagesSeparately(model);
+  const width = 3; const rows = 8 + 4;
+  const pixels = new Tensor('float32', Float32Array.from({ length: rows * width }, (_, index) => Math.floor(index / width)), [rows, width]);
+  const features = await model.encode_image({ pixel_values: pixels, image_grid_thw: new Tensor('int64', BigInt64Array.of(1n, 2n, 4n, 1n, 2n, 2n), [2, 3]) }) as Tensor;
+  assert.deepEqual(calls, [{ patches: 8, first: 0, grid: [1n, 2n, 4n] }, { patches: 4, first: 8, grid: [1n, 2n, 2n] }]);
+  assert.deepEqual(features.dims, [3, 1]);
+  assert.deepEqual(Array.from(features.data as Float32Array), [0, 0, 8]);
+  calls.length = 0;
+  await model.encode_image({ pixel_values: pixels, image_grid_thw: new Tensor('int64', BigInt64Array.of(1n, 3n, 4n), [1, 3]) });
+  assert.deepEqual(calls, [{ patches: rows, first: 0, grid: [1n, 3n, 4n] }], 'a single image is encoded unchanged');
+  await assert.rejects(model.encode_image({ pixel_values: pixels, image_grid_thw: new Tensor('int64', BigInt64Array.of(1n, 2n, 4n, 1n, 2n, 4n), [2, 3]) }), /exceeds/);
+  await assert.rejects(model.encode_image({ pixel_values: pixels, image_grid_thw: new Tensor('int64', BigInt64Array.of(1n, 2n, 2n, 1n, 2n, 2n), [2, 3]) }), /cover/);
 });

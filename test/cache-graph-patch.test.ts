@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import ort from 'onnxruntime-node';
-import { withFp32MatMul, withInt8MatMulNBits } from '../src/cache/graph-patch.js';
+import { withFp32MatMul, withInt8MatMulNBits, withoutAttentionBias } from '../src/cache/graph-patch.js';
 
 // Minimal ONNX protobuf writer: enough for a MatMulNBits graph that native ONNX Runtime can execute.
 const utf8 = new TextEncoder();
@@ -93,4 +93,33 @@ test('fp32 MatMul patch computes fp16-weight MatMuls in fp32, casts shared input
     assert.ok(Math.abs(fp32[index]! - reference[index]!) <= tolerance, `fp32 output ${index}: ${fp32[index]} vs ${reference[index]}`);
     assert.ok(Math.abs(half[index]! - reference[index]!) <= tolerance, `fp16 output ${index}: ${half[index]} vs ${reference[index]}`);
   }
+});
+
+const S = 4; const HIDDEN = 8;
+/** out = MultiHeadAttention(Q, K, V, attention_bias = `bias`), the bias stored as an initializer. */
+function attentionModel(bias: number[]): Uint8Array<ArrayBuffer> {
+  const graph = [
+    ...bytes(1, [...str(1, 'Q'), ...str(1, 'K'), ...str(1, 'V'), ...str(1, ''), ...str(1, ''), ...str(1, 'bias'), ...str(2, 'out'), ...str(4, 'MultiHeadAttention'), ...str(7, 'com.microsoft'), ...intAttribute('num_heads', 2)]),
+    ...str(2, 'g'),
+    ...tensor('bias', 1, [1, 1, S, S], new Uint8Array(Float32Array.from(bias).buffer)),
+    ...valueInfo(11, 'Q', [1, S, HIDDEN]), ...valueInfo(11, 'K', [1, S, HIDDEN]), ...valueInfo(11, 'V', [1, S, HIDDEN]), ...valueInfo(12, 'out', [1, S, HIDDEN]),
+  ];
+  return Uint8Array.from([...int(1, 8), ...bytes(8, [...str(1, ''), ...int(2, 17)]), ...bytes(8, [...str(1, 'com.microsoft'), ...int(2, 1)]), ...bytes(7, graph)]);
+}
+
+test('attention bias removal drops only the MultiHeadAttention bias input', async () => {
+  const values = (seed: number) => Float32Array.from({ length: S * HIDDEN }, (_, index) => Math.sin(index * 0.37 + seed));
+  const evaluate = async (graph: Uint8Array) => {
+    const session = await ort.InferenceSession.create(graph);
+    try { return (await session.run({ Q: new ort.Tensor('float32', values(1), [1, S, HIDDEN]), K: new ort.Tensor('float32', values(2), [1, S, HIDDEN]), V: new ort.Tensor('float32', values(3), [1, S, HIDDEN]) })).out!.data as Float32Array; } finally { await session.release(); }
+  };
+  // Two "images" of two tokens each, masked from each other the way the pinned vision encoders do.
+  const masked = attentionModel(Array.from({ length: S * S }, (_, index) => (Math.floor(index / S) < 2) === (index % S < 2) ? 0 : -10000));
+  const zero = attentionModel(new Array<number>(S * S).fill(0));
+  const patched = withoutAttentionBias(masked);
+  assert.notEqual(patched, masked);
+  assert.equal(withoutAttentionBias(patched), patched, 'a removed bias is not removed twice');
+  const [withMask, withZero, without] = await Promise.all([evaluate(masked), evaluate(zero), evaluate(patched)]);
+  for (let index = 0; index < S * HIDDEN; index++) assert.ok(Math.abs(without[index]! - withZero[index]!) < 1e-5, `output ${index}: ${without[index]} vs ${withZero[index]}`);
+  assert.ok(withMask.some((value, index) => Math.abs(value - without[index]!) > 1e-3), 'the patched graph no longer applies the cross-image mask');
 });

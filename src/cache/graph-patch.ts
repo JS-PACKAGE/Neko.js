@@ -1,6 +1,7 @@
 /**
- * In-memory ONNX graph patches for native Node CPU, applied after SHA-256 verification; cached files are never modified.
+ * In-memory ONNX graph patches, applied after SHA-256 verification; cached files are never modified.
  *
+ * Native Node CPU:
  * - The pinned q4 decoder leaves MatMulNBits `accuracy_level` unset (0), so ONNX Runtime multiplies fp32 activations
  *   against dequantized weights. Level 4 lets it quantize each activation block to int8 and use integer dot-product
  *   kernels, which is several times faster on the decoder's per-token matrix-vector products.
@@ -8,12 +9,20 @@
  *   fp16 GEMM, which (with KleidiAI disabled, see `VisionEngine.load`) measured about 2.5 times slower than its fp32 SGEMM.
  *   Casting each fp16 weight initializer to fp32 lets session creation constant-fold fp32 weights (about 300 MB more
  *   resident memory after load); activations are cast around each MatMul.
+ *
+ * Browser WebGPU:
+ * - The pinned 0.8B vision encoders give every MultiHeadAttention a [1, 1, N, N] bias that only masks attention between
+ *   different images. ONNX Runtime Web's WebGPU attention with a bias was about 10 times slower on a 4,900-patch image
+ *   than without one. The engine encodes one image per run (`encodeImagesSeparately`), where that bias is all zeros, so the
+ *   patch drops the bias input.
  */
 export type GraphPatch = (model: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>;
 /** Patches for native Node CPU sessions, keyed by pinned file name. */
 export function cpuGraphPatches(fp32Vision: boolean): Readonly<Record<string, GraphPatch>> {
   return { 'onnx/decoder_model_merged_q4.onnx': withInt8MatMulNBits, ...(fp32Vision ? { 'onnx/vision_encoder_fp16.onnx': withFp32MatMul } : {}) };
 }
+/** Patches for browser WebGPU sessions of the pinned 0.8B model, keyed by pinned file name. */
+export const WEBGPU_GRAPH_PATCHES: Readonly<Record<string, GraphPatch>> = { 'onnx/vision_encoder_fp16.onnx': withoutAttentionBias, 'onnx/vision_encoder_q4.onnx': withoutAttentionBias };
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -103,6 +112,18 @@ export function withInt8MatMulNBits(model: Uint8Array<ArrayBuffer>): Uint8Array<
     const { op, domain, accuracyLevel } = describe(model, entry);
     // Repeated fields may be appended in any order; explicit levels are left as published.
     return op === 'MatMulNBits' && domain === 'com.microsoft' && !accuracyLevel ? framed(1, [model.subarray(entry.body, entry.end), ACCURACY_LEVEL_INT8]) : undefined;
+  });
+}
+
+/** Returns a ModelProto whose top-level com.microsoft MultiHeadAttention nodes have no `attention_bias` (input 5). */
+export function withoutAttentionBias(model: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  return patchNodes(model, () => (entry) => {
+    const { op, domain, inputs } = describe(model, entry);
+    if (op !== 'MultiHeadAttention' || domain !== 'com.microsoft' || !inputs[5]) return undefined;
+    const body: Uint8Array[] = []; let input = 0;
+    // An empty name marks an omitted optional input; later inputs keep their positions.
+    for (const field of fields(model, entry.body, entry.end)) body.push(field.number === 1 && field.wire === 2 && input++ === 5 ? new Uint8Array([0x0a, 0]) : model.subarray(field.start, field.end));
+    return framed(1, body);
   });
 }
 

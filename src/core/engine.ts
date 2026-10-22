@@ -16,7 +16,7 @@ import { JsonBoundary } from './json-boundary.js';
 import { JsonGrammarProcessor, tokenizerByteTrie, type TokenByteTrie } from './json-grammar.js';
 import { promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
 import { pinnedTextResources } from './text-resources.js';
-import { useFastPatchFlattening } from './vision-patches.js';
+import { encodeImagesSeparately, useFastPatchFlattening } from './vision-patches.js';
 import { keepLastLogits } from './decoder-patches.js';
 import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot } from './reuse.js';
 import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
@@ -127,6 +127,7 @@ export class VisionEngine {
         processor = new Qwen3VLProcessor({}, { tokenizer, image_processor: imageProcessor }, template);
         model = await loading;
         keepLastLogits(model);
+        encodeImagesSeparately(model as unknown as Parameters<typeof encodeImagesSeparately>[0]);
       } catch (error) {
         // Never leave a half-built model holding native sessions.
         await loading.then((loaded) => loaded.dispose(), () => undefined);

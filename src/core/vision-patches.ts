@@ -49,3 +49,31 @@ export function useFastPatchFlattening(processor: unknown): void {
     };
   } });
 }
+
+type ImageEncoder = { encode_image(inputs: Record<string, unknown>): Promise<unknown> };
+/**
+ * Runs the vision encoder once per image. The pinned encoders already mask attention between images, so each image's
+ * features are unchanged, attention cost falls from (Σn)² to Σn² patches, and a graph whose cross-image mask was removed
+ * (`WEBGPU_GRAPH_PATCHES`) stays correct for multi-image prompts. Features are concatenated in image order.
+ */
+export function encodeImagesSeparately(model: ImageEncoder): void {
+  const encode = model.encode_image;
+  Object.defineProperty(model, 'encode_image', { configurable: true, writable: true, value: async (inputs: Record<string, unknown>) => {
+    const { pixel_values: pixels, image_grid_thw: grid } = inputs;
+    if (!(pixels instanceof Tensor) || !(grid instanceof Tensor) || grid.dims.length !== 2 || grid.dims[1] !== 3 || grid.dims[0]! <= 1) return encode.call(model, inputs);
+    const width = pixels.dims[1]!; const data = pixels.data as Float32Array; const sizes = grid.data as BigInt64Array;
+    const features: Tensor[] = [];
+    try {
+      let offset = 0;
+      for (let image = 0; image < grid.dims[0]!; image++) {
+        const thw = sizes.slice(image * 3, image * 3 + 3); const patches = Number(thw[0]! * thw[1]! * thw[2]!);
+        if (offset + patches > pixels.dims[0]!) throw new Error('Image grid exceeds the pixel patches');
+        const result = await encode.call(model, { ...inputs, pixel_values: new Tensor(pixels.type, data.slice(offset * width, (offset + patches) * width), [patches, width]), image_grid_thw: new Tensor('int64', thw, [1, 3]) });
+        if (!(result instanceof Tensor)) throw new Error('Vision encoder returned invalid features');
+        features.push(result); offset += patches;
+      }
+      if (offset !== pixels.dims[0]) throw new Error('Image grid does not cover the pixel patches');
+      return cat(features, 0);
+    } finally { for (const feature of features) feature.dispose(); }
+  } });
+}

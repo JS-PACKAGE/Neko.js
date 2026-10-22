@@ -55,7 +55,7 @@ export interface VerifiedCacheOptions {
   downloadConcurrency?: number;
   /** Preserve interrupted, validator-bound staging for the next explicit installation. Defaults to true. */
   resumeDownloads?: boolean;
-  /** Node only: serve these verified graphs, keyed by pinned file name, rewritten in memory (see `cpuGraphPatches`). */
+  /** Serve these verified graphs, keyed by pinned file name, rewritten in memory (see `cpuGraphPatches` and `WEBGPU_GRAPH_PATCHES`). */
   graphPatches?: Readonly<Record<string, GraphPatch>>;
 }
 export interface ModelCacheStatus { downloaded: boolean; verified: boolean; bytes: number; totalBytes: number; path: string; files: { name: ModelFileName; present: boolean; verified: boolean; bytes: number }[]; }
@@ -462,9 +462,10 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       try {
         response = await backing.match(nativeKey(request, model, name));
         if (!response || !name) return response as Response | undefined;
-        const patch = graphPatches && externalDataDirectory && Object.hasOwn(graphPatches, name) ? graphPatches[name] : undefined;
+        const patch = graphPatches && Object.hasOwn(graphPatches, name) ? graphPatches[name] : undefined;
         if (patch) {
-          // Patch exactly the bytes just verified; ONNX Runtime opens the unchanged external data from `externalDataDirectory`.
+          // Patch exactly the bytes just verified. Node ONNX Runtime opens the unchanged external data from `externalDataDirectory`;
+          // browser sessions receive it as named buffers.
           const graph = patch(new Uint8Array(await (await readVerified(response, name, model.allFiles[name], options, 'verify', signal)).arrayBuffer()));
           return new Response(graph, { status: 200, headers: { 'content-length': String(graph.byteLength) } });
         }
