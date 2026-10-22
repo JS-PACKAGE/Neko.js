@@ -20,17 +20,79 @@ function sortedEnumStrings(values: readonly unknown[]): readonly string[] {
   if (!sorted) { sorted = values.filter((value): value is string => typeof value === 'string').sort(); sortedStrings.set(values, sorted); }
   return sorted;
 }
-/** Strings sharing a prefix are contiguous from the first entry that is not below it. */
-function anyStartsWith(sorted: readonly string[], prefix: string): boolean {
+function lowerBound(sorted: readonly string[], prefix: string): number {
   let low = 0; let high = sorted.length;
   while (low < high) { const middle = (low + high) >>> 1; if (sorted[middle]! < prefix) low = middle + 1; else high = middle; }
+  return low;
+}
+/** Strings sharing a prefix are contiguous from the first entry that is not below it. */
+function anyStartsWith(sorted: readonly string[], prefix: string): boolean {
+  const low = lowerBound(sorted, prefix);
   return low < sorted.length && sorted[low]!.startsWith(prefix);
+}
+const following = new WeakMap<readonly string[], Map<string, readonly number[]>>();
+/**
+ * Distinct code points that follow `prefix` in a sorted enumeration, reused by every byte probe of a mask step. Entries sharing
+ * `prefix` plus one next code point are contiguous, so each distinct continuation costs one binary search rather than a scan of its block.
+ */
+function followingCodePoints(sorted: readonly string[], prefix: string): readonly number[] {
+  let cache = following.get(sorted);
+  if (!cache) following.set(sorted, cache = new Map());
+  let points = cache.get(prefix);
+  if (!points) {
+    const distinct = new Set<number>();
+    for (let index = lowerBound(sorted, prefix); index < sorted.length && sorted[index]!.startsWith(prefix);) {
+      const value = sorted[index]!;
+      if (value.length === prefix.length) { index++; continue; }
+      const point = value.codePointAt(prefix.length)!;
+      distinct.add(point);
+      const unit = value.charCodeAt(prefix.length);
+      // A lone high surrogate may still precede paired entries with that unit, and 0xFFFF has no successor unit: step once instead.
+      if (point === unit && (unit >= 0xd800 && unit <= 0xdbff || unit === 0xffff)) { index++; continue; }
+      const head = value.slice(0, prefix.length + (point > 0xffff ? 2 : 1));
+      index = lowerBound(sorted, head.slice(0, -1) + String.fromCharCode(head.charCodeAt(head.length - 1) + 1));
+    }
+    points = [...distinct];
+    if (cache.size >= 64) cache.delete(cache.keys().next().value!);
+    cache.set(prefix, points);
+  }
+  return points;
 }
 const canonical = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value !== null && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`;
   return JSON.stringify(value);
 };
+const canonicalSets = new WeakMap<readonly unknown[], ReadonlySet<string>>();
+/** Canonical JSON of every enumeration value, built once per enumeration so membership is not a scan per check. */
+function canonicalSet(values: readonly unknown[]): ReadonlySet<string> {
+  let set = canonicalSets.get(values);
+  if (!set) { set = new Set(values.map(canonical)); canonicalSets.set(values, set); }
+  return set;
+}
+const jsonStrings = new WeakMap<readonly unknown[], readonly string[]>();
+/** Sorted `JSON.stringify` of every enumeration value, for number-prefix checks by binary search. */
+function sortedJson(values: readonly unknown[]): readonly string[] {
+  let sorted = jsonStrings.get(values);
+  if (!sorted) { sorted = values.map((value) => JSON.stringify(value)).sort(); jsonStrings.set(values, sorted); }
+  return sorted;
+}
+const remainders = new WeakMap<readonly unknown[], Map<string, readonly unknown[]>>();
+/** The values of a unique-items enumeration not yet used, cached by the used set so repeated probes share one filtered copy (and its sorted/canonical indexes). */
+function remainingEnum(values: readonly unknown[], used: ReadonlySet<string>): readonly unknown[] {
+  let cache = remainders.get(values);
+  if (!cache) remainders.set(values, cache = new Map());
+  const key = [...used].sort().join('\u0000');
+  let remaining = cache.get(key);
+  if (!remaining) {
+    remaining = values.filter((candidate) => !used.has(canonical(candidate)));
+    // Filtering keeps order, so the remainder's sorted copy needs no re-sort.
+    sortedStrings.set(remaining, sortedEnumStrings(values).filter((value) => !used.has(JSON.stringify(value))));
+    if (cache.size >= 32) cache.delete(cache.keys().next().value!);
+    cache.set(key, remaining);
+  }
+  return remaining;
+}
 interface Frame { schema: GrammarSchema; value: unknown[] | Record<string, unknown>; phase: 'key' | 'colon' | 'value' | 'comma' | 'next'; key?: string; }
 interface Lexeme { kind: 'string' | 'number' | 'literal'; schema: GrammarSchema; text: string; key: boolean; escape: boolean; unicode: string | null; literal?: string; }
 /** A copyable incremental recognizer. Tokens and UTF-8 code points can end at any byte boundary. */
@@ -75,8 +137,8 @@ export class JsonGrammarState {
       if (this.utfRemaining === 2 && this.utfCode === 0 && byte < 0xa0 || this.utfRemaining === 2 && this.utfCode === 13 && byte > 0x9f || this.utfRemaining === 3 && this.utfCode === 0 && byte < 0x90 || this.utfRemaining === 3 && this.utfCode === 4 && byte > 0x8f) return false;
       this.utfCode = this.utfCode * 64 + (byte & 63);
       --this.utfRemaining;
-      const candidates = this.stringCandidates();
-      if (candidates && !candidates.some((candidate) => candidate.startsWith(this.lexeme!.text) && candidate.length > this.lexeme!.text.length && candidate.codePointAt(this.lexeme!.text.length)! >>> (this.utfRemaining * 6) === this.utfCode)) return false;
+      const next = this.nextCodePoints();
+      if (next && !next.some((point) => point >= this.utfMin && point >>> (this.utfRemaining * 6) === this.utfCode)) return false;
       if (this.utfRemaining) return true;
       if (this.utfCode < this.utfMin || this.utfCode > 0x10ffff || this.utfCode >= 0xd800 && this.utfCode <= 0xdfff) return false;
       return this.character(String.fromCodePoint(this.utfCode));
@@ -88,8 +150,9 @@ export class JsonGrammarState {
     else if (byte >= 0xe0 && byte <= 0xef) { this.utfRemaining = 2; this.utfCode = byte & 15; this.utfMin = 0x800; }
     else if (byte >= 0xf0 && byte <= 0xf4) { this.utfRemaining = 3; this.utfCode = byte & 7; this.utfMin = 0x10000; }
     else return false;
-    const candidates = this.stringCandidates();
-    return candidates === undefined || candidates.some((candidate) => candidate.startsWith(this.lexeme!.text) && candidate.length > this.lexeme!.text.length && candidate.codePointAt(this.lexeme!.text.length)! >>> (this.utfRemaining * 6) === this.utfCode);
+    const next = this.nextCodePoints();
+    // The lead byte's payload bits alone also match shorter encodings (an E0 or F0 lead leaves them zero, like ASCII), so the candidate must need this many bytes.
+    return next === undefined || next.some((point) => point >= this.utfMin && point >>> (this.utfRemaining * 6) === this.utfCode);
   }
   private stringCandidates(): string[] | undefined {
     const token = this.lexeme!;
@@ -97,6 +160,13 @@ export class JsonGrammarState {
     return token.key && frame?.schema.type === 'object'
       ? Object.keys(frame.schema.properties ?? {}).filter((key) => !Object.hasOwn(frame.value, key))
       : token.schema.enum && sortedEnumStrings(token.schema.enum) as string[];
+  }
+  /** Code points that can follow the open string's text (remaining object keys or enumeration values); undefined when unrestricted. */
+  private nextCodePoints(): readonly number[] | undefined {
+    const token = this.lexeme!;
+    const frame = this.frames.at(-1);
+    if (token.key && frame?.schema.type === 'object') return Object.keys(frame.schema.properties ?? {}).filter((key) => !Object.hasOwn(frame.value, key) && key.startsWith(token.text) && key.length > token.text.length).map((key) => key.codePointAt(token.text.length)!);
+    return token.schema.enum && followingCodePoints(sortedEnumStrings(token.schema.enum), token.text);
   }
   private stringPrefix(): boolean {
     const token = this.lexeme!;
@@ -107,7 +177,7 @@ export class JsonGrammarState {
     return token.schema.enum === undefined || anyStartsWith(sortedEnumStrings(token.schema.enum), token.text);
   }
   private valid(schema: GrammarSchema, value: unknown): boolean {
-    if (schema.enum && !schema.enum.some((candidate) => canonical(candidate) === canonical(value))) return false;
+    if (schema.enum && !canonicalSet(schema.enum).has(canonical(value))) return false;
     if (typeof value === 'string') { const length = Array.from(value).length; if (length < (schema.minLength ?? 0) || length > (schema.maxLength ?? Infinity)) return false; }
     if (schema.type === 'integer' && (typeof value !== 'number' || !Number.isInteger(value))) return false;
     return true;
@@ -140,11 +210,8 @@ export class JsonGrammarState {
       const usedValues = parent.value;
       if (!usedValues.length) { if (!schema.enum.length) return false; }
       else {
-        const used = new Set(usedValues.map(canonical));
-        const remaining = schema.enum.filter((candidate) => !used.has(canonical(candidate)));
+        const remaining = remainingEnum(schema.enum, new Set(usedValues.map(canonical)));
         if (!remaining.length) return false;
-        // Filtering keeps order, so the remainder's sorted copy needs no re-sort.
-        sortedStrings.set(remaining, sortedEnumStrings(schema.enum).filter((value) => !used.has(JSON.stringify(value))));
         schema = { ...schema, enum: remaining };
       }
     }
@@ -153,11 +220,11 @@ export class JsonGrammarState {
     if (character === '[' && accepts('array')) { this.frames.push({ schema, value: [], phase: 'value' }); return true; }
     if (character === '"' && accepts('string')) { this.lexeme = { kind: 'string', schema, text: '', key: false, escape: false, unicode: null }; return this.stringPrefix(); }
     if ((character === '-' || /\d/.test(character)) && (accepts('number') || accepts('integer'))) {
-      if (schema.enum && !schema.enum.some((value) => JSON.stringify(value).startsWith(character))) return false;
+      if (schema.enum && !anyStartsWith(sortedJson(schema.enum), character)) return false;
       this.lexeme = { kind: 'number', schema, text: character, key: false, escape: false, unicode: null }; return true;
     }
     const literal = character === 't' && accepts('boolean') ? 'true' : character === 'f' && accepts('boolean') ? 'false' : character === 'n' && accepts('null') ? 'null' : undefined;
-    if (!literal || schema.enum && !schema.enum.some((value) => JSON.stringify(value) === literal)) return false;
+    if (!literal || schema.enum && !canonicalSet(schema.enum).has(literal)) return false;
     this.lexeme = { kind: 'literal', schema, text: character, key: false, escape: false, unicode: null, literal }; return true;
   }
   private character(character: string): boolean {
@@ -179,8 +246,8 @@ export class JsonGrammarState {
         token.text += escaped[character]; return this.stringPrefix();
       }
       if (character === '\\') {
-        const candidates = this.stringCandidates();
-        if (candidates && !candidates.some((candidate) => candidate.startsWith(token.text) && candidate.length > token.text.length)) return false;
+        const next = this.nextCodePoints();
+        if (next && !next.length) return false;
         if (token.schema.maxLength !== undefined && Array.from(token.text).length >= token.schema.maxLength && !/[\uD800-\uDBFF]$/.test(token.text)) return false;
         token.escape = true; return true;
       }
@@ -202,7 +269,7 @@ export class JsonGrammarState {
       if (/[\deE+.-]/.test(character)) {
         const next = token.text + character;
         if (!/^-?(?:0|[1-9]\d*)?(?:\.\d*)?(?:[eE][+-]?\d*)?$/.test(next) || /^-?0\d/.test(next) || /^-?\./.test(next) || /(?:^-?$|\.)[eE]/.test(next)) return false;
-        if (token.schema.enum && !token.schema.enum.some((value) => JSON.stringify(value).startsWith(next))) return false;
+        if (token.schema.enum && !anyStartsWith(sortedJson(token.schema.enum), next)) return false;
         token.text = next; return true;
       }
       if (!this.finishNumber()) return false;
@@ -217,7 +284,13 @@ export class JsonGrammarState {
       if (frame.phase === 'comma') {
         if (character === ']') return this.close(frame);
         if (character !== ',' || frame.value.length >= (frame.schema.maxItems ?? Infinity)) return false;
-        if (frame.schema.uniqueItems && frame.schema.items?.enum?.every((candidate) => values.some((used) => canonical(candidate) === canonical(used)))) return false;
+        if (frame.schema.uniqueItems && frame.schema.items?.enum) {
+          // Every enumeration value already used: no further unique item exists.
+          const candidates = canonicalSet(frame.schema.items.enum); const used = new Set(values.map(canonical));
+          let covered = 0;
+          for (const value of used) if (candidates.has(value)) covered++;
+          if (covered === candidates.size) return false;
+        }
         frame.phase = 'next'; return true;
       }
       if (character === ']' && frame.phase === 'value') return this.close(frame);

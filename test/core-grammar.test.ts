@@ -193,6 +193,25 @@ test('enum string prefixes accept exactly the prefixes of remaining unique value
   }
 });
 
+test('multi-byte enum prefixes and unique-item remainders match the candidates\' UTF-8 bytes at every byte, over large enumerations', () => {
+  let seed = 21; const random = (n: number) => (seed = (seed * 1664525 + 1013904223) >>> 0) % n;
+  const alphabet = ['a', 'b', 'é', 'ê', '漢', '字', '\uFFFF', '😀', '😁', '𐀀'];
+  for (let trial = 0; trial < 60; trial++) {
+    const values = [...new Set(Array.from({ length: 1 + random(trial < 50 ? 30 : 3000) }, () => Array.from({ length: 1 + random(4) }, () => alphabet[random(alphabet.length)]).join('')))];
+    const compiled = compileStructuredSchema({ type: 'array', uniqueItems: true, items: { type: 'string', enum: values } }).grammar!;
+    const used = values.slice(0, random(Math.min(3, values.length)));
+    const remaining = values.filter((value) => !used.includes(value)).map((value) => encoder.encode(value));
+    const head = encoder.encode('[' + used.map((value) => JSON.stringify(value) + ',').join('') + '"');
+    for (let probe = 0; probe < 40; probe++) {
+      const target = encoder.encode(values[random(values.length)]! + alphabet[random(alphabet.length)]);
+      const bytes = target.slice(0, random(target.length + 1));
+      const expected = remaining.some((candidate) => bytes.every((byte, index) => candidate[index] === byte));
+      const state = new JsonGrammarState(compiled);
+      assert.equal(state.push(head) && state.push(bytes), expected, `${JSON.stringify(used)} / ${Array.from(bytes)}`);
+    }
+  }
+});
+
 test('maxLength string masks equal a per-piece reference at every code-point budget and pending UTF-8 class', () => {
   let seed = 11; const random = (n: number) => (seed = (seed * 1664525 + 1013904223) >>> 0) % n;
   // Whole characters of every UTF-8 width (including the E0/ED/F0/F4 lead classes), their byte fragments, and structural bytes.

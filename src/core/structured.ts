@@ -1,4 +1,4 @@
-import { Validator, type Schema } from '@cfworker/json-schema';
+import { Validator, deepCompareStrict, type Schema } from '@cfworker/json-schema';
 import { NekoError } from '../errors.js';
 import type { GrammarSchema } from './json-grammar.js';
 export type StructuredMode = 'constrained' | 'validation-only';
@@ -96,7 +96,8 @@ const meta = new Validator({
     items: { anyOf: [ref, schemaArray] }, maxItems: integer, minItems: integer, uniqueItems: { type: 'boolean' }, contains: ref,
     maxProperties: integer, minProperties: integer, required: stringArray, additionalProperties: ref, definitions: schemaMap, properties: schemaMap,
     patternProperties: { ...schemaMap, propertyNames: { format: 'regex' } }, dependencies: { type: 'object', additionalProperties: { anyOf: [ref, stringArray] } },
-    propertyNames: ref, const: true, enum: { type: 'array', minItems: 1, uniqueItems: true }, type: { anyOf: [types, { type: 'array', minItems: 1, uniqueItems: true, items: types }] },
+    // `enum` uniqueness is checked by `enumsUnique` below: the validator's `uniqueItems` compares every pair, which took seconds for paragraph-ID enums.
+    propertyNames: ref, const: true, enum: { type: 'array', minItems: 1 }, type: { anyOf: [types, { type: 'array', minItems: 1, uniqueItems: true, items: types }] },
     format: { type: 'string' }, contentMediaType: { type: 'string' }, contentEncoding: { type: 'string' }, if: ref, then: ref, else: ref,
     allOf: schemaArray, anyOf: schemaArray, oneOf: schemaArray, not: ref,
   },
@@ -105,6 +106,33 @@ const singles: Record<string, true> = { additionalItems: true, additionalPropert
 const maps: Record<string, true> = { definitions: true, properties: true, patternProperties: true, dependencies: true };
 const arrays: Record<string, true> = { allOf: true, anyOf: true, oneOf: true };
 const newer: Record<string, true> = { $defs: true, $anchor: true, $dynamicRef: true, $dynamicAnchor: true, $recursiveRef: true, $recursiveAnchor: true, prefixItems: true, unevaluatedItems: true, unevaluatedProperties: true, dependentSchemas: true, dependentRequired: true, minContains: true, maxContains: true };
+/** Arrays as index-keyed objects, keys sorted: values the validator's `uniqueItems` equality (`deepCompareStrict`, either order) treats as equal share a key. */
+const looseKey = (value: unknown): string => value !== null && typeof value === 'object'
+  ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${looseKey((value as Record<string, unknown>)[key])}`).join(',')}}`
+  : JSON.stringify(value);
+/** The meta-schema's `enum` `uniqueItems`, with the validator's equality, bucketed by `looseKey` instead of comparing every pair. */
+function uniqueValues(values: readonly unknown[]): boolean {
+  const buckets = new Map<string, unknown[]>();
+  for (const value of values) {
+    const key = looseKey(value); const bucket = buckets.get(key);
+    if (!bucket) { buckets.set(key, [value]); continue; }
+    const object = typeof value === 'object' && value !== null;
+    if (bucket.some((other) => other === value || object && typeof other === 'object' && other !== null && (deepCompareStrict(value, other) || deepCompareStrict(other, value)))) return false;
+    bucket.push(value);
+  }
+  return true;
+}
+/** Every `enum` at a schema position (the positions the meta-schema recurses into) has unique values. */
+function enumsUnique(node: unknown): boolean {
+  if (typeof node !== 'object' || node === null || Array.isArray(node)) return true;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (key === 'enum') { if (Array.isArray(value) && !uniqueValues(value)) return false; }
+    else if (Object.hasOwn(singles, key) || key === 'items' && !Array.isArray(value)) { if (!enumsUnique(value)) return false; }
+    else if (key === 'items' || Object.hasOwn(arrays, key)) { if (Array.isArray(value) && !value.every(enumsUnique)) return false; }
+    else if (Object.hasOwn(maps, key) && typeof value === 'object' && value !== null) { for (const child of Object.values(value)) if (!Array.isArray(child) && !enumsUnique(child)) return false; }
+  }
+  return true;
+}
 
 export function compileStructuredSchema<S>(input: S, mode: StructuredMode = 'constrained'): CompiledStructuredSchema<S> {
   try {
@@ -115,7 +143,7 @@ export function compileStructuredSchema<S>(input: S, mode: StructuredMode = 'con
       return value;
     });
     const schema: unknown = JSON.parse(json);
-    if (!meta.validate(schema).valid) throw new Error('Schema is not valid Draft-07');
+    if (!meta.validate(schema).valid || !enumsUnique(schema)) throw new Error('Schema is not valid Draft-07');
     const refs: string[] = [];
     const visit = (node: unknown): void => {
       if (typeof node === 'boolean') return;
@@ -142,7 +170,7 @@ export function compileStructuredSchema<S>(input: S, mode: StructuredMode = 'con
         if (typeof target !== 'object' || target === null || !Object.hasOwn(target, key)) throw new Error(`Unresolved local schema reference: ${reference}`);
         target = (target as Record<string, unknown>)[key];
       }
-      if (!meta.validate(target).valid) throw new Error('Reference target is not a schema');
+      if (!meta.validate(target).valid || !enumsUnique(target)) throw new Error('Reference target is not a schema');
     }
     if (typeof schema === 'object' && schema !== null) delete (schema as Record<string, unknown>).$id;
     let grammar: GrammarSchema | undefined;
