@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Performance (Node CPU): decoding no longer forces a full garbage collection every two or three tokens. onnxruntime-node copies each output into a new `ArrayBuffer`, and every Qwen3.5 decode step returns about 21 MB of recurrent, convolution and attention state that became garbage one step later, so V8's external-memory pressure kept triggering mark-compacts. Once the decoder has consumed state that one of its own runs returned (cache checkouts and snapshots own clones), that state's buffer, and the previous run's logits, are detached so their memory is freed immediately. In three alternating 192-token greedy runs on the loaded Apple M5, full mark-compacts fell from 62-66 to 2-8, total GC pause from about 590-780 to about 24-132 ms, and process CPU time from about 17.4-18.1 to about 15.0-15.2 s; per-token wall time was too noisy on the shared machine to quote. Greedy text, `reuseState` conversations, the structured-output prefix cache, image inference, stop strings and sampling produced the same outputs as 1.7.0, inline and in the worker runtime.
+
 ## 1.7.0 — 2026-10-22
 
 Measurements below are single observations on one macOS arm64 machine (10 cores, Node.js 26.7.0, CPU, pinned default profile) that was shared with unrelated heavy processes (1-minute load average roughly 20-35); they are not guarantees and an idle machine was never available. Greedy text, constrained and validation-only structured outputs were identical to 1.6.1 on the exercised prompts, and the real-model state-reuse smoke and a path-image inference passed.
