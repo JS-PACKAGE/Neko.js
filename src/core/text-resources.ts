@@ -1,6 +1,7 @@
 // Kept out of tokenizer.ts: these exports name Transformers.js types, and tokenizer.ts is reachable from the public declarations,
 // which must not require consumers to resolve '@huggingface/transformers' types.
 import { Qwen3VLProcessor, TokenizersBackend, env } from '@huggingface/transformers';
+import type * as NodeWorkerThreads from 'node:worker_threads';
 import type { ModelFileName } from '../cache/manifest.js';
 import { getRegisteredModelProfile, type RegisteredModelProfile } from '../cache/registry.js';
 
@@ -27,7 +28,7 @@ export interface PinnedTextResources {
 const textResources = new WeakMap<object, Map<string, Promise<PinnedTextResources>>>();
 async function loadTextResources(selected: RegisteredModelProfile): Promise<PinnedTextResources> {
   const [tokenizerJSON, tokenizerConfig, template, configuration] = await Promise.all([
-    pinnedTokenizerResource('tokenizer.json', selected).then((response) => response.json()),
+    pinnedTokenizerResource('tokenizer.json', selected).then(parseTokenizerJSON),
     pinnedTokenizerResource('tokenizer_config.json', selected).then((response) => response.json()),
     pinnedTokenizerResource('chat_template.jinja', selected).then((response) => response.text()),
     pinnedTokenizerResource('config.json', selected).then((response) => response.json()),
@@ -36,6 +37,59 @@ async function loadTextResources(selected: RegisteredModelProfile): Promise<Pinn
   releaseConstructionJSON(tokenizer);
   memoizeByteLevel(tokenizer);
   return { tokenizer, template, configuration, processor: new Qwen3VLProcessor({}, { tokenizer }, template) };
+}
+const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
+// Runs on a worker thread. For a BPE model, replaces the vocabulary and merges with the exact keys the BPE constructor would derive
+// (vocabulary entries in `Object.entries` order; merge ranks keyed by `JSON.stringify` of each split pair), joined by NUL, which neither
+// JSON.stringify output nor these keys (checked) contain. Any other shape posts nothing usable, and the caller parses on its own thread.
+const TOKENIZER_WORKER = `'use strict';
+const { parentPort, workerData } = require('node:worker_threads');
+const json = JSON.parse(new TextDecoder().decode(workerData));
+const model = json && json.model;
+let message = { json: null };
+if (model && model.type === 'BPE' && model.vocab && typeof model.vocab === 'object' && !Array.isArray(model.vocab) && Array.isArray(model.merges) && model.merges.length > 0) {
+  const keys = Object.keys(model.vocab);
+  const ids = new Float64Array(keys.length);
+  let usable = true;
+  for (let i = 0; i < keys.length && usable; i++) { const id = model.vocab[keys[i]]; ids[i] = id; usable = typeof id === 'number' && !keys[i].includes('\\0'); }
+  const pairs = Array.isArray(model.merges[0]) ? model.merges : model.merges.map((x) => x.split(' ', 2));
+  const ranks = pairs.map((x) => JSON.stringify(x));
+  if (usable && keys.length > 0 && ranks.every((key) => typeof key === 'string')) {
+    delete model.vocab; delete model.merges;
+    message = { json, vocabulary: keys.join('\\0'), ids, ranks: ranks.join('\\0') };
+  }
+}
+parentPort.postMessage(message, message.ids ? [message.ids.buffer] : []);`;
+type TokenizerWorkerMessage = { json: Record<string, unknown> & { model: Record<string, unknown> }; vocabulary: string; ids: Float64Array; ranks: string } | { json: null };
+/**
+ * Parsing the pinned 19 MB tokenizer.json and building its 248k-entry vocabulary and 247k-entry merge-rank Maps took about 0.5 s of the
+ * Node main thread, which model loading also needs to create ONNX sessions. On Node the parse runs on a worker thread, which returns the
+ * Map keys as two strings; the main thread only builds the Maps, which the bundled BPE constructor accepts as-is (scripts/build.mjs).
+ * The resulting tokenizer is the same; if the worker is unavailable or fails, the main thread parses the bytes itself.
+ */
+async function parseTokenizerJSON(response: Response): Promise<unknown> {
+  if (!isNode) return response.json();
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let message: TokenizerWorkerMessage = { json: null };
+  try {
+    // Node-only module in code shared with browser bundles, which must not resolve it statically.
+    const protocol = 'node:';
+    const { Worker }: typeof NodeWorkerThreads = await import(`${protocol}worker_threads`);
+    const worker = new Worker(TOKENIZER_WORKER, { eval: true, workerData: bytes });
+    try {
+      message = await new Promise<TokenizerWorkerMessage>((resolve, reject) => {
+        worker.once('message', resolve); worker.once('error', reject);
+        worker.once('exit', (code) => { reject(new Error(`Tokenizer worker exited (${code})`)); });
+      });
+    } finally { void worker.terminate(); }
+  } catch { /* Parsed below on this thread, which surfaces any error in the file itself. */ }
+  if (message.json === null) return JSON.parse(new TextDecoder().decode(bytes));
+  const vocabulary = new Map<string, number>(); const ranks = new Map<string, number>();
+  const keys = message.vocabulary.split('\0'); const ids = message.ids;
+  for (let i = 0; i < keys.length; i++) vocabulary.set(keys[i]!, ids[i]!);
+  const rankKeys = message.ranks.split('\0');
+  for (let i = 0; i < rankKeys.length; i++) ranks.set(rankKeys[i]!, i);
+  return { ...message.json, model: { ...message.json.model, vocab: vocabulary, merges: [], bpe_ranks: ranks } };
 }
 type BuiltTokenizer = TokenizersBackend & {
   _tokenizerJSON: Record<string, unknown>;
@@ -53,7 +107,7 @@ function releaseConstructionJSON(tokenizer: TokenizersBackend): void {
   built._tokenizerJSON = retained;
   built._tokenizer.tokenizer = retained;
   const modelConfig = { ...built._tokenizer.model.config };
-  delete modelConfig.vocab; delete modelConfig.merges;
+  delete modelConfig.vocab; delete modelConfig.merges; delete modelConfig.bpe_ranks;
   built._tokenizer.model.config = modelConfig;
   delete built._tokenizer.model.merges;
 }

@@ -24,17 +24,27 @@ const nodeEntries = {
   documents: 'src/documents/index.ts',
 };
 
-// Transformers.js 4.2.0's greedy sampler takes the argmax with its shared `max()`, whose call sites see arrays of many element types, so
-// V8 runs it as a slow polymorphic loop: about 0.8 ms per token over the 248,320-entry vocabulary, against about 0.1 ms for a loop that
-// only ever sees Float32Array. Same comparisons and first-index tie-breaking; the build fails if the upstream line ever changes.
-const greedyArgmax = {
-  name: 'neko-greedy-argmax',
+const replaceOnce = (source, target, replacement, path) => {
+  if (source.split(target).length !== 2) throw new Error(`Transformers.js patch target not found exactly once in ${path}: ${target.split('\n')[0]}`);
+  return source.replace(target, () => replacement);
+};
+// Build-time patches to the bundled Transformers.js 4.2.0; the build fails if an upstream line ever changes.
+// - Its greedy sampler takes the argmax with its shared `max()`, whose call sites see arrays of many element types, so V8 runs it as a
+//   slow polymorphic loop: about 0.8 ms per token over the 248,320-entry vocabulary, against about 0.1 ms for a loop that only ever sees
+//   Float32Array. Same comparisons and first-index tie-breaking.
+// - Its BPE model accepts a prebuilt vocabulary Map and merge-rank Map, so Node can parse tokenizer.json on a worker thread and build
+//   the same Maps from compact strings (`src/core/text-resources.ts`). Plain JSON configurations take the original path.
+const transformersPatches = {
+  name: 'neko-transformers-patches',
   setup(build) {
     build.onLoad({ filter: /[\\/]@huggingface[\\/]transformers[\\/]dist[\\/]transformers\.(node\.mjs|web\.js)$/ }, async ({ path }) => {
-      const source = await readFile(path, 'utf8');
-      const target = 'const argmax = max(logits.data)[1];';
-      if (source.split(target).length !== 2) throw new Error(`Greedy sampler argmax not found exactly once in ${path}`);
-      return { loader: 'js', contents: `${source.replace(target, 'const argmax = nekoGreedyArgmax(logits.data);')}
+      let source = await readFile(path, 'utf8');
+      source = replaceOnce(source, 'const argmax = max(logits.data)[1];', 'const argmax = nekoGreedyArgmax(logits.data);', path);
+      source = replaceOnce(source, '    super(config);\n    this.tokens_to_ids = object_to_map(config.vocab);\n',
+        '    super(config);\n    this.tokens_to_ids = config.vocab instanceof Map ? config.vocab : object_to_map(config.vocab);\n', path);
+      source = replaceOnce(source, '    this.bpe_ranks = new Map(this.merges.map((x, i) => [JSON.stringify(x), i]));\n',
+        '    this.bpe_ranks = config.bpe_ranks instanceof Map ? config.bpe_ranks : new Map(this.merges.map((x, i) => [JSON.stringify(x), i]));\n', path);
+      return { loader: 'js', contents: `${source}
 function nekoGreedyArgmax(data) {
   if (data.length === 0) throw Error("Array must not be empty");
   let best = data[0];
@@ -57,7 +67,7 @@ for (const [entryPoint, outfile] of browserEntries) {
     entryPoints: [entryPoint],
     outfile: join(dist, 'browser', outfile),
     bundle: true,
-    plugins: [greedyArgmax],
+    plugins: [transformersPatches],
     format: 'esm',
     platform: 'browser',
     target: ['es2022'],
@@ -82,7 +92,7 @@ await build({
   entryPoints: nodeEntries,
   outdir: join(dist, 'node'),
   bundle: true,
-  plugins: [greedyArgmax],
+  plugins: [transformersPatches],
   splitting: true,
   format: 'esm',
   platform: 'node',
