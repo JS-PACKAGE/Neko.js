@@ -108,7 +108,8 @@ export class VisionEngine {
       // Apple M5, where a signal delivered mid-kernel (for example a sampling profiler's SIGPROF) killed the process with SIGILL; MLAS's int8 kernels measured as fast.
       // MLAS's fp16 GEMM is slower, so `cpuVisionPrecision: 'fp32'` can patch the vision MatMuls to fp32.
       const extra = { session: { intra_op: { allow_spinning: '0' }, ...(external ? { model_external_initializers_file_folder_path: external } : {}) }, ...(external ? { mlas: { disable_kleidiai: '1' } } : {}) };
-      // Session creation is native and asynchronous, so it overlaps the main-thread tokenizer parse below instead of waiting for it.
+      // Node's onnxruntime binding builds sessions synchronously on the main thread; the tokenizer parse is usually already
+      // running or done (index.ts starts it while worker threads hash the payloads), so it does not delay session creation.
       const loading = Qwen3_5ForConditionalGeneration.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device,
         session_options: { executionProviders: backend.executionProviders, ...(threads ? { intraOpNumThreads: threads, extra } : {}), ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) },
       });

@@ -43,6 +43,23 @@ test('CPU graph patches apply only after verification and resolve external data 
   try { assert.equal(plain.externalDataDirectory, undefined); } finally { plain.restore(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('native ONNX files hashed off the main thread reject pinned-size content with the wrong SHA-256 on every request', async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-onnx-hash-'));
+  const file = 'onnx/embed_tokens_q4.onnx';
+  await mkdir(join(directory, MODEL_ID, MODEL_REVISION, 'onnx'), { recursive: true });
+  await writeFile(join(directory, MODEL_ID, MODEL_REVISION, file), new Uint8Array(MODEL_FILES[file].size).fill(7));
+  const progress: number[] = [];
+  const installation = await installVerifiedCache({ cacheDir: directory, localFilesOnly: true, onProgress: (event) => { if (event.file === file) progress.push(event.loaded); } });
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await env.customCache!.match(modelFileUrl(file)) as Response;
+      await assert.rejects(response.arrayBuffer(), ModelIntegrityError);
+    }
+    assert.equal(progress.at(-1), MODEL_FILES[file].size, 'the whole file was read before the digest was compared');
+    await assert.rejects(installation.prefetch(undefined, [file]), ModelIntegrityError);
+  } finally { installation.restore(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('bounded native cache writes reject oversized and hash-mismatched resources without promoting an entry', async () => {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-onnx-bounds-'));
   const installation = await installVerifiedCache({ cacheDir: directory });

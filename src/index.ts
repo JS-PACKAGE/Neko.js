@@ -19,7 +19,7 @@ import { activeRequestSignal, setActiveRequest, workerExecution } from './runtim
 import { inferenceChat, validateInferenceOptions } from './core/preflight.js';
 import { createInferenceStream, type InferStreamOptions, type InferenceStreamEvent } from './runtime/stream.js';
 import { planTextInference } from './core/tokenizer.js';
-import { forgetPinnedTextResources } from './core/text-resources.js';
+import { forgetPinnedTextResources, pinnedTextResources } from './core/text-resources.js';
 import { createConversationSession, type ConversationSession, type SessionOptions } from './core/session.js';
 import { assertHardDeadlineUnsupported, createRuntimeDiagnostics, validateHealthOptions, type HealthOptions, type RuntimeHealth, type RuntimeDiagnostics } from './runtime/diagnostics.js';
 import { queuedReadable } from './queued-stream.js';
@@ -429,7 +429,10 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
       };
       options.signal?.throwIfAborted();
       const engines = new EngineCache((signal) => cache.withSignal(signal, async () => {
-        const started = performance.now(); await configureRuntime(signal); await atStage('load', signal, () => cache.prefetch(signal));
+        const started = performance.now(); await configureRuntime(signal);
+        // Node hashes the model payloads on worker threads, so the main-thread tokenizer parse can overlap them; the engine reuses this promise.
+        pinnedTextResources(getRegisteredModelProfile(options.modelProfile, options.model)).catch(() => undefined);
+        await atStage('load', signal, () => cache.prefetch(signal));
         return VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}), ...(cache.externalDataDirectory === undefined ? {} : { externalDataDirectory: cache.externalDataDirectory }) });
       }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000, forgetPinnedTextResources);
       return new LocalNeko(engines, cache, restore, backend, options, admission);

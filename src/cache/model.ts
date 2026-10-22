@@ -16,6 +16,7 @@ import { nodeDownloadStage } from './node-download.js';
 import { browserDownloadStage } from './browser-download.js';
 import { withBrowserInstallLock, withNodeInstallLock } from './lock.js';
 import type { AsyncLocalStorage } from 'node:async_hooks';
+import type * as NodeWorkerThreads from 'node:worker_threads';
 import type { GraphPatch } from './graph-patch.js';
 
 const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
@@ -178,8 +179,54 @@ async function readVerified(response: CachedResponse, name: ModelFileName, spec:
     throw error;
   } finally { signal?.removeEventListener('abort', cancel); reader.releaseLock(); }
 }
+// Runs on a worker thread: reopens the entry without following links, refuses a different file than the caller
+// fingerprinted, and hashes at most size + 1 bytes. Posts progress, then the digest.
+const HASH_WORKER = `'use strict';
+const { parentPort, workerData: { file, fingerprint, size } } = require('node:worker_threads');
+const fs = require('node:fs');
+const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+try {
+  const info = fs.fstatSync(fd);
+  if (\`\${info.dev}:\${info.ino}:\${info.size}:\${info.mtimeMs}:\${info.ctimeMs}\` !== fingerprint) parentPort.postMessage({ changed: true });
+  else {
+    const hash = require('node:crypto').createHash('sha256');
+    const buffer = Buffer.allocUnsafe(4 << 20);
+    let loaded = 0;
+    for (let read; loaded <= size && (read = fs.readSync(fd, buffer, 0, Math.min(buffer.length, size + 1 - loaded), null)) > 0;) {
+      hash.update(buffer.subarray(0, read)); loaded += read; parentPort.postMessage({ loaded });
+    }
+    parentPort.postMessage({ loaded, digest: hash.digest('hex') });
+  }
+} finally { fs.closeSync(fd); }`;
+let nodeWorkers: Promise<typeof NodeWorkerThreads> | undefined;
+/** Verifies a fingerprinted Node cache file on a worker thread, so large payloads hash in parallel and off the main thread. */
+async function hashFileOffThread(file: string, fingerprint: string, name: ModelFileName, spec: ResourceSpec, options: VerifiedCacheOptions, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  const protocol = 'node:';
+  nodeWorkers ??= import(`${protocol}worker_threads`);
+  const { Worker } = await nodeWorkers;
+  const worker = new Worker(HASH_WORKER, { eval: true, workerData: { file, fingerprint, size: spec.size } });
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const abort = () => { reject(signal!.reason); };
+  signal?.addEventListener('abort', abort, { once: true });
+  worker.on('message', (message: { changed?: true; loaded?: number; digest?: string }) => {
+    const loaded = message.loaded ?? 0;
+    if (message.changed) reject(integrity(name, 'file changed during verification'));
+    else if (loaded > spec.size) reject(integrity(name, 'exceeds pinned size'));
+    else if (message.digest === undefined) options.onProgress?.({ file: name, loaded, total: spec.size, phase: 'verify' });
+    else if (loaded !== spec.size || message.digest !== spec.sha256) reject(integrity(name, 'size or SHA-256'));
+    else resolve();
+  });
+  worker.once('error', reject);
+  worker.once('exit', (code) => { reject(new Error(`Model hash worker exited (${code})`)); });
+  try { await promise; } finally { signal?.removeEventListener('abort', abort); void worker.terminate(); }
+}
 async function hashCachedFile(response: CachedResponse, name: ModelFileName, spec: ResourceSpec, options: VerifiedCacheOptions, signal?: AbortSignal): Promise<void> {
   checkLength(response, name, spec);
+  if (response.filePath !== undefined && response.fingerprint !== undefined) {
+    await response.body?.cancel().catch(() => undefined);
+    return hashFileOffThread(response.filePath, response.fingerprint, name, spec, options, signal);
+  }
   const hash = await createNodeHash();
   const reader = response.body!.getReader();
   const cancel = () => { void reader.cancel(signal?.reason).catch(() => undefined); };
