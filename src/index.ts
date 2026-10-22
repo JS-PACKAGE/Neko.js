@@ -432,7 +432,8 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
         const started = performance.now(); await configureRuntime(signal);
         // Node hashes the model payloads on worker threads, so the main-thread tokenizer parse can overlap them; the engine reuses this promise.
         pinnedTextResources(getRegisteredModelProfile(options.modelProfile, options.model)).catch(() => undefined);
-        await atStage('load', signal, () => cache.prefetch(signal));
+        // Browser cache hits are fully verified when the loader reads them; verifying them here as well would read and hash every payload twice.
+        await atStage('load', signal, () => cache.prefetch(signal, undefined, backend.runtime === 'node'));
         return VisionEngine.load(backend, options.localFilesOnly, signal, options.progressCallback, options.profilePrefix, started, { model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.reuseCache ? { reuseCacheLimits: options.reuseCache } : {}), ...(cache.externalDataDirectory === undefined ? {} : { externalDataDirectory: cache.externalDataDirectory }) });
       }), options.cache?.engine ?? true, options.cache?.engineTtlMs ?? 30 * 60_000, forgetPinnedTextResources);
       return new LocalNeko(engines, cache, restore, backend, options, admission);

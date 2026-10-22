@@ -70,7 +70,8 @@ export interface ModelCacheDiagnostics {
 }
 export interface VerifiedCacheInstallation {
   restore(): void;
-  prefetch(signal?: AbortSignal, files?: readonly ModelFileName[]): Promise<void>;
+  /** `verifyCached: false` only checks that cached files exist; callers must read them through the verified cache before use. */
+  prefetch(signal?: AbortSignal, files?: readonly ModelFileName[], verifyCached?: boolean): Promise<void>;
   status(signal?: AbortSignal): Promise<ModelCacheStatus>;
   clear(signal?: AbortSignal): Promise<void>;
   exportBundle(signal?: AbortSignal): ReadableStream<Uint8Array>;
@@ -735,7 +736,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
       }
     },
     // Largest first: on Node the multi-hundred-MiB payloads then start hashing on worker threads before main-thread work (such as the tokenizer parse) can delay scheduling them.
-    async prefetch(signal?: AbortSignal, files: readonly ModelFileName[] = (Object.keys(selectedFiles) as ModelFileName[]).sort((a, b) => model.allFiles[b].size - model.allFiles[a].size)) {
+    async prefetch(signal?: AbortSignal, files: readonly ModelFileName[] = (Object.keys(selectedFiles) as ModelFileName[]).sort((a, b) => model.allFiles[b].size - model.allFiles[a].size), verifyCached = true) {
       if (restored) throw new Error('Verified cache installation has been restored');
       if (files.some((name) => !Object.hasOwn(selectedFiles, name))) throw new ModelIntegrityError('Cannot prefetch an unpinned selected-model file');
       const controller = new AbortController();
@@ -750,6 +751,10 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
             const name = files[next++]!;
             const request = modelFileUrl(name);
             const key = nativeKey(request, model, name);
+            if (!verifyCached) {
+              const present = await backing.match(key);
+              if (present) { await present.body?.cancel().catch(() => undefined); continue; }
+            }
             const cached = await verifiedCache.match(request, operationSignal);
             if (cached !== undefined) {
               if (cached instanceof Response && !cached.headers.has('content-length')) await cached.arrayBuffer();
