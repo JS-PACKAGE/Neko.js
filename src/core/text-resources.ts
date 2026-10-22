@@ -34,6 +34,7 @@ async function loadTextResources(selected: RegisteredModelProfile): Promise<Pinn
   ]);
   const tokenizer = new TokenizersBackend(tokenizerJSON, tokenizerConfig);
   releaseConstructionJSON(tokenizer);
+  memoizeByteLevel(tokenizer);
   return { tokenizer, template, configuration, processor: new Qwen3VLProcessor({}, { tokenizer }, template) };
 }
 type BuiltTokenizer = TokenizersBackend & {
@@ -55,6 +56,37 @@ function releaseConstructionJSON(tokenizer: TokenizersBackend): void {
   delete modelConfig.vocab; delete modelConfig.merges;
   built._tokenizer.model.config = modelConfig;
   delete built._tokenizer.model.merges;
+}
+const BYTE_LEVEL_MEMO_ENTRIES = 1 << 16;
+const BYTE_LEVEL_MEMO_LENGTH = 256;
+/**
+ * The ByteLevel pre-tokenizer UTF-8-encodes every pre-token and rebuilds it one character per byte, which was about half of encoding a
+ * prompt; pre-tokens (words, JSON punctuation, numbers) repeat heavily, and report planning counts thousands of similar prompts. Its
+ * output depends only on the pre-token, so results for pre-tokens of up to 256 UTF-16 units are memoized (at most 65,536, then the
+ * memo restarts) and returned as copies; encodings are unchanged.
+ */
+function memoizeByteLevel(tokenizer: TokenizersBackend): void {
+  const visit = (stage: unknown): void => {
+    // Pre-tokenizers are callable objects (functions), not plain objects.
+    if (!stage || (typeof stage !== 'object' && typeof stage !== 'function')) return;
+    const sequence: unknown = (stage as { tokenizers?: unknown }).tokenizers;
+    if (Array.isArray(sequence)) { for (const child of sequence) visit(child); return; }
+    const level = stage as { byte_encoder?: unknown; text_encoder?: unknown; pre_tokenize_text?: unknown };
+    if (typeof level.pre_tokenize_text !== 'function' || !level.byte_encoder || !(level.text_encoder instanceof TextEncoder)) return;
+    const original = level.pre_tokenize_text.bind(stage) as (text: string, options?: unknown) => string[];
+    const memo = new Map<string, string[]>();
+    level.pre_tokenize_text = (text: string, options?: unknown): string[] => {
+      if (text.length > BYTE_LEVEL_MEMO_LENGTH) return original(text, options);
+      let tokens = memo.get(text);
+      if (!tokens) {
+        tokens = original(text, options);
+        if (memo.size >= BYTE_LEVEL_MEMO_ENTRIES) memo.clear();
+        memo.set(text, tokens);
+      }
+      return tokens.slice();
+    };
+  };
+  visit((tokenizer as unknown as { _tokenizer?: { pre_tokenizer?: unknown } })._tokenizer?.pre_tokenizer);
 }
 /**
  * Verified tokenizer, chat template and configuration, read, hashed and parsed once per installed verified cache and model.
