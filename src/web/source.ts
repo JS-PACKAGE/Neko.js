@@ -163,16 +163,20 @@ function canonical(value: unknown, ancestors: Set<object>): string {
     return `{${Object.keys(value).sort().filter((key) => (value as Record<string, unknown>)[key] !== undefined).map((key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key], ancestors)}`).join(',')}}`;
   } finally { ancestors.delete(value); }
 }
+const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
+let nodeCrypto: Promise<typeof NodeCrypto> | undefined;
 export async function hashBytes(bytes: Uint8Array | Uint8ClampedArray): Promise<string> {
-  if (globalThis.crypto?.subtle) {
-    const buffer = bytes.buffer instanceof ArrayBuffer ? bytes : new Uint8Array(bytes);
-    const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', buffer as Uint8Array<ArrayBuffer>));
-    let result = ''; for (const byte of digest) result += byte.toString(16).padStart(2, '0'); return result;
+  // On Node, `createHash` hashes in place; WebCrypto's `digest` copies the input to a thread-pool job per call, which cost several
+  // times the CPU for the thousands of small paragraph hashes a page snapshot takes. Same SHA-256 hex either way.
+  if (isNode || !globalThis.crypto?.subtle) {
+    // Node crypto is platform-specific and cannot be imported by browser bundles.
+    const protocol = 'node:';
+    nodeCrypto ??= import(`${protocol}crypto`);
+    return (await nodeCrypto).createHash('sha256').update(bytes).digest('hex');
   }
-  // Node crypto is platform-specific and cannot be imported by browser bundles.
-  const protocol = 'node:';
-  const crypto: typeof NodeCrypto = await import(`${protocol}crypto`);
-  return crypto.createHash('sha256').update(bytes).digest('hex');
+  const buffer = bytes.buffer instanceof ArrayBuffer ? bytes : new Uint8Array(bytes);
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', buffer as Uint8Array<ArrayBuffer>));
+  let result = ''; for (const byte of digest) result += byte.toString(16).padStart(2, '0'); return result;
 }
 /** Canonical JSON: sorted keys, no `undefined` members. Hashing it is what `hashValue` does. */
 export function canonicalJson(value: unknown): string { return canonical(value, new Set()); }
