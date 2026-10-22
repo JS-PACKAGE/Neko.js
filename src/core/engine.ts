@@ -81,6 +81,53 @@ const MIN_PREFIX_TOKENS = 32;
 /** Prompt texts whose counts must match full rendering before `countPrompt` counts only the user text; the first is the base. */
 const PROMPT_PROBES = ['x', '  Source JSON:\n[{"evidenceId":"q1","quote":"Ünïcödé 貓 😀"}]\nNow output only the requested JSON object.\n\n', '\u0301 combining first and last e\u0301', '<|im_end|>\n<|im_start|>assistant\nspecial-token text', '\t\u3000wide\u00a0spaces\u2028'];
 function disposeInputs(inputs: Record<string, unknown>): void { for (const value of Object.values(inputs)) if (value instanceof Tensor) value.dispose(); }
+type TokenizerStage = ((...args: never[]) => unknown) & { config?: Record<string, unknown>; tokenizers?: unknown; pattern?: unknown; pre_tokenize_text?: (text: string) => string[] };
+type TokenizerInternals = { normalizer?: TokenizerStage | null; pre_tokenizer?: TokenizerStage | null; model?: unknown; added_tokens?: unknown; remove_space?: unknown; do_lowercase_and_remove_accent?: unknown };
+const BOUNDED_COUNT_MEMO_LENGTH = 256;
+/**
+ * Counts the tokens of `text.slice(start, end)` without special tokens, but stops once the count exceeds `limit` (returning that partial
+ * count), so testing whether a long slice fits a small budget costs only the budget's worth of pre-tokens. It replays the pinned
+ * tokenizer's pipeline (NFC, then a Split regex whose pieces are ByteLevel-mapped and BPE-encoded one at a time), which yields the same
+ * pieces in the same order as `encode`. Returns undefined, so callers use `encode`, for any other pipeline, for text that NFC would change
+ * (substrings of NFC text are NFC), or for text containing added-token content.
+ */
+function boundedTokenCounter(tokenizer: unknown, text: string): ((start: number, end: number, limit: number) => number) | undefined {
+  const inner = (tokenizer as { _tokenizer?: TokenizerInternals })._tokenizer;
+  if (!inner || inner.normalizer?.config?.type !== 'NFC' || inner.remove_space === true || inner.do_lowercase_and_remove_accent === true || typeof inner.model !== 'function' || !Array.isArray(inner.added_tokens)) return undefined;
+  const stages = inner.pre_tokenizer?.tokenizers;
+  if (!Array.isArray(stages) || stages.length !== 2) return undefined;
+  const [split, byteLevel] = stages as TokenizerStage[];
+  const pattern = split?.pattern;
+  if (split?.config?.type !== 'Split' || split.config.invert !== false || split.config.behavior !== 'Isolated' || !(pattern instanceof RegExp) || !pattern.global) return undefined;
+  if (byteLevel?.config?.type !== 'ByteLevel' || byteLevel.config.add_prefix_space !== false || byteLevel.config.use_regex !== false || typeof byteLevel.pre_tokenize_text !== 'function') return undefined;
+  for (const token of inner.added_tokens as unknown[]) {
+    const content = (token as { content?: unknown }).content;
+    if (typeof content !== 'string' || (content && (text.includes(content) || text.includes(content.normalize('NFC'))))) return undefined;
+  }
+  if (text.normalize('NFC') !== text) return undefined;
+  const model = inner.model as (tokens: string[]) => unknown[]; const preTokenize = byteLevel.pre_tokenize_text.bind(byteLevel);
+  const memo = new Map<string, number>();
+  const count = (piece: string): number => {
+    let tokens = memo.get(piece);
+    if (tokens === undefined) {
+      tokens = model(preTokenize(piece)).length;
+      if (piece.length <= BOUNDED_COUNT_MEMO_LENGTH) memo.set(piece, tokens);
+    }
+    return tokens;
+  };
+  return (start, end, limit) => {
+    const slice = text.slice(start, end); let total = 0; let previous = 0;
+    // Mirrors Transformers.js `regex_split`: unmatched gaps and non-empty matches, in order.
+    for (const match of slice.matchAll(pattern)) {
+      if (previous < match.index) total += count(slice.slice(previous, match.index));
+      if (match[0].length > 0) total += count(match[0]);
+      if (total > limit) return total;
+      previous = match.index + match[0].length;
+    }
+    if (previous < slice.length) total += count(slice.slice(previous));
+    return total;
+  };
+}
 
 export class VisionEngine {
   readonly memory = null;
@@ -190,14 +237,18 @@ export class VisionEngine {
   splitText(text: string, maxTokens: number): string[] {
     if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) throw new RangeError('Chunk token budget must be positive');
     const chunks: string[] = [];
+    const tokenizer = this.processor.tokenizer!;
+    // Probes are the same as with full encoding (token counts are not monotonic in the slice length, so the search must not change);
+    // the bounded counter only stops counting a probe once it is known not to fit.
+    const bounded = boundedTokenCounter(tokenizer, text);
+    const count = bounded ? (start: number, end: number) => bounded(start, end, maxTokens) : (start: number, end: number) => tokenizer.encode(text.slice(start, end), { add_special_tokens: false }).length;
     let start = 0;
     while (start < text.length) {
       let low = 1; let high = text.length - start; let best = start;
       while (low <= high) {
         const length = Math.floor((low + high) / 2); let end = start + length;
         if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end]!)) end--;
-        const count = this.processor.tokenizer!.encode(text.slice(start, end), { add_special_tokens: false }).length;
-        if (count <= maxTokens) { best = Math.max(best, end); low = length + 1; } else high = length - 1;
+        if (count(start, end) <= maxTokens) { best = Math.max(best, end); low = length + 1; } else high = length - 1;
       }
       if (best === start) throw new NekoError('A source character cannot fit within the chunk token budget', 'report', 'CONTEXT_LIMIT');
       chunks.push(text.slice(start, best)); start = best;
