@@ -403,7 +403,7 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
     if (backend.runtime === 'browser' && backend.device === 'cpu') throw new NekoError('CPU/WASM cannot execute this pinned model: GatherBlockQuantized(1) is unavailable. Use a supported WebGPU browser; no automatic fallback is performed.', 'backend', 'UNSUPPORTED_BACKEND');
     let installation: VerifiedCacheInstallation | undefined; let restore: (() => void) | undefined;
     try {
-      const graphPatches = backend.runtime === 'node' && backend.device === 'cpu' ? cpuGraphPatches(options.cpuVisionPrecision === 'fp32')
+      const graphPatches = backend.runtime === 'node' && backend.device === 'cpu' ? cpuGraphPatches(options.cpuVisionPrecision === 'fp32', options.model === MODEL_ID)
         // Measured on the pinned 0.8B graphs only; other models keep their published vision graphs.
         : backend.runtime === 'browser' && backend.device === 'webgpu' && options.model === MODEL_ID ? WEBGPU_GRAPH_PATCHES : undefined;
       installation = await installVerifiedCache({ ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}), ...(options.modelSource === undefined ? {} : { modelSource: options.modelSource }), localFilesOnly: options.localFilesOnly, model: options.model, profile: options.modelProfile, policy: options.policy, ...(options.downloadConcurrency === undefined ? {} : { downloadConcurrency: options.downloadConcurrency }), ...(options.resumeDownloads === undefined ? {} : { resumeDownloads: options.resumeDownloads }), ...(options.onCacheProgress ?? options.progressCallback ? { onProgress: options.onCacheProgress ?? options.progressCallback } : {}), ...(graphPatches ? { graphPatches } : {}) });

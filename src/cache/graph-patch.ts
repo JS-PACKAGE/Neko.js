@@ -10,16 +10,17 @@
  *   Casting each fp16 weight initializer to fp32 lets session creation constant-fold fp32 weights (about 300 MB more
  *   resident memory after load); activations are cast around each MatMul.
  *
- * Browser WebGPU:
- * - The pinned 0.8B vision encoders give every MultiHeadAttention a [1, 1, N, N] bias that only masks attention between
- *   different images. ONNX Runtime Web's WebGPU attention with a bias was about 10 times slower on a 4,900-patch image
- *   than without one. The engine encodes one image per run (`encodeImagesSeparately`), where that bias is all zeros, so the
- *   patch drops the bias input.
+ * Pinned 0.8B vision encoders (browser WebGPU, and Node CPU):
+ * - Every MultiHeadAttention gets a [1, 1, N, N] bias that only masks attention between different images. ONNX Runtime
+ *   Web's WebGPU attention with a bias was about 10 times slower on a 4,900-patch image than without one, and native CPU
+ *   attention about 1.5 times slower. The engine encodes one image per run (`encodeImagesSeparately`), where that bias
+ *   is all zeros, so the patch drops the bias input.
  */
 export type GraphPatch = (model: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>;
-/** Patches for native Node CPU sessions, keyed by pinned file name. */
-export function cpuGraphPatches(fp32Vision: boolean): Readonly<Record<string, GraphPatch>> {
-  return { 'onnx/decoder_model_merged_q4.onnx': withInt8MatMulNBits, ...(fp32Vision ? { 'onnx/vision_encoder_fp16.onnx': withFp32MatMul } : {}) };
+/** Patches for native Node CPU sessions, keyed by pinned file name. `pinnedVision` adds the 0.8B vision attention-bias patch. */
+export function cpuGraphPatches(fp32Vision: boolean, pinnedVision: boolean): Readonly<Record<string, GraphPatch>> {
+  const vision = fp32Vision && pinnedVision ? (model: Uint8Array<ArrayBuffer>) => withoutAttentionBias(withFp32MatMul(model)) : fp32Vision ? withFp32MatMul : pinnedVision ? withoutAttentionBias : undefined;
+  return { 'onnx/decoder_model_merged_q4.onnx': withInt8MatMulNBits, ...(vision ? { 'onnx/vision_encoder_fp16.onnx': vision } : {}), ...(pinnedVision ? { 'onnx/vision_encoder_q4.onnx': withoutAttentionBias } : {}) };
 }
 /** Patches for browser WebGPU sessions of the pinned 0.8B model, keyed by pinned file name. */
 export const WEBGPU_GRAPH_PATCHES: Readonly<Record<string, GraphPatch>> = { 'onnx/vision_encoder_fp16.onnx': withoutAttentionBias, 'onnx/vision_encoder_q4.onnx': withoutAttentionBias };

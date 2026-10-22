@@ -33,7 +33,7 @@ test('CPU graph patches apply only after verification and resolve external data 
   const graph = 'onnx/decoder_model_merged_q4.onnx';
   await mkdir(join(directory, MODEL_ID, MODEL_REVISION, 'onnx'), { recursive: true });
   await writeFile(join(directory, MODEL_ID, MODEL_REVISION, graph), new Uint8Array(MODEL_FILES[graph].size));
-  const installation = await installVerifiedCache({ cacheDir: directory, localFilesOnly: true, graphPatches: cpuGraphPatches(true) });
+  const installation = await installVerifiedCache({ cacheDir: directory, localFilesOnly: true, graphPatches: cpuGraphPatches(true, true) });
   try {
     assert.equal(installation.externalDataDirectory, join(directory, MODEL_ID, MODEL_REVISION, 'onnx'));
     const response = await env.customCache!.match(modelFileUrl(graph)) as Response;
