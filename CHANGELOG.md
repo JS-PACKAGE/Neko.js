@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 — 2026-10-22
 
 Measurements below are single observations on one macOS arm64 machine (10 cores, Node.js 26.7.0, CPU, pinned default profile) that was shared with unrelated heavy processes (1-minute load average roughly 20-35); they are not guarantees and an idle machine was never available. Greedy text, constrained and validation-only structured outputs were identical to 1.6.1 on the exercised prompts, and the real-model state-reuse smoke and a path-image inference passed.
 
