@@ -104,8 +104,8 @@ export class VisionEngine {
       const threads = backend.runtime === 'node' ? await availableThreads() : undefined;
       const external = config.externalDataDirectory;
       // Graphs served from memory (VerifiedCacheOptions.int8MatMul) resolve external data against `external` instead of a model path.
-      // ONNX Runtime 1.30's KleidiAI int8 MatMulNBits kernels run in Arm SME streaming mode on chips such as Apple M5, where a signal delivered
-      // mid-kernel (for example a sampling profiler's SIGPROF) killed the process with SIGILL; MLAS's own int8 kernels measured as fast.
+      // ONNX Runtime 1.30's KleidiAI kernels (int8 MatMulNBits and those the fp16 vision encoder uses) run in Arm SME streaming mode on chips such as
+      // Apple M5, where a signal delivered mid-kernel (for example a sampling profiler's SIGPROF) killed the process with SIGILL; MLAS's int8 kernels measured as fast.
       const extra = { session: { intra_op: { allow_spinning: '0' }, ...(external ? { model_external_initializers_file_folder_path: external } : {}) }, ...(external ? { mlas: { disable_kleidiai: '1' } } : {}) };
       // Session creation is native and asynchronous, so it overlaps the main-thread tokenizer parse below instead of waiting for it.
       const loading = Qwen3_5ForConditionalGeneration.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device,
