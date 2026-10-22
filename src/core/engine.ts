@@ -17,6 +17,7 @@ import { JsonGrammarProcessor, tokenizerByteTrie, type TokenByteTrie } from './j
 import { promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
 import { pinnedTextResources } from './text-resources.js';
 import { useFastPatchFlattening } from './vision-patches.js';
+import { keepLastLogits } from './decoder-patches.js';
 import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot } from './reuse.js';
 import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
 import { hashValue } from '../web/source.js';
@@ -118,6 +119,7 @@ export class VisionEngine {
         useFastPatchFlattening(imageProcessor);
         processor = new Qwen3VLProcessor({}, { tokenizer, image_processor: imageProcessor }, template);
         model = await loading;
+        keepLastLogits(model);
       } catch (error) {
         // Never leave a half-built model holding native sessions.
         await loading.then((loaded) => loaded.dispose(), () => undefined);
