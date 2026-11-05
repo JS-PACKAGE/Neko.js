@@ -12,12 +12,7 @@ import { getRegisteredModelProfile } from '../dist/src/cache/registry.js';
 export const MODEL_MIRROR_PATH = `/models/${MODEL_ID}/${MODEL_REVISION}/`;
 
 /** Serves only registered pinned assets; no filesystem paths are derived from request input. */
-export async function createModelMirror(options = {}) {
-  return createServer(await createModelMirrorHandler(options));
-}
-
-/** The request handler behind `createModelMirror`, for loopback servers that also serve other files. */
-export async function createModelMirrorHandler({ cacheDir, profile = 'default', allowedOrigin } = {}) {
+export async function createModelMirror({ cacheDir, profile = 'default', allowedOrigin } = {}) {
   if (!cacheDir) throw new TypeError('cacheDir is required');
   const root = resolve(cacheDir);
   if (root === parse(root).root) throw new TypeError('A filesystem root cannot be a model cache');
@@ -62,7 +57,7 @@ export async function createModelMirrorHandler({ cacheDir, profile = 'default', 
   // Fail before listening if any selected-profile asset is absent, unsafe, or corrupt.
   for (const name of Object.keys(files)) await (await verifiedHandle(name)).close();
   const paths = new Map(Object.keys(files).map((name) => [`${MODEL_MIRROR_PATH}${name}`, name]));
-  return async (request, response) => {
+  return createServer(async (request, response) => {
     let handle;
     try {
       const address = response.socket.localAddress;
@@ -101,7 +96,7 @@ export async function createModelMirrorHandler({ cacheDir, profile = 'default', 
       if (!response.headersSent) response.writeHead(500).end('Model cache verification failed');
       else response.destroy();
     } finally { await handle?.close().catch(() => undefined); }
-  };
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

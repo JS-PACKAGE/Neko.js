@@ -384,20 +384,11 @@ node examples/read-sample-page.mjs --cache-dir=/absolute/path/to/neko-model-cach
 
 首次執行會把固定版本模型下載到快取。腳本的 policy 只核准範例 origin 的頁面與圖片請求，`validateDestination` 也對每次抓取與 redirect 檢查同一個 origin。腳本設定 `maxNewTokens: 512`，因為繁體中文結論曾用完預設的 256 token，並以不完整 JSON 失敗。在負載中的 Apple M5 上一次 Node CPU 實測（約 94 秒），報告以 29 段逐字引用保留全部 521 個來源字元，並正確讀出長條圖的四季數值；但生成文字也有錯誤：寫成星期一至星期五營業，以及超過 10 歲須由成人陪同（原文為星期一公休、未滿 10 歲）。同一頁面要求英文報告時，因模型持續以中文撰寫而未通過語言檢查，所以腳本固定使用 `zh-TW`。請把輸出當成示範，而不是準確的閱讀結果。
 
-此頁也載入 `examples/neko-reader.js`：一個在瀏覽器中解析頁面的浮動「AI 解析頁面」按鈕。按下後才載入 bundle 與模型（僅 WebGPU），擷取不含按鈕的已渲染 DOM 快照，以 `extractPage(html, { baseUrl: location.href, content: 'main' })` 擷取，並在側邊面板顯示 `describe` 報告：摘要、分段重點、圖片描述與結論，全部以純文字插入。解析可停止，之後再按會重用已載入的模型。其 policy 只允許對模型 base origin 的模型請求、bundle 目錄下的 runtime 檔案與 worker，以及頁面本身 origin 的圖片。`scripts/serve-examples.mjs` 從同一個 loopback origin 提供此頁、按鈕、browser bundle，以及（指定 `--cache-dir` 時）已驗證的固定模型檔案：
-
-```sh
-npm run build
-node scripts/serve-examples.mjs --cache-dir=/absolute/path/to/neko-model-cache
-# 開啟 http://127.0.0.1:4174/examples/sample-page/
-```
-
-所選 profile 有檔案缺少或損壞時啟動即失敗；此 helper 僅供本機開發，只監聽 `127.0.0.1`。若要把按鈕加到其他頁面，加入 `<script type="module" src=".../neko-reader.js">`，可選 `data-bundle`、`data-model-base`、`data-language`、`data-max-new-tokens` 屬性；頁面須以 HTTP(S) 提供，並依下方瀏覽器流程配置 bundle 佈局與模型來源。在 Apple M5 的 headed Chromium WebGPU 實測中，從空的瀏覽器快取第一次按下約 69–77 秒完成（含從 loopback mirror 下載模型），在負載中的機器上之後再按（先關閉面板，面板會蓋住按鈕）約 56–94 秒，且沒有頁面 origin 以外的請求。報告同樣讀對長條圖數值，但營業日寫錯（例如「星期六、星期日為公休」）。
-
+此頁本身沒有解析按鈕，按鈕由[瀏覽器擴充功能](#瀏覽器擴充功能)加入。要在此頁試用擴充功能，可用 `node scripts/serve-examples.mjs` 在 loopback 提供此頁，再開啟 `http://127.0.0.1:4174/`。
 
 ### 瀏覽器擴充功能
 
-瀏覽器依網站分開存放資料，所以嵌在頁面裡的解析按鈕會在每個網站各下載一次約 830 MiB 的模型。`examples/chrome-extension/` 把同一顆浮動按鈕放到每個 http(s) 頁面，並讓所有頁面共用一份模型：content script 以 closed shadow root 加入按鈕（頁面腳本讀不到面板內容），而 offscreen document（Cache Storage 屬於擴充功能來源的擴充功能頁面）以 WebGPU 執行 Neko.js。按下按鈕時，content script 把已渲染 DOM 的惰性快照（移除腳本、樣式、frame 與按鈕本身）送到該文件，由它擷取主內容並以 JSON 回傳 `describe` 報告，面板以純文字顯示。第一次按下前不會載入模型，閒置 10 分鐘後會釋放（此釋放尚未實測）。
+瀏覽器依網站分開存放資料，若每個網站各自嵌入解析器，就會在每個網站各下載一次約 830 MiB 的模型。`examples/chrome-extension/` 把浮動「AI 解析頁面」按鈕放到每個 http(s) 頁面，並讓所有頁面共用一份模型：content script 以 closed shadow root 加入按鈕（頁面腳本讀不到面板內容），而 offscreen document（Cache Storage 屬於擴充功能來源的擴充功能頁面）以 WebGPU 執行 Neko.js。按下按鈕時，content script 把已渲染 DOM 的惰性快照（移除腳本、樣式、frame 與按鈕本身）送到該文件，由它擷取主內容並以 JSON 回傳 `describe` 報告，面板以純文字顯示摘要、分段重點、圖片描述與結論。生成可停止，之後再按會重用已載入的模型（先關閉面板，面板會蓋住按鈕）。第一次按下前不會載入模型，閒置 10 分鐘後會釋放（此釋放尚未實測）。
 
 瀏覽器無法直接從 Hugging Face 下載模型（隱藏的跨來源 redirect 會 fail closed），因此第一次下載來自 loopback mirror。manifest 內含公鑰，解壓縮載入的擴充功能 ID 固定為 `nadgcicfppcloakehhefeknhbdbhmfkj`：
 
