@@ -73,7 +73,10 @@
   },
   "overrides": {
     "onnxruntime-node": "1.30.0",
-    "sharp": "0.35.5"
+    "sharp": "0.35.5",
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.4"
+    }
   },
   "devDependencies": {
     "@cfworker/json-schema": "4.1.1",

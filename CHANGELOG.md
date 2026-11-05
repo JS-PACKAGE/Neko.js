@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Dependencies: the development-only `minimatch` under `@typescript-eslint/typescript-estree` is overridden to 11.0.4 (GHSA-g3hv-75wg-m249, denial of service via globparts amplification; no patched 10.x exists). ESLint's own `minimatch` 3.x is outside the affected range and unchanged.
 - Reports: generated text that is exactly a retained source quote (for example the navigation label "3 C" copied verbatim into a key point) no longer fails the requested-language check during generation or validation; such text is source text, not generated prose. A news article with a Traditional Chinese `lang` whose body had no `<main>` failed on that label before.
 - Reports: explicitly authorized `retries` now also cover a stage whose output fails the requested-language check (`LANGUAGE_MISMATCH`), as they already did for invalid structured output. The retry prompt already asks for the requested language; without `retries` the error is unchanged.
 - Fixed: a generated report from an instance that never created the vision encoder session (a page without images, since the session became lazy) failed validation with "Loaded session configuration is incomplete". Text sessions are still required; the vision session is now optional.
