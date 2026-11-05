@@ -53,7 +53,7 @@ try {
 - 可選主內容擷取、表格與段落關聯、帶精確引用的文件問答、圖片 ROI／tiling 與有界前處理快取。
 - 離線 bundle、安裝／配額診斷、worker health／restart／硬期限；硬期限會終止同一 worker 所有待處理請求，需明確 restart，不自動重播。
 
-完整契約與可執行範例見[繁體中文使用說明](doc/zh/usage.md)。
+完整契約與可執行範例見[繁體中文使用說明](doc/zh/usage.md)。建置後執行 `node examples/read-sample-page.mjs --cache-dir=<快取目錄>`，可看到 Neko.js 透過網址讀取隨附的[範例網頁](doc/zh/usage.md#範例網頁)並輸出報告；執行 `node scripts/serve-examples.mjs --cache-dir=<快取目錄>` 後開啟該頁，可用浮動按鈕在瀏覽器（WebGPU）中解析頁面。要在所有網站共用一份模型，可改用 Chromium [擴充功能範例](doc/zh/usage.md#瀏覽器擴充功能)。
 
 ### 瀏覽器
 
@@ -138,7 +138,7 @@ First prefetch a verified cache, then infer with the same model/profile and `loc
 - Opt-in main-content extraction, tables/paragraph relations, citation-grounded document questions, image ROI/tiling and bounded preprocessing caches.
 - Offline bundles, installation/quota diagnostics and worker health/restart/hard deadlines. A hard deadline terminates all pending work in that worker; explicit restart is required, with no automatic replay.
 
-See the [English usage guide](doc/en/usage.md) for complete contracts and examples.
+See the [English usage guide](doc/en/usage.md) for complete contracts and examples. After building, `node examples/read-sample-page.mjs --cache-dir=<cache dir>` reads the bundled [sample page](doc/en/usage.md#sample-page) by URL and prints its report; after `node scripts/serve-examples.mjs --cache-dir=<cache dir>`, the same page's floating button reads it in the browser with WebGPU. The Chromium [extension example](doc/en/usage.md#browser-extension) puts that button on every site with one shared model.
 
 ### Browser
 

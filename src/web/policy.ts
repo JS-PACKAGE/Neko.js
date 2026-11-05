@@ -31,9 +31,13 @@ function trustedResource(url: URL, kind: ResourceKind, transfer?: ModelTransfer)
   const name = url.pathname.slice(url.pathname.lastIndexOf('/') + 1);
   return Object.hasOwn(runtimeFiles, name) && url.href === new URL(`./assets/${name}`, import.meta.url).href;
 }
+// Runtime files shipped beside the bundle keep the bundle's own scheme, e.g. chrome-extension: inside a browser
+// extension. Opaque ("null") origins such as file: and data: never count as the bundle's origin.
+const bundleOrigin = new URL(import.meta.url).origin;
+const bundledRuntime = (url: URL, kind: ResourceKind) => (kind === 'runtime' || kind === 'worker') && bundleOrigin !== 'null' && url.origin === bundleOrigin;
 export async function authorizeNetwork(policy: ResourcePolicy | undefined, url: URL, kind: ResourceKind, offline = false, transfer?: ModelTransfer, signal?: AbortSignal): Promise<void> {
   const trusted = trustedResource(url, kind, transfer);
-  if (!['http:', 'https:', 'file:', 'blob:'].includes(url.protocol) || url.username || url.password) throw new NekoError('Resource protocol is denied', 'preprocess', 'POLICY_DENIED');
+  if ((!['http:', 'https:', 'file:', 'blob:'].includes(url.protocol) && !bundledRuntime(url, kind)) || url.username || url.password) throw new NekoError('Resource protocol is denied', 'preprocess', 'POLICY_DENIED');
   if (offline && (!(kind === 'runtime' || kind === 'worker') || !trusted)) throw new NekoError('Offline policy permits only bundled runtime bootstrap resources', 'preprocess', 'POLICY_DENIED');
   if (policy?.network) {
     const approved = await awaitUser(() => policy.network!(new URL(url), kind), signal, 'preprocess');

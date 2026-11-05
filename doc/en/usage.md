@@ -376,6 +376,47 @@ const prepared = await loadImage(page.images[0]);
 
 `extractPage(input, options?)` accepts an HTTP(S) URL or an HTML string; set `baseUrl` to resolve relative URLs in HTML. Defaults limit HTML to 2 MiB, images to 20 unique URLs, image downloads to 10 MiB, and each request to 10 seconds. Parsing is inert: it extracts semantic text and image sources without running scripts or fetching linked resources. It discovers `img`, `picture/source[srcset]`, inline styles, `background` attributes, and `og:image`, preserving source metadata.
 
+### Sample page
+
+`examples/sample-page/` is a small fictional café announcement in Traditional Chinese with the parts real pages mix together: navigation, an advertisement and a footer outside `main`, headings, a table, a list, an illustration and a bar chart with captions. `examples/read-sample-page.mjs` serves it on loopback, reads it by URL with `extractPage(url, { content: 'main' })`, and prints the `describe` report as Markdown in Traditional Chinese (`--json` for the typed report, `--question` to also call `ask`):
+
+```sh
+npm run build
+node examples/read-sample-page.mjs --cache-dir=/absolute/path/to/neko-model-cache
+```
+
+The first run downloads the pinned model into the cache. The script's policy approves page and image requests only for the sample origin, and `validateDestination` checks the same origin for every fetch and redirect. It sets `maxNewTokens: 512` because a Traditional Chinese conclusion used up the 256-token default and failed as incomplete JSON. In one Node CPU run on the loaded Apple M5 (about 94 s), the report kept all 521 source characters as 29 exact quotes and read the chart's four quarterly values correctly, but its generated text also contained errors: it said the café opens Monday to Friday and that customers over 10 must be accompanied (the page says closed on Mondays and under 10). An English report of the same page failed the language check because the model kept writing Chinese, so the script requests `zh-TW`. Treat the output as a demonstration, not as accurate reading.
+
+The page also loads `examples/neko-reader.js`, a floating "AI 解析頁面" button that reads the page in the browser. On click it loads the bundle and the model (WebGPU only), snapshots the rendered DOM without the button, extracts it with `extractPage(html, { baseUrl: location.href, content: 'main' })` and shows the `describe` report in a side panel: summary, section key points, image descriptions and conclusion, all inserted as text. It can be stopped, and later clicks reuse the loaded model. Its policy allows model requests only to the model base origin, runtime files and the worker only from the bundle directory, and images only from the page's origin. `scripts/serve-examples.mjs` serves the page, the button, the browser bundles and, with `--cache-dir`, the verified pinned model files from one loopback origin:
+
+```sh
+npm run build
+node scripts/serve-examples.mjs --cache-dir=/absolute/path/to/neko-model-cache
+# open http://127.0.0.1:4174/examples/sample-page/
+```
+
+Startup fails if any file of the selected profile is missing or corrupt; the helper is for local development and listens on `127.0.0.1` only. To add the button to another page, include `<script type="module" src=".../neko-reader.js">` with optional `data-bundle`, `data-model-base`, `data-language` and `data-max-new-tokens` attributes; the page must be served over HTTP(S) with the bundle layout and a model source described in the browser workflow below. In one headed Chromium WebGPU run on the Apple M5 from an empty browser cache, the first click finished in about 69-77 s (model download from the loopback mirror included) and a later click (close the panel first; it covers the button) in about 56-94 s on the loaded machine, with no requests outside the page origin. The report again read the chart values but misstated the opening days (for example "Saturday and Sunday closed").
+
+
+### Browser extension
+
+Browsers keep storage per site, so a page-embedded reader downloads the roughly 830 MiB model once for every site. `examples/chrome-extension/` puts the same floating button on every http(s) page and keeps one model for all of them: a content script adds the button in a closed shadow root (page scripts cannot read the panel), and an offscreen document, an extension page whose Cache Storage belongs to the extension origin, runs Neko.js with WebGPU. On click the content script sends an inert snapshot of the rendered DOM (scripts, styles, frames and the button removed) to that document, which extracts the main content and returns the `describe` report as JSON; the panel shows it as text. The model is not loaded until the first click, and the document releases it after 10 idle minutes (this release was not exercised).
+
+Browsers cannot download the model directly from Hugging Face (concealed cross-origin redirects fail closed), so the first download comes from the loopback mirror. The manifest carries a public key, so the unpacked extension always has the ID `nadgcicfppcloakehhefeknhbdbhmfkj`:
+
+```sh
+npm run build
+npm run build:extension   # writes dist/extension/
+node scripts/serve-model-mirror.mjs --cache-dir=/absolute/path/to/neko-model-cache --allow-origin=chrome-extension://nadgcicfppcloakehhefeknhbdbhmfkj
+```
+
+Then load `dist/extension/` with "Load unpacked" on `chrome://extensions` (developer mode). The options page can point the extension at another mirror; every file is still checked against the pinned size and SHA-256. After the first download the mirror is no longer needed. `serve-model-mirror.mjs` now accepts an exact Chromium extension origin for `--allow-origin`.
+
+The extension needs `<all_urls>` host access to read page images, so it fetches them without CORS. To keep a page from making it read internal hosts, image URLs on another origin whose host is a literal loopback, private or link-local address or a `localhost`/`.local`/`.internal` name are refused; DNS names that resolve to such addresses are not detected. Such images, and images that fail for other reasons, are listed as unreadable instead of failing the report, and each report stage that produces invalid output is retried once. At most six images per page are described, and pages over 4 MiB of HTML are rejected. Chromium only: `chrome.offscreen` does not exist in Firefox or Safari, and only Playwright's Chrome for Testing build was exercised.
+
+In a headed WebGPU run on the Apple M5 with a fresh profile, the first click on the sample page fetched the model from the mirror (13 requests) and finished in about 72-80 s. After a browser restart, a page on a different origin (`localhost` instead of `127.0.0.1`) made no mirror requests and its three-paragraph report finished in about 18 s. A page whose image pointed to another loopback origin got a report with that image listed as blocked, and the image host saw only the page's own request, none from the extension. Report text again contained errors (for example "operates 24 hours a day" for a library with set hours).
+
+
 ### Main content, tables and document questions
 
 ```js

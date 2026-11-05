@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-Hant">
+<meta charset="utf-8">
+<title>Neko.js 頁面解析設定</title>
+<style>
+  body { min-width: 28rem; margin: 1rem; font: 14px/1.6 system-ui, sans-serif; }
+  label { display: grid; gap: .25rem; }
+  input { padding: .4rem; font: inherit; }
+  .row { display: flex; gap: .5rem; margin-top: .75rem; }
+  #status { min-height: 1.5em; color: #2e7d32; }
+</style>
+<label>模型來源（mirror base URL）
+  <input id="model-base" type="url" spellcheck="false">
+</label>
+<p>模型只需下載一次，存在擴充功能自己的快取中，所有網站共用。瀏覽器無法直接從 Hugging Face 下載（跨來源 redirect 會被擋下），請先以 <code>scripts/serve-model-mirror.mjs</code> 提供已驗證的模型檔案。每個檔案都會再做 SHA-256 與大小檢查。</p>
+<div class="row"><button id="save" type="button">儲存</button><button id="reset" type="button">恢復預設</button></div>
+<p id="status" role="status"></p>
+<script type="module" src="options.js"></script>
+</html>

@@ -59,6 +59,7 @@
     "test:package:artifact": "node scripts/test-package.mjs --artifact-only",
     "test:browser": "playwright test",
     "smoke:browser": "node scripts/smoke-browser.mjs",
+    "build:extension": "node scripts/build-extension.mjs",
     "quality:benchmark": "node scripts/quality-benchmark.mjs",
     "quality:gate": "node scripts/quality/gate-cli.mjs",
     "test:quality": "node --test scripts/quality/*.test.mjs"

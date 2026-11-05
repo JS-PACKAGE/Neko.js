@@ -73,6 +73,17 @@ test('selected paragraph/image coverage and loaded profile evidence cannot silen
   await assert.rejects(validateStructuredReport(wrongProfile), TypeError);
 });
 
+test('reports from instances without the deferred vision session validate, but text sessions stay required', async () => {
+  const withoutSession = async (name: string) => {
+    const report = await fixture(); assert.ok(report.metadata.backend);
+    report.metadata.backend.sessions = report.metadata.backend.sessions.filter((session) => session.name !== name);
+    report.integrity.checksum = await reportChecksum(report);
+    return report;
+  };
+  await validateStructuredReport(await withoutSession('vision_encoder'));
+  await assert.rejects(validateStructuredReport(await withoutSession('decoder_model_merged')), /Loaded session configuration is incomplete/);
+});
+
 test('language checks cover every generated field while source metadata remains unchanged', async () => {
   const report = await fixture('zh-TW');
   await validateStructuredReport(report);

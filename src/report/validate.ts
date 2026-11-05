@@ -179,7 +179,8 @@ function validateEvidence(report: StructuredReport, expected: PageSnapshot): voi
     if (typeof name !== 'string' || !Object.hasOwn(profile.dtype, name) || sessions.has(name) || session.device !== report.metadata.backend.device || session.dtype !== profile.dtype[name as keyof typeof profile.dtype]) throw new TypeError('Loaded session configuration does not match the pinned model');
     sessions.add(name);
   }
-  if (sessions.size !== Object.keys(profile.dtype).length) throw new TypeError('Loaded session configuration is incomplete');
+  // The vision encoder session is created on the first image request, so a text-only (or resumed) report has none.
+  if (Object.keys(profile.dtype).some((name) => name !== 'vision_encoder' && !sessions.has(name))) throw new TypeError('Loaded session configuration is incomplete');
   } else if (report.metadata.backend !== null) throw new TypeError('Extractive reports cannot claim a loaded backend');
   object(report.metadata.execution, 'Report execution');
   if (!['inline', 'worker'].includes(report.metadata.execution.mode) || !['node', 'browser'].includes(report.metadata.execution.runtime) || report.metadata.backend !== null && report.metadata.execution.runtime !== report.metadata.backend.runtime || report.metadata.execution.mode === 'worker' && typeof report.metadata.execution.workerId !== 'string' || !Number.isSafeInteger(report.metadata.resumedStages) || report.metadata.resumedStages < 0 || !Number.isSafeInteger(report.metadata.retryAttempts) || report.metadata.retryAttempts < 0 || report.metadata.evidence !== 'references-validated-heuristic-audit') throw new TypeError('Report execution or evidence metadata is invalid');

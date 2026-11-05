@@ -373,6 +373,47 @@ const prepared = await loadImage(page.images[0]);
 
 `extractPage(input, options?)` 接受 HTTP(S) 網址或 HTML 字串；HTML 中的相對網址需設定 `baseUrl`。預設 HTML 上限為 2 MiB、最多 20 個去重圖片網址、圖片下載上限 10 MiB、每個請求逾時 10 秒。解析器不執行腳本，僅擷取語意文字及圖片來源，不載入連結資源。它會發現 `img`、`picture/source[srcset]`、inline style、`background` 屬性和 `og:image`，並保留來源 metadata。
 
+### 範例網頁
+
+`examples/sample-page/` 是一個虛構咖啡館的繁體中文公告頁，包含真實網頁常見的組成：`main` 之外的導覽列、廣告與頁尾，以及標題、表格、清單、一張插畫和一張附說明的長條圖。`examples/read-sample-page.mjs` 在 loopback 上提供此頁，以 `extractPage(url, { content: 'main' })` 透過網址讀取，並以 Markdown 輸出繁體中文的 `describe` 報告（`--json` 輸出型別化報告，`--question` 另外呼叫 `ask`）：
+
+```sh
+npm run build
+node examples/read-sample-page.mjs --cache-dir=/absolute/path/to/neko-model-cache
+```
+
+首次執行會把固定版本模型下載到快取。腳本的 policy 只核准範例 origin 的頁面與圖片請求，`validateDestination` 也對每次抓取與 redirect 檢查同一個 origin。腳本設定 `maxNewTokens: 512`，因為繁體中文結論曾用完預設的 256 token，並以不完整 JSON 失敗。在負載中的 Apple M5 上一次 Node CPU 實測（約 94 秒），報告以 29 段逐字引用保留全部 521 個來源字元，並正確讀出長條圖的四季數值；但生成文字也有錯誤：寫成星期一至星期五營業，以及超過 10 歲須由成人陪同（原文為星期一公休、未滿 10 歲）。同一頁面要求英文報告時，因模型持續以中文撰寫而未通過語言檢查，所以腳本固定使用 `zh-TW`。請把輸出當成示範，而不是準確的閱讀結果。
+
+此頁也載入 `examples/neko-reader.js`：一個在瀏覽器中解析頁面的浮動「AI 解析頁面」按鈕。按下後才載入 bundle 與模型（僅 WebGPU），擷取不含按鈕的已渲染 DOM 快照，以 `extractPage(html, { baseUrl: location.href, content: 'main' })` 擷取，並在側邊面板顯示 `describe` 報告：摘要、分段重點、圖片描述與結論，全部以純文字插入。解析可停止，之後再按會重用已載入的模型。其 policy 只允許對模型 base origin 的模型請求、bundle 目錄下的 runtime 檔案與 worker，以及頁面本身 origin 的圖片。`scripts/serve-examples.mjs` 從同一個 loopback origin 提供此頁、按鈕、browser bundle，以及（指定 `--cache-dir` 時）已驗證的固定模型檔案：
+
+```sh
+npm run build
+node scripts/serve-examples.mjs --cache-dir=/absolute/path/to/neko-model-cache
+# 開啟 http://127.0.0.1:4174/examples/sample-page/
+```
+
+所選 profile 有檔案缺少或損壞時啟動即失敗；此 helper 僅供本機開發，只監聽 `127.0.0.1`。若要把按鈕加到其他頁面，加入 `<script type="module" src=".../neko-reader.js">`，可選 `data-bundle`、`data-model-base`、`data-language`、`data-max-new-tokens` 屬性；頁面須以 HTTP(S) 提供，並依下方瀏覽器流程配置 bundle 佈局與模型來源。在 Apple M5 的 headed Chromium WebGPU 實測中，從空的瀏覽器快取第一次按下約 69–77 秒完成（含從 loopback mirror 下載模型），在負載中的機器上之後再按（先關閉面板，面板會蓋住按鈕）約 56–94 秒，且沒有頁面 origin 以外的請求。報告同樣讀對長條圖數值，但營業日寫錯（例如「星期六、星期日為公休」）。
+
+
+### 瀏覽器擴充功能
+
+瀏覽器依網站分開存放資料，所以嵌在頁面裡的解析按鈕會在每個網站各下載一次約 830 MiB 的模型。`examples/chrome-extension/` 把同一顆浮動按鈕放到每個 http(s) 頁面，並讓所有頁面共用一份模型：content script 以 closed shadow root 加入按鈕（頁面腳本讀不到面板內容），而 offscreen document（Cache Storage 屬於擴充功能來源的擴充功能頁面）以 WebGPU 執行 Neko.js。按下按鈕時，content script 把已渲染 DOM 的惰性快照（移除腳本、樣式、frame 與按鈕本身）送到該文件，由它擷取主內容並以 JSON 回傳 `describe` 報告，面板以純文字顯示。第一次按下前不會載入模型，閒置 10 分鐘後會釋放（此釋放尚未實測）。
+
+瀏覽器無法直接從 Hugging Face 下載模型（隱藏的跨來源 redirect 會 fail closed），因此第一次下載來自 loopback mirror。manifest 內含公鑰，解壓縮載入的擴充功能 ID 固定為 `nadgcicfppcloakehhefeknhbdbhmfkj`：
+
+```sh
+npm run build
+npm run build:extension   # 輸出 dist/extension/
+node scripts/serve-model-mirror.mjs --cache-dir=/absolute/path/to/neko-model-cache --allow-origin=chrome-extension://nadgcicfppcloakehhefeknhbdbhmfkj
+```
+
+接著在 `chrome://extensions`（開發人員模式）以「載入未封裝項目」載入 `dist/extension/`。選項頁可改用其他 mirror；每個檔案仍會以固定的大小與 SHA-256 檢查。第一次下載完成後就不再需要 mirror。`serve-model-mirror.mjs` 的 `--allow-origin` 現在也接受精確的 Chromium 擴充功能來源。
+
+擴充功能需要 `<all_urls>` 主機權限才能讀取頁面圖片，因此抓圖不受 CORS 限制。為了不讓頁面藉此讀取內部主機，位於其他來源、主機為字面上的 loopback、私有或 link-local 位址，或 `localhost`／`.local`／`.internal` 名稱的圖片網址會被拒絕；解析到這類位址的 DNS 名稱無法偵測。這類圖片及其他原因失敗的圖片會列為無法讀取，而不會讓整份報告失敗；輸出無效的報告階段會重試一次。每頁最多描述六張圖片，HTML 超過 4 MiB 的頁面會被拒絕。僅支援 Chromium：Firefox 與 Safari 沒有 `chrome.offscreen`，且只實測過 Playwright 的 Chrome for Testing。
+
+在 Apple M5 上以全新 profile 的 headed WebGPU 實測中，第一次在範例頁按下按鈕時從 mirror 取得模型（13 個請求），約 72–80 秒完成。重新啟動瀏覽器後，另一個來源的頁面（`localhost` 而非 `127.0.0.1`）沒有任何 mirror 請求，三段文字的報告約 18 秒完成。圖片指向另一個 loopback 來源的頁面，報告完成並把該圖片列為已封鎖，圖片主機只收到頁面自己的請求，沒有來自擴充功能的請求。報告文字同樣有錯誤（例如把有固定營業時間的圖書館寫成「24 小時營業」）。
+
+
 ### 文件結構與有來源引用的問答
 
 ```js
