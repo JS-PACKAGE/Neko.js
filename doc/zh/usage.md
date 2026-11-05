@@ -400,7 +400,7 @@ node scripts/serve-model-mirror.mjs --cache-dir=/absolute/path/to/neko-model-cac
 
 接著在 `chrome://extensions`（開發人員模式）以「載入未封裝項目」載入 `dist/extension/`。選項頁可改用其他 mirror；每個檔案仍會以固定的大小與 SHA-256 檢查。第一次下載完成後就不再需要 mirror。`serve-model-mirror.mjs` 的 `--allow-origin` 現在也接受精確的 Chromium 擴充功能來源。
 
-擴充功能需要 `<all_urls>` 主機權限才能讀取頁面圖片，因此抓圖不受 CORS 限制。為了不讓頁面藉此讀取內部主機，位於其他來源、主機為字面上的 loopback、私有或 link-local 位址，或 `localhost`／`.local`／`.internal` 名稱的圖片網址會被拒絕；解析到這類位址的 DNS 名稱無法偵測。這類圖片及其他原因失敗的圖片會列為無法讀取，而不會讓整份報告失敗；輸出無效的報告階段會重試一次。每頁最多描述六張圖片，HTML 超過 4 MiB 的頁面會被拒絕。僅支援 Chromium：Firefox 與 Safari 沒有 `chrome.offscreen`，且只實測過 Playwright 的 Chrome for Testing。
+擴充功能需要 `<all_urls>` 主機權限才能讀取頁面圖片，因此抓圖不受 CORS 限制。為了不讓頁面藉此讀取內部主機，位於其他來源、主機為字面上的 loopback、私有或 link-local 位址，或 `localhost`／`.local`／`.internal` 名稱的圖片網址會被拒絕；解析到這類位址的 DNS 名稱無法偵測。這類圖片及其他原因失敗的圖片會列為無法讀取，而不會讓整份報告失敗；輸出無效或語言不符的報告階段最多重試兩次。每頁只描述依文件順序的前六張圖片（最多收集 500 張）；頁面有至少三段 20 字以上的段落時，更短的段落（通常是沒有 `<main>` 的頁面上的導覽標籤）不納入報告；HTML 超過 4 MiB 的頁面會被拒絕。僅支援 Chromium：Firefox 與 Safari 沒有 `chrome.offscreen`，且只實測過 Playwright 的 Chrome for Testing。
 
 在 Apple M5 上以全新 profile 的 headed WebGPU 實測中，第一次在範例頁按下按鈕時從 mirror 取得模型（13 個請求），約 72–80 秒完成。重新啟動瀏覽器後，另一個來源的頁面（`localhost` 而非 `127.0.0.1`）沒有任何 mirror 請求，三段文字的報告約 18 秒完成。圖片指向另一個 loopback 來源的頁面，報告完成並把該圖片列為已封鎖，圖片主機只收到頁面自己的請求，沒有來自擴充功能的請求。報告文字同樣有錯誤（例如把有固定營業時間的圖書館寫成「24 小時營業」）。
 

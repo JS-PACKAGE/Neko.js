@@ -76,7 +76,7 @@
     body.append(element('h3', '結論'), element('p', report.conclusion));
     const { inputTokens, outputTokens } = report.metadata.usage;
     body.append(element('p', `AI 生成內容可能有誤，請以原文為準。耗時 ${message.seconds.toFixed(1)} 秒，${inputTokens} 輸入／${outputTokens} 輸出 token。`, 'note'));
-    setStatus(`完成：${message.paragraphs} 段文字、${message.images} 張圖片。`);
+    setStatus(`完成：${message.paragraphs} 段文字、${message.images} 張圖片${message.images > message.describedImages ? `（描述前 ${message.describedImages} 張）` : ''}。`);
   }
 
   function finish() { port = undefined; stopButton.disabled = true; progress.hidden = true; }

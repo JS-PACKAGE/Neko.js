@@ -4,6 +4,10 @@ import { createNeko, extractPage } from './neko/neko.js';
 import { DEFAULT_MODEL_BASE } from './config.js';
 
 const IDLE_UNLOAD_MS = 10 * 60_000;
+const MAX_COLLECTED_IMAGES = 500;
+const MAX_DESCRIBED_IMAGES = 6;
+// Pages without <main>/<article> fall back to the whole body; navigation labels are short, article text is not.
+const MIN_PARAGRAPH_CHARACTERS = 20;
 const bundleDirectory = new URL('./neko/', import.meta.url).href;
 let current; // { modelBase, neko: Promise }
 let active = 0;
@@ -76,16 +80,20 @@ async function read(request, port, signal) {
   const neko = await instance(modelBase.href, send);
   signal.throwIfAborted();
   send({ type: 'status', text: '擷取頁面內容…' });
-  const page = await extractPage(request.html, { baseUrl: pageUrl.href, content: 'main', maxHtmlBytes: 4 * 1024 * 1024, maxImages: 6 });
+  // extractPage rejects pages with more images than maxImages, so collect generously and describe only the first few.
+  const page = await extractPage(request.html, { baseUrl: pageUrl.href, content: 'main', maxHtmlBytes: 4 * 1024 * 1024, maxImages: MAX_COLLECTED_IMAGES });
+  const describedImageIds = page.images.slice(0, MAX_DESCRIBED_IMAGES).map((image) => image.id);
+  const long = page.paragraphs.filter((paragraph) => paragraph.text.length >= MIN_PARAGRAPH_CHARACTERS);
+  const paragraphIds = (long.length >= 3 ? long : page.paragraphs).map((paragraph) => paragraph.id);
   if (!page.paragraphs.length) throw new Error('這個頁面沒有可解析的文字。');
   const stages = { image: [], section: [], summary: [], conclusion: [] };
   const names = { image: '描述圖片', section: '整理段落', summary: '撰寫摘要', conclusion: '撰寫結論' };
   const begun = performance.now();
   const report = await neko.describe(page, {
     // A blocked or broken image is reported as failed instead of failing the whole report. A stage whose output is
-    // invalid (e.g. JSON cut off at the token limit) is retried once with a corrective instruction.
-    format: 'json', language: request.language || 'en', maxNewTokens: 512, imageFailurePolicy: 'omit',
-    retries: { image: 1, section: 1, summary: 1, conclusion: 1 }, signal,
+    // invalid (e.g. JSON cut off at the token limit) or in the wrong language is retried with a corrective instruction.
+    format: 'json', language: request.language || 'en', maxNewTokens: 512, imageFailurePolicy: 'omit', sources: { paragraphIds, imageIds: describedImageIds },
+    retries: { image: 2, section: 2, summary: 2, conclusion: 2 }, signal,
     // The extension can fetch any host, so a page must not be able to make it read internal addresses.
     validateDestination(url) {
       if (url.origin !== pageUrl.origin && isPrivateHost(url.hostname)) throw new Error(`Blocked private address: ${url.host}`);
@@ -97,7 +105,7 @@ async function read(request, port, signal) {
       send({ type: 'status', text: `${names[event.phase]}（第 ${seen.indexOf(event.id) + 1} 項${retry ? '，重試' : ''}）…` });
     },
   });
-  send({ type: 'result', report, seconds: (performance.now() - begun) / 1000, paragraphs: page.paragraphs.length, images: page.images.length });
+  send({ type: 'result', report, seconds: (performance.now() - begun) / 1000, paragraphs: paragraphIds.length, images: page.images.length, describedImages: describedImageIds.length });
 }
 
 chrome.runtime.onConnect.addListener((port) => {
