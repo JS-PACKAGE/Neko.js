@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reports: generated text that is exactly a retained source quote (for example the navigation label "3 C" copied verbatim into a key point) no longer fails the requested-language check during generation or validation; such text is source text, not generated prose. A news article with a Traditional Chinese `lang` whose body had no `<main>` failed on that label before.
+- Reports: explicitly authorized `retries` now also cover a stage whose output fails the requested-language check (`LANGUAGE_MISMATCH`), as they already did for invalid structured output. The retry prompt already asks for the requested language; without `retries` the error is unchanged.
 - Fixed: a generated report from an instance that never created the vision encoder session (a page without images, since the session became lazy) failed validation with "Loaded session configuration is incomplete". Text sessions are still required; the vision session is now optional.
 - Browser: runtime files served from the bundle's own non-HTTP origin, such as `chrome-extension://` inside an extension, are no longer rejected as an unsupported protocol. Other schemes, and opaque origins such as `file:` and `data:`, are treated as before.
 - Examples: `examples/chrome-extension/` (built with `npm run build:extension`) adds the floating reader button to every http(s) page in Chromium and runs one shared model in an offscreen document. A first click downloaded the model from the loopback mirror; after a restart a page on another origin made no model requests. `serve-model-mirror.mjs --allow-origin` accepts an exact Chromium extension origin.

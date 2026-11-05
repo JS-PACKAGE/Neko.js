@@ -139,6 +139,8 @@ export function validateDescribeOptions(options: DescribeOptions = {}): void {
     throw new NekoError(cause instanceof Error ? cause.message : String(cause), 'preprocess', 'INVALID_INPUT', { cause });
   }
 }
+/** Model output failures that explicitly authorized `retries` may retry; other errors never do. */
+const retryableOutput = (code: string | null | undefined) => code === 'STRUCTURED_OUTPUT' || code === 'MODEL_OUTPUT' || code === 'LANGUAGE_MISMATCH';
 export class ReportError extends NekoError {
   constructor(error: NekoError, readonly checkpoint: ReportCheckpoint, readonly partial: PartialReport = partialReport(checkpoint)) {
     super(error.message, error.stage, error.code, Object.hasOwn(error, 'cause') ? { cause: error.cause } : { cause: error });
@@ -242,13 +244,13 @@ function copyCheckpoint(checkpoint: ReportCheckpoint): ReportCheckpoint {
   const { snapshot, ...state } = checkpoint;
   return { ...structuredClone(state), snapshot };
 }
-function validateClaims(value: unknown, allowed: Set<string>, language: string): EvidenceClaim[] {
+function validateClaims(value: unknown, allowed: Set<string>, language: string, quotes: ReadonlySet<string>): EvidenceClaim[] {
   if (typeof value !== 'object' || value === null || !('claims' in value) || !Array.isArray(value.claims) || !value.claims.length || value.claims.length > 4) throw new NekoError('Generated report claims are invalid', 'report', 'STRUCTURED_OUTPUT');
   return value.claims.map((claim: unknown) => {
     if (typeof claim !== 'object' || claim === null || !('text' in claim) || typeof claim.text !== 'string' || !claim.text.trim() || !('evidenceIds' in claim) || !Array.isArray(claim.evidenceIds) || !claim.evidenceIds.length || claim.evidenceIds.length > 8) throw new NekoError('A generated report claim lacks evidence', 'report', 'STRUCTURED_OUTPUT');
     const ids: unknown[] = claim.evidenceIds;
     if (new Set(ids).size !== ids.length || ids.some((id) => typeof id !== 'string' || !allowed.has(id))) throw new NekoError('A generated claim cites evidence outside its source', 'report', 'STRUCTURED_OUTPUT');
-    validateGeneratedLanguage(claim.text, language, 'Report claim');
+    validateGeneratedLanguage(claim.text, language, 'Report claim', quotes);
     return { text: claim.text.trim(), evidenceIds: ids as string[] };
   });
 }
@@ -397,6 +399,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
     }
     const { chunks, sourceFacts, sectionPlan, prompt, fits } = planned;
     for (const { id, citation } of sourceFacts) evidence.set(id, citation);
+    const quotes = new Set(sourceFacts.map(({ citation }) => citation.quote.trim()));
     const run = async (id: string, phase: ReportPhase, source: unknown, allowed: Set<string>, prepared?: PreparedImage): Promise<EvidenceClaim[]> => {
       check();
       const multiple = phase === 'section' || id.startsWith('reduce:');
@@ -408,16 +411,16 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
       if (saved) {
         if (saved.requestHash !== requestHash || saved.phase !== phase) failCheckpoint(`Checkpoint stage ${id} has stale source or generation settings`);
         let items: EvidenceClaim[];
-        try { items = validateClaims({ claims: saved.claims }, allowed, language); } catch { failCheckpoint(`Checkpoint stage ${id} has invalid claim evidence`); }
+        try { items = validateClaims({ claims: saved.claims }, allowed, language, quotes); } catch { failCheckpoint(`Checkpoint stage ${id} has invalid claim evidence`); }
         resumedStages++;
         await notify({ type: 'stage-reused', id, phase, usage: saved.usage, elapsedMs: elapsed() }); return items;
       }
       let attempt = checkpoint.attempts.filter((item) => item.id === id).length;
-      let outputFailures = checkpoint.attempts.filter((item) => item.id === id && ['STRUCTURED_OUTPUT', 'MODEL_OUTPUT'].includes(item.errorCode ?? '')).length;
+      let outputFailures = checkpoint.attempts.filter((item) => item.id === id && retryableOutput(item.errorCode)).length;
       const maximum = 1 + (authorization.retries[phase] ?? 0);
       if (outputFailures >= maximum) {
         const prior = checkpoint.attempts.findLast((item) => item.id === id);
-        throw new NekoError(`Stage ${id} exhausted its authorized output attempts`, 'report', prior?.errorCode as 'STRUCTURED_OUTPUT' | 'MODEL_OUTPUT');
+        throw new NekoError(`Stage ${id} exhausted its authorized output attempts`, 'report', prior?.errorCode as 'STRUCTURED_OUTPUT' | 'MODEL_OUTPUT' | 'LANGUAGE_MISMATCH');
       }
       while (true) {
         check();
@@ -431,7 +434,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         try {
           const generated = await engine.inferStructured({ ...options, prompt: request, ...(prepared === undefined ? {} : { image: prepared.input }), schema, maxNewTokens, contextWindowTokens: context, onToken: (token) => { try { options.onToken?.(token, phase); } catch (cause) { callbackFailed = true; throw cause; } } }, { preparedImages: prepared === undefined ? undefined : [prepared], structured: compiled, budget, diagnosticStage: { id, attempt: attempt + 1 } });
           result = generated;
-          items = validateClaims(multiple ? generated.value : { claims: [generated.value] }, allowed, language);
+          items = validateClaims(multiple ? generated.value : { claims: [generated.value] }, allowed, language, quotes);
         } catch (cause) {
           const error = cause instanceof NekoError ? cause : new NekoError(String(cause), 'report', 'OPERATION_FAILED', { cause });
           const inputTokens = budget.inputTokens - beforeInput; const outputTokens = budget.outputTokens - beforeOutput;
@@ -444,7 +447,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
             attachGenerationDiagnostic(error, diagnostic);
           }
           if (!callbackFailed && !signal?.aborted) { await save(); await notify({ type: 'stage-error', id, phase, usage: checkpoint.usage, elapsedMs: elapsed() }); }
-          const eligible = ['STRUCTURED_OUTPUT', 'MODEL_OUTPUT'].includes(error.code);
+          const eligible = retryableOutput(error.code);
           if (eligible) outputFailures++;
           if (callbackFailed || signal?.aborted || !eligible || outputFailures >= maximum) throw error;
           continue;
@@ -512,7 +515,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
       let retryAttempts = 0; const failedOutputs = new Set<string>();
       for (const attempt of checkpoint.attempts) {
         if (failedOutputs.has(attempt.id)) retryAttempts++;
-        if (['STRUCTURED_OUTPUT', 'MODEL_OUTPUT'].includes(attempt.errorCode ?? '')) failedOutputs.add(attempt.id);
+        if (retryableOutput(attempt.errorCode)) failedOutputs.add(attempt.id);
       }
       const report: StructuredReport = { schemaVersion: 3, mode, integrity: { algorithm: 'sha256', checksum: '' }, sourceFacts, language, imageFailurePolicy, page: { url: page.url, ...(page.title === undefined ? {} : { title: page.title }), summary }, sections, images, conclusion, snapshot, claims, metadata: { model: engine.identity, backend, usage: checkpoint.usage, timings: { ...checkpoint.timings, totalMs: elapsed() }, memory: { jsHeapBytes: null, gpuBytes: null }, execution: internal.execution ?? { mode: 'inline', runtime: backend.runtime }, resumedStages, retryAttempts, evidence: 'references-validated-heuristic-audit', coverage: sourceCoverage(snapshot, sourceFacts, claims, conclusionBasis) } };
       await validateReportContents(report, page); report.integrity.checksum = await reportChecksum(report);

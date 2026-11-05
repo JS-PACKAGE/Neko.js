@@ -30,9 +30,10 @@ function validateReportBody(report: unknown, page: Page): asserts report is Stru
   if (typeof report.page.url !== 'string') throw new TypeError('Report URL must be a string');
   text(report.page.summary, 'Report summary');
   text(report.conclusion, 'Report conclusion');
+  const quotes = new Set(Array.isArray(report.sourceFacts) ? report.sourceFacts.map((fact) => (typeof fact?.citation?.quote === 'string' ? fact.citation.quote.trim() : '')) : []);
   if (report.mode === 'generated') {
-    validateGeneratedLanguage(report.page.summary, report.language, 'Summary');
-    validateGeneratedLanguage(report.conclusion, report.language, 'Conclusion');
+    validateGeneratedLanguage(report.page.summary, report.language, 'Summary', quotes);
+    validateGeneratedLanguage(report.conclusion, report.language, 'Conclusion', quotes);
   }
   if (report.page.url !== page.url) throw new TypeError('Report URL does not match the extracted page');
   if (report.page.title !== page.title) throw new TypeError('Report title does not match the extracted page');
@@ -44,7 +45,7 @@ function validateReportBody(report: unknown, page: Page): asserts report is Stru
     if (section.heading !== undefined) text(section.heading, 'Section heading');
     texts(section.keyPoints, 'Section key points');
     texts(section.paragraphIds, 'Section paragraph IDs');
-    if (report.mode === 'generated') for (const point of section.keyPoints) validateGeneratedLanguage(point, report.language, 'Section key point');
+    if (report.mode === 'generated') for (const point of section.keyPoints) validateGeneratedLanguage(point, report.language, 'Section key point', quotes);
     if (new Set(section.paragraphIds).size !== section.paragraphIds.length) throw new TypeError('Section has duplicate paragraph references');
     for (const id of section.paragraphIds) {
       if (!paragraphIds.has(id)) throw new TypeError(`Report references unknown paragraph ${id}`);

@@ -127,7 +127,7 @@ if (structuredPlan.fits) {
 }
 ```
 
-`describe(urlOrHtmlOrPage, options?)` 接受 HTTP(S) URL、惰性 HTML 或經驗證的 `Page` 擁有副本。`sources` 可選取段落／圖片 ID，並提供可非同步的 `paragraph`／`image` predicate；ID 須存在且不重複，predicate 接收 readonly 來源記錄。擷取與選取發生於載入模型前。預設 `mode: 'generated'` 須涵蓋所有選取來源；圖片前處理結果會重用於該階段推理。每個階段產生證據連結 claims，必要時階層縮減摘要／結論。每階段 `maxNewTokens` 預設 256；`format: 'json'` 回傳具型別報告，`'markdown'` 回傳已跳脫 Markdown。`language` 為 BCP 47；文字系統檢查只是啟發式。`onToken(text, phase)` 區分 `image`、`section`、`summary`、`conclusion`。`imageFailurePolicy: 'omit'` 保留失敗項目，但不壓下 policy、callback、取消或 budget 錯誤；預設 `'error'` 拒絕圖片失敗。
+`describe(urlOrHtmlOrPage, options?)` 接受 HTTP(S) URL、惰性 HTML 或經驗證的 `Page` 擁有副本。`sources` 可選取段落／圖片 ID，並提供可非同步的 `paragraph`／`image` predicate；ID 須存在且不重複，predicate 接收 readonly 來源記錄。擷取與選取發生於載入模型前。預設 `mode: 'generated'` 須涵蓋所有選取來源；圖片前處理結果會重用於該階段推理。每個階段產生證據連結 claims，必要時階層縮減摘要／結論。每階段 `maxNewTokens` 預設 256；`format: 'json'` 回傳具型別報告，`'markdown'` 回傳已跳脫 Markdown。`language` 為 BCP 47；文字系統檢查只是啟發式，且與保留來源引用完全相同的生成文字不受檢查。`onToken(text, phase)` 區分 `image`、`section`、`summary`、`conclusion`。`imageFailurePolicy: 'omit'` 保留失敗項目，但不壓下 policy、callback、取消或 budget 錯誤；預設 `'error'` 拒絕圖片失敗。
 
 `contextWindowTokens` 會依固定模型設定檢查；預設使用保守的 4096-token 工作視窗，不代表實際可用的最大上下文。輸入與輸出預算須合計落在視窗內。報告依實際 tokenizer 分割段落並保留 Unicode 邊界；每個 section 請求最多處理四段 quote span，產生一至四個證據連結 claims，不再把任意大型來源壓成單一 claim。`sourceFacts` 獨立於生成摘要，以精確、連續引用及 UTF-16 offsets 保留所有選取段落文字。Ledger 是保留的來源文字，**不是**擷取或查核過的真實世界事實。容量足夠時，摘要／結論使用保留來源證據；不足時才階層縮減生成 claims。來源參照與成功縮減均不保證語意忠實。
 
@@ -321,7 +321,7 @@ console.log(reportPlan.stages, reportPlan.reduction);
 
 `planReport(input, options?)` 回傳 `mode`、`snapshotId`、`sectionCount`、`imageCount`、`stages`、`knownInputTokens`、`maxKnownOutputTokens`。Stage 含 `id`、`phase`、`inputTokens: number | null`、`maxOutputTokens`、`maxAttempts`；未確定輸入為 `null`。`reduction.required` 為 `boolean | null`、`reduction.stageCount` 為 `null`，`estimatedDurationMs`／`totalTokensUpperBound` 也為 `null`，不能作精確總成本承諾。Generated 規劃可能取得引擎，extractive 不會。
 
-每 phase 的 `retries` 是 0–3 次**額外**嘗試，只對 `STRUCTURED_OUTPUT`／`MODEL_OUTPUT` 授權；不是任意錯誤的自動重試。累計 budget 包含失敗生成的已花費 tokens；budget 造成不完整 JSON 為 `BUDGET_EXCEEDED`，不因 retries 重試。Resume identity 不綁定可增加的 budget／retry 授權，其他來源／模型／生成設定仍不可更換。即使 retries 為 0，只增加 budget 也可續跑尚未完成的階段：
+每 phase 的 `retries` 是 0–3 次**額外**嘗試，只對 `STRUCTURED_OUTPUT`／`MODEL_OUTPUT`／`LANGUAGE_MISMATCH`（輸出不符 `language` 要求的語言）授權；不是任意錯誤的自動重試。累計 budget 包含失敗生成的已花費 tokens；budget 造成不完整 JSON 為 `BUDGET_EXCEEDED`，不因 retries 重試。Resume identity 不綁定可增加的 budget／retry 授權，其他來源／模型／生成設定仍不可更換。即使 retries 為 0，只增加 budget 也可續跑尚未完成的階段：
 
 ```js
 import { ReportError } from 'neko.js';

@@ -1,7 +1,12 @@
 import { NekoError } from '../errors.js';
 
-/** Script checks detect clear language mismatches; they are not a fluency or translation-quality guarantee. */
-export function validateGeneratedLanguage(value: string, language: string, field: string): void {
+/**
+ * Script checks detect clear language mismatches; they are not a fluency or translation-quality guarantee.
+ * Text that is exactly a retained source quote is source text rather than generated text (a navigation label such
+ * as "3 C" has no script of its own), so `quotes` exempts it.
+ */
+export function validateGeneratedLanguage(value: string, language: string, field: string, quotes?: ReadonlySet<string>): void {
+  if (quotes?.has(value.trim())) return;
   const locale = language.toLowerCase();
   const han = value.match(/\p{Script=Han}/gu)?.length ?? 0;
   const latin = value.match(/\p{Script=Latin}/gu)?.length ?? 0;

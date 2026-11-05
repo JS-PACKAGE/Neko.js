@@ -11,7 +11,7 @@ import type { Page, StructuredReport } from '../../src/types.js';
 import { generateExtractiveReport, planExtractiveReport } from '../../src/report/extractive.js';
 
 // Deterministic tokens exercise the real engine, schemas, budgets and report planner without a model download.
-function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT' | 'POLICY_DENIED') {
+function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT' | 'POLICY_DENIED' | 'LANGUAGE_MISMATCH') {
   const prompts: string[] = [];
   const encoded = (text: string) => Array.from(text, (character) => BigInt(character.codePointAt(0)!));
   let invisible = 256;
@@ -30,12 +30,12 @@ function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT
     async generate(options: { input_ids: Tensor; max_new_tokens: number; streamer: { put(ids: bigint[][]): void; end(): void }; stopping_criteria: { interrupted: boolean } }) {
       const ids = Array.from(options.input_ids.data, BigInt);
       const prompt = ids.map((id) => String.fromCodePoint(Number(id))).join(''); prompts.push(prompt);
-      const source = JSON.parse(prompt.split('Source JSON:\n')[1]!.split('\nNow output')[0]!) as { evidenceId?: string; quote?: string; text?: string; evidenceIds?: string[] }[];
-      const section = prompt.includes('Give separate key points');
+      const source = JSON.parse(prompt.split(/(?:Source JSON:|引用資料（JSON）：)\n/)[1]!.split(/\n(?:Now output|現在請只輸出)/)[0]!) as { evidenceId?: string; quote?: string; text?: string; evidenceIds?: string[] }[];
+      const section = prompt.includes('Give separate key points') || prompt.includes('分別整理成繁體中文重點');
       if (section && firstSectionFailure && prompts.filter((value) => value.includes('Give separate key points')).length === 1) throw new NekoError('Fixture first stage output failure', 'generate', firstSectionFailure);
       const facts = section && !lossySections ? source : source.slice(0, 1);
       const claims = facts.map((fact) => ({ text: (fact.quote ?? fact.text)!.trim(), evidenceIds: fact.evidenceId ? [fact.evidenceId] : fact.evidenceIds! }));
-      const multiple = prompt.includes('with claims (an array');
+      const multiple = prompt.includes('with claims (an array') || prompt.includes('包含 claims 陣列');
       const output = encoded(JSON.stringify(multiple ? { claims } : claims[0]));
       options.streamer.put([ids]);
       if (!options.stopping_criteria.interrupted) { const tokens = output.slice(0, options.max_new_tokens); ids.push(...tokens); options.streamer.put([tokens]); }
@@ -164,6 +164,28 @@ test('only explicitly authorized failed output stages retry and account for fail
   const denied = fixture(false, 'POLICY_DENIED');
   try { await assert.rejects(report(denied.engine, { retries: { section: 3 } }), (error: unknown) => error instanceof ReportError && error.code === 'POLICY_DENIED'); assert.equal(denied.prompts.length, 1); }
   finally { await denied.engine.dispose(); }
+});
+
+test('verbatim source text without the requested script passes the language check (fixture tokenizer is byte-level)', async () => {
+  const { engine } = fixture();
+  try {
+    const labels: Page = { url: 'about:blank', paragraphs: [{ id: 'p1', text: '3 C', source: { kind: 'html' } }, { id: 'p2', text: 'APP', source: { kind: 'html' } }], images: [] };
+    const result = await generateReport(engine, labels, { language: 'zh-TW', maxNewTokens: 512, contextWindowTokens: 8192 });
+    assert.notEqual(typeof result, 'string');
+    assert.ok((result as StructuredReport).sections.some(({ keyPoints }) => keyPoints.includes('3 C')));
+  } finally { await engine.dispose(); }
+});
+
+test('a section in the wrong language is retried only when output retries are authorized', async () => {
+  const unauthorized = fixture(false, 'LANGUAGE_MISMATCH');
+  try { await assert.rejects(report(unauthorized.engine), (error: unknown) => error instanceof ReportError && error.code === 'LANGUAGE_MISMATCH'); assert.equal(unauthorized.prompts.length, 1); }
+  finally { await unauthorized.engine.dispose(); }
+  const authorized = fixture(false, 'LANGUAGE_MISMATCH');
+  try {
+    const result = await report(authorized.engine, { retries: { section: 1 } });
+    assert.ok(authorized.prompts[1]!.includes('Retry 1:'));
+    assert.equal(result.metadata.retryAttempts, 1);
+  } finally { await authorized.engine.dispose(); }
 });
 
 test('aggregate budget truncation preserves accounting and resumes without authorizing output retries', async () => {
