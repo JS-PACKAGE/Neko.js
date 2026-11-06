@@ -573,6 +573,8 @@ Vision encoder 在所有 backend 上每次只處理一張圖片。固定的 0.8B
 
 瀏覽器 WebGPU 會將單 token decode 的 embedding 保留在 GPU，不再於每一步讀回 CPU 再上傳。Prefill embedding 仍可由 CPU 讀取，以合併圖片特徵。內部建立的 GPU embedding 在 decoder 完成或失敗後釋放；呼叫端提供的 embedding 不會轉移所有權。實際 Chromium 文字與圖片報告在量測情境中保留相同生成內容。這不改變 Node 路徑，也不代表效能保證。
 
+打包的瀏覽器 runtime 也會重用每個 compute pipeline 不可變的 bind-group-zero layout，不再於每次 dispatch 取得新 wrapper。此內部快取以 pipeline 為弱參照 key；不快取 buffer bindings 或模型資料、不修改 WebGPU prototype，也不改變固定資產的驗證或 Node 執行。實際文字／圖片報告，以及 engine 重新載入／runtime owner 重新建立後的輸出皆保持一致。總耗時有漂移，因此不宣稱穩定的端到端加速比例。
+
 ### 並行下載與 validator-bound 續傳
 
 ```ts

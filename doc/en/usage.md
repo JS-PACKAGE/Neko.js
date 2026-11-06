@@ -581,6 +581,8 @@ The vision encoder runs once per image on every backend. The pinned 0.8B encoder
 
 Browser WebGPU keeps single-token decode embeddings on the GPU instead of reading them back to CPU and uploading them again at every step. Prefill embeddings remain CPU-readable for image-feature merging. Internally created GPU embeddings are released after the decoder finishes, including on failure; caller-provided embeddings retain their ownership. Actual Chromium text and image reports retained identical generated content in the measured workloads. This does not change the Node path or imply a speed guarantee.
 
+The bundled browser runtime also reuses each compute pipeline's immutable bind-group-zero layout instead of requesting a new wrapper on every dispatch. This internal cache uses weak pipeline keys; it does not cache buffer bindings or model data, modify WebGPU prototypes, or change pinned asset verification or Node execution. Actual text/image reports and engine reload/runtime-owner replacement retained their outputs. Wall-time drift prevents a stable end-to-end speedup claim.
+
 ### Concurrent downloads and validator-bound resume
 
 ```ts

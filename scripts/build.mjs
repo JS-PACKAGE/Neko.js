@@ -28,7 +28,7 @@ const replaceOnce = (source, target, replacement, path) => {
   if (source.split(target).length !== 2) throw new Error(`Transformers.js patch target not found exactly once in ${path}: ${target.split('\n')[0]}`);
   return source.replace(target, () => replacement);
 };
-// Build-time patches to the bundled Transformers.js 4.2.0; the build fails if an upstream line ever changes.
+// Build-time patches to the pinned inference dependencies; a changed upstream target fails the build.
 // - Its greedy sampler takes the argmax with its shared `max()`, whose call sites see arrays of many element types, so V8 runs it as a
 //   slow polymorphic loop: about 0.8 ms per token over the 248,320-entry vocabulary, against about 0.1 ms for a loop that only ever sees
 //   Float32Array. Same comparisons and first-index tie-breaking.
@@ -40,6 +40,8 @@ const replaceOnce = (source, target, replacement, path) => {
 // - Text-only RoPE deltas subtract the padded prompt length: adding it instead shifts every decode position by twice that length.
 // - Metadata probes must recognize native cache path hits too. Ignoring them probes an unrelated local path, which the verified
 //   fetch correctly rejects. A path hit has unknown metadata size; the verified cache still checks bytes before returning the path.
+// - The browser native bridge reuses immutable group-zero layouts per pipeline. Weak keys do not retain pipelines, and no buffer
+//   bindings or model data are cached. Patch the embedded ORT bundle, not the separately copied runtime asset or WebGPU prototypes.
 const transformersPatches = {
   name: 'neko-transformers-patches',
   setup(build) {
@@ -69,6 +71,27 @@ function nekoGreedyArgmax(data) {
 }
 ` };
     });
+    if (build.initialOptions.platform === 'browser') {
+      let runtimePatched = false;
+      if (build.initialOptions.entryPoints.some((entry) => entry === 'src/index.ts' || entry === 'src/runtime/worker.ts')) {
+        build.onEnd((result) => {
+          if (!result.errors.length && !runtimePatched) throw new Error('Pinned WebGPU runtime layout patch was not applied');
+        });
+      }
+      build.onLoad({ filter: /[\\/]onnxruntime-web[\\/]dist[\\/]ort\.webgpu\.bundle\.min\.mjs$/ }, async ({ path }) => {
+        const source = replaceOnce(await readFile(path, 'utf8'), 't=n.getBindGroupLayout(t)', 't=nekoGetGroupLayout(n,t)', path);
+        runtimePatched = true;
+        return { loader: 'js', contents: `${source}
+const nekoBindGroupLayouts = new WeakMap();
+function nekoGetGroupLayout(pipeline, index) {
+  if (index !== 0) return pipeline.getBindGroupLayout(index);
+  let layout = nekoBindGroupLayouts.get(pipeline);
+  if (layout === undefined) { layout = pipeline.getBindGroupLayout(index); nekoBindGroupLayouts.set(pipeline, layout); }
+  return layout;
+}
+` };
+      });
+    }
   },
 };
 
