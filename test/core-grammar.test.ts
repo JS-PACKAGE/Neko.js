@@ -201,6 +201,36 @@ test('flat token trie exposes exact bytes for sparse IDs, skips empty pieces and
   assert.deepEqual(inString.sort((a, b) => a - b), [3, 12, 13, 900]);
 });
 
+test('trie branches preserve sibling masks, prefix terminals and caller state across nested JSON and UTF-8 splits', () => {
+  for (const { schema, json } of [
+    { schema: { type: 'any' }, json: '{"items":[true,false,null,-2.5e2,{"漢":"😀\\n"}]}' },
+    { schema: { type: 'array', uniqueItems: true, items: { type: 'string', enum: ['a', 'ab', 'ac', '漢', '😀'] } }, json: '["a","ab","漢","😀"]' },
+    { schema: { type: 'object', required: ['a', 'ab'], properties: { a: { type: 'string', minLength: 1, maxLength: 3 }, ab: { type: 'array', items: { type: 'integer' }, minItems: 1, maxItems: 2 } } }, json: '{"a":"漢😀","ab":[1,-2]}' },
+  ] as const) {
+    const bytes = encoder.encode(json);
+    const pieces: [number, Uint8Array][] = [];
+    for (let start = 0; start < bytes.length; start++) {
+      for (let end = start + 1; end <= Math.min(start + 9, bytes.length); end++) pieces.push([pieces.length, bytes.slice(start, end)]);
+    }
+    for (const text of ['{}', '{} prose', 'true', 'trueX', '"a"', '"ab"', '"az"', '\\u0041', '\\ud83d']) pieces.push([pieces.length, encoder.encode(text)]);
+    for (const order of [pieces, [...pieces].reverse()]) {
+      const trie = new TokenByteTrie(order);
+      for (let split = 0; split <= bytes.length; split++) {
+        const state = new JsonGrammarState(schema);
+        assert.equal(state.push(bytes.subarray(0, split)), true);
+        const expected = pieces.filter(([, piece]) => state.clone().push(piece)).map(([id]) => id).sort((a, b) => a - b);
+        for (let repeat = 0; repeat < 2; repeat++) {
+          const delivered: number[] = []; trie.allowed(state, (id) => delivered.push(id));
+          assert.deepEqual(delivered.sort((a, b) => a - b), expected);
+          const mask = new Uint8Array(pieces.length); trie.mark(state, mask);
+          assert.deepEqual(Array.from(mask.keys()).filter((id) => mask[id]), expected);
+        }
+        assert.equal(state.push(bytes.subarray(split)) && state.complete, true);
+      }
+    }
+  }
+});
+
 test('enum string prefixes accept exactly the prefixes of remaining unique values, however large the enumeration', () => {
   const values = ['p1', 'p10', 'p100', 'p11', 'p2', 'p20', 'q', '', 'é', 'p1x'];
   const compiled = compileStructuredSchema({ type: 'array', uniqueItems: true, items: { type: 'string', enum: values } }).grammar!;

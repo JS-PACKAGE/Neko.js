@@ -373,7 +373,11 @@ class FlatTrie {
   walk(state: JsonGrammarState, ids: Int32Array, deliver: (id: number) => void): void {
     const visit = (node: number, current: JsonGrammarState) => {
       for (let entry = this.head[node]!; entry !== -1; entry = this.link[entry]!) deliver(ids[entry]!);
-      for (let child = this.first[node]!; child !== -1; child = this.sibling[child]!) { const next = current.clone(); if (next.pushByte(this.edge[child]!)) visit(child, next); }
+      for (let child = this.first[node]!; child !== -1; child = this.sibling[child]!) {
+        // Only the root borrows caller state; an owned state can be consumed by its last child.
+        const next = node !== 0 && this.sibling[child] === -1 ? current : current.clone();
+        if (next.pushByte(this.edge[child]!)) visit(child, next);
+      }
     };
     visit(0, state);
   }
