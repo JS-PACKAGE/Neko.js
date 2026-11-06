@@ -1,4 +1,4 @@
-import { loadQualityContract, ARTIFACT_VERSION, FIXTURE_VERSION } from './quality/contract.mjs';
+import { loadQualityContract, ARTIFACT_VERSION, FIXTURE_VERSION, sha256 } from './quality/contract.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';

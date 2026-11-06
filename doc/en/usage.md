@@ -115,6 +115,8 @@ if (plan.fits) console.log((await neko.infer(request)).text);
 
 The `preprocessing` observations describe exact owned rendered-prompt tokenization reuse only, with `kvReuse: false`. Repeating an identical plan/inference request can reuse those tokens; appending conversation turns does not reuse a growing prefix or model KV state. Caller prompt text is preserved. Engine reuse and normalized image-pixel reuse are separate mechanisms.
 
+The bundled Transformers.js corrects the text-only RoPE continuation offset: decode positions continue after the real prompt, excluding left padding. This fixes an upstream sign error and can change generated text; it does not establish improved factual accuracy. Node progress metadata also recognizes verified cache paths; their metadata size is unknown rather than triggering a second, unpinned local-path lookup. Asset size and SHA-256 checks are unchanged.
+
 ```ts
 const schema = {
   type: 'object',

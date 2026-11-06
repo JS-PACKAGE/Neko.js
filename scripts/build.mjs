@@ -37,6 +37,9 @@ const replaceOnce = (source, target, replacement, path) => {
 // - Its BPE memo cache moved every hit to the most-recent end of its 10,000-entry Map (delete + set). That churn made V8 rehash the
 //   Map over and over and took about half of report planning's time on long pages; hits are now plain lookups, so the oldest
 //   inserted entry is evicted first. The cache only memoizes a pure function, so encodings are unchanged.
+// - Text-only RoPE deltas subtract the padded prompt length: adding it instead shifts every decode position by twice that length.
+// - Metadata probes must recognize native cache path hits too. Ignoring them probes an unrelated local path, which the verified
+//   fetch correctly rejects. A path hit has unknown metadata size; the verified cache still checks bytes before returning the path.
 const transformersPatches = {
   name: 'neko-transformers-patches',
   setup(build) {
@@ -48,6 +51,10 @@ const transformersPatches = {
       source = replaceOnce(source, '    this.bpe_ranks = new Map(this.merges.map((x, i) => [JSON.stringify(x), i]));\n',
         '    this.bpe_ranks = config.bpe_ranks instanceof Map ? config.bpe_ranks : new Map(this.merges.map((x, i) => [JSON.stringify(x), i]));\n', path);
       source = replaceOnce(source, '    const cached = this.cache.get(token);\n', '    const cached = this.cache.cache.get(token);\n', path);
+      source = replaceOnce(source, 'max(data.subarray(dims[1] * i, dims[1] * (i + 1)))[0] + 1n + BigInt(dims[1])',
+        'max(data.subarray(dims[1] * i, dims[1] * (i + 1)))[0] + 1n - BigInt(dims[1])', path);
+      source = replaceOnce(source, '  if (cachedResponse !== void 0 && typeof cachedResponse !== "string") {',
+        '  if (typeof cachedResponse === "string") return { exists: true, fromCache: true };\n  if (cachedResponse !== void 0) {', path);
       return { loader: 'js', contents: `${source}
 function nekoGreedyArgmax(data) {
   if (data.length === 0) throw Error("Array must not be empty");
