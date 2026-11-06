@@ -109,6 +109,11 @@ function nekoGreedyArgmax(data) {
         source = replaceOnce(source, 'function qu(e,t){function n(u){', 'function nekoNativeBindGroupEntry(u){', path);
         source = replaceOnce(source, 'resource:c}}e>>>=0,t={label:Ne(', 'resource:c}}function qu(e,t){e>>>=0,t={label:Ne(', path);
         source = replaceOnce(source, 'h.push(n(c+40*b))', 'h.push(nekoNativeBindGroupEntry(c+40*b))', path);
+        // Pin the decoder's malformed-UTF-8 behavior; only batch its ASCII string construction.
+        const nativeUtf8Decoder = 'xn=(e,t=0,n,o)=>{if(16<(n=In(e,t>>>=0,n,o))-t&&e.buffer&&An)return An.decode(e.buffer instanceof ArrayBuffer?e.subarray(t,n):e.slice(t,n));for(o="";t<n;){var u=e[t++];if(128&u){var c=63&e[t++];if((224&u)==192)o+=String.fromCharCode((31&u)<<6|c);else{var h=63&e[t++];65536>(u=(240&u)==224?(15&u)<<12|c<<6|h:(7&u)<<18|c<<12|h<<6|63&e[t++])?o+=String.fromCharCode(u):(u-=65536,o+=String.fromCharCode(55296|u>>10,56320|1023&u))}}else o+=String.fromCharCode(u)}return o}';
+        source = replaceOnce(source, nativeUtf8Decoder, replaceOnce(nativeUtf8Decoder,
+          'else o+=String.fromCharCode(u)',
+          'else if(t+1<n&&!((c=e[t])&128)&&!((h=e[t+1])&128)){var b;if(t+2<n&&!((b=e[t+2])&128)){o+=String.fromCharCode(u,c,h,b);t+=3}else{o+=String.fromCharCode(u,c,h);t+=2}}else o+=String.fromCharCode(u)', path), path);
         runtimePatched = true;
         return { loader: 'js', contents: `${source}
 const nekoBindGroupLayouts = new WeakMap();
