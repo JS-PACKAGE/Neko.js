@@ -111,8 +111,9 @@ function nekoGreedyArgmax(data) {
         source = replaceOnce(source, 'h.push(n(c+40*b))', 'h.push(nekoNativeBindGroupEntry(c+40*b))', path);
         source = replaceOnce(source, 'entries:function(u,c){for(var h=[],b=0;b<u;++b)h.push(nekoNativeBindGroupEntry(c+40*b));return h}',
           'entries:nekoNativeBindGroupEntries', path);
+        // Size fresh entry arrays from the heap count; undefined counts still produce an empty list.
         source = replaceOnce(source, 'function qu(e,t){',
-          'function nekoNativeBindGroupEntries(u,c){for(var h=[],b=0;b<u;++b)h.push(nekoNativeBindGroupEntry(c+40*b));return h}function qu(e,t){', path);
+          'function nekoNativeBindGroupEntries(u,c){for(var h=new Array(u>>>0),b=0;b<u;++b)h[b]=nekoNativeBindGroupEntry(c+40*b);return h}function qu(e,t){', path);
         // Pin the decoder's malformed-UTF-8 behavior; only batch its ASCII string construction.
         const nativeUtf8Decoder = 'xn=(e,t=0,n,o)=>{if(16<(n=In(e,t>>>=0,n,o))-t&&e.buffer&&An)return An.decode(e.buffer instanceof ArrayBuffer?e.subarray(t,n):e.slice(t,n));for(o="";t<n;){var u=e[t++];if(128&u){var c=63&e[t++];if((224&u)==192)o+=String.fromCharCode((31&u)<<6|c);else{var h=63&e[t++];65536>(u=(240&u)==224?(15&u)<<12|c<<6|h:(7&u)<<18|c<<12|h<<6|63&e[t++])?o+=String.fromCharCode(u):(u-=65536,o+=String.fromCharCode(55296|u>>10,56320|1023&u))}}else o+=String.fromCharCode(u)}return o}';
         source = replaceOnce(source, nativeUtf8Decoder, replaceOnce(nativeUtf8Decoder,
