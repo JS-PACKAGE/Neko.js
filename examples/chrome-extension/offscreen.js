@@ -8,6 +8,9 @@ const MAX_COLLECTED_IMAGES = 500;
 const MAX_DESCRIBED_IMAGES = 6;
 // Pages without <main>/<article> fall back to the whole body; navigation labels are short, article text is not.
 const MIN_PARAGRAPH_CHARACTERS = 20;
+// Each section stage handles four sentence-level quotes and takes seconds; a long page (a Wikipedia article has hundreds of
+// paragraphs) would take many minutes, so only the leading text is read.
+const MAX_CHARACTERS = 3000;
 const bundleDirectory = new URL('./neko/', import.meta.url).href;
 let current; // { modelBase, neko: Promise }
 let active = 0;
@@ -88,7 +91,13 @@ async function read(request, port, signal) {
   const candidates = rendered.length ? rendered : page.images.filter((image) => !/\.svg(?:[?#]|$)/i.test(image.url) && !/^data:image\/svg/i.test(image.url));
   const describedImageIds = candidates.slice(0, MAX_DESCRIBED_IMAGES).map((image) => image.id);
   const long = page.paragraphs.filter((paragraph) => paragraph.text.length >= MIN_PARAGRAPH_CHARACTERS);
-  const paragraphIds = (long.length >= 3 ? long : page.paragraphs).map((paragraph) => paragraph.id);
+  const readable = long.length >= 3 ? long : page.paragraphs;
+  const paragraphIds = [];
+  let characters = 0;
+  for (const paragraph of readable) {
+    if (paragraphIds.length && characters + paragraph.text.length > MAX_CHARACTERS) break;
+    paragraphIds.push(paragraph.id); characters += paragraph.text.length;
+  }
   if (!page.paragraphs.length) throw new Error('這個頁面沒有可解析的文字。');
   const stages = { image: [], section: [], summary: [], conclusion: [] };
   const names = { image: '描述圖片', section: '整理段落', summary: '撰寫摘要', conclusion: '撰寫結論' };
@@ -109,7 +118,7 @@ async function read(request, port, signal) {
       send({ type: 'status', text: `${names[event.phase]}（第 ${seen.indexOf(event.id) + 1} 項${retry ? '，重試' : ''}）…` });
     },
   });
-  send({ type: 'result', report, seconds: (performance.now() - begun) / 1000, paragraphs: paragraphIds.length, images: page.images.length, describedImages: describedImageIds.length });
+  send({ type: 'result', report, seconds: (performance.now() - begun) / 1000, paragraphs: paragraphIds.length, totalParagraphs: readable.length, images: page.images.length, describedImages: describedImageIds.length });
 }
 
 chrome.runtime.onConnect.addListener((port) => {
