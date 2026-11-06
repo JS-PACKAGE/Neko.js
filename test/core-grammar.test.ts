@@ -98,6 +98,23 @@ test('ordinary string token masks preserve all UTF-8 boundary classes and reject
   }
 });
 
+test('ordinary string masks match full parsing for every one-byte and two-byte token under all pending UTF-8 classes', () => {
+  const pieces: [number, Uint8Array][] = [];
+  for (let byte = 0; byte < 256; byte++) {
+    pieces.push([pieces.length, Uint8Array.of(byte)]);
+    for (let next = 0; next < 256; next++) pieces.push([pieces.length, Uint8Array.of(byte, next)]);
+  }
+  const trie = new TokenByteTrie(pieces);
+  for (const lead of [0, 0xc2, 0xe1, 0xf1, 0xe0, 0xed, 0xf0, 0xf4]) {
+    const state = new JsonGrammarState({ type: 'string' });
+    assert.equal(state.push(lead ? Uint8Array.of(34, lead) : Uint8Array.of(34)), true);
+    const expected = new Uint8Array(pieces.length);
+    for (const [id, bytes] of pieces) if (state.clone().push(bytes)) expected[id] = 1;
+    const mask = new Uint8Array(pieces.length); trie.mark(state, mask);
+    assert.deepEqual(mask, expected, `pending lead 0x${lead.toString(16)}`);
+  }
+});
+
 test('ByteLevel token pieces preserve partial UTF-8 bytes instead of replacement characters', () => {
   const tokenizer = new TokenizersBackend({ model: { type: 'BPE', vocab: { '"': 0, 'Ã': 1, '©': 2, x: 3 }, merges: [] },
     decoder: { type: 'ByteLevel' }, added_tokens: [], normalizer: null, pre_tokenizer: null, post_processor: null }, {});

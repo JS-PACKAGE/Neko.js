@@ -320,7 +320,23 @@ export class JsonGrammarState {
     return this.start(character, frame.schema.properties?.[frame.key!] ?? anySchema);
   }
 }
-const utfLeadBytes = [0, 0xc2, 0xe1, 0xf1, 0xe0, 0xed, 0xf0, 0xf4] as const;
+/** Structural bytes are filtered out by the caller; state numbers are freeStringClass values, and a pending suffix is accepted. */
+function acceptsUtf8Prefix(data: Uint8Array, start: number, end: number, pending: number): boolean {
+  for (let at = start; at < end; at++) {
+    const byte = data[at]!;
+    if (pending) {
+      if (byte < 0x80 || byte > 0xbf) return false;
+      // E0, ED, F0 and F4 restrict their first continuation byte.
+      if (pending === 4 && byte < 0xa0 || pending === 5 && byte > 0x9f || pending === 6 && byte < 0x90 || pending === 7 && byte > 0x8f) return false;
+      pending = pending === 1 ? 0 : pending === 2 || pending === 4 || pending === 5 ? 1 : 2;
+    } else if (byte < 0x80) continue;
+    else if (byte >= 0xc2 && byte <= 0xdf) pending = 1;
+    else if (byte >= 0xe0 && byte <= 0xef) pending = byte === 0xe0 ? 4 : byte === 0xed ? 5 : 2;
+    else if (byte >= 0xf0 && byte <= 0xf4) pending = byte === 0xf0 ? 6 : byte === 0xf4 ? 7 : 3;
+    else return false;
+  }
+  return true;
+}
 /** A trie node that reaches this many children gets a byte-indexed lookup table while the trie is built. */
 const WIDE_TRIE_NODE = 16;
 /** Child/sibling trie in typed arrays: one object per vocabulary entry would cost hundreds of MB for a 248k-token vocabulary. */
@@ -428,9 +444,6 @@ export class TokenByteTrie {
   private continuation(continuation: number): Uint8Array {
     let allowed = this.continuations.get(continuation);
     if (!allowed) {
-      const seed = new JsonGrammarState({ type: 'string' });
-      seed.pushByte(34);
-      if (continuation) seed.pushByte(utfLeadBytes[continuation]!);
       allowed = new Uint8Array(this.slotCount);
       for (let entry = 0; entry < this.ids.length; entry++) {
         if (this.structural[entry]) continue;
@@ -442,7 +455,7 @@ export class TokenByteTrie {
           for (let at = start + 1; at < end; at++) if (this.data[at]! >= 0x80) { ascii = false; break; }
           if (ascii) { allowed[this.ids[entry]!] = 1; continue; }
         }
-        if (seed.clone().push(this.data, start, end)) allowed[this.ids[entry]!] = 1;
+        if (acceptsUtf8Prefix(this.data, start, end, continuation)) allowed[this.ids[entry]!] = 1;
       }
       this.continuations.set(continuation, allowed);
     }
