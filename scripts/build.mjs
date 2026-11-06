@@ -31,7 +31,7 @@ const replaceOnce = (source, target, replacement, path) => {
 // Build-time patches to the pinned inference dependencies; a changed upstream target fails the build.
 // - Its greedy sampler takes the argmax with its shared `max()`, whose call sites see arrays of many element types, so V8 runs it as a
 //   slow polymorphic loop: about 0.8 ms per token over the 248,320-entry vocabulary, against about 0.1 ms for a loop that only ever sees
-//   Float32Array. Same comparisons and first-index tie-breaking.
+//   Float32Array. Eight ordered comparisons per iteration reduce loop overhead while preserving NaN handling and first-index ties.
 // - Its BPE model accepts a prebuilt vocabulary Map and merge-rank Map, so Node can parse tokenizer.json on a worker thread and build
 //   the same Maps from compact strings (`src/core/text-resources.ts`). Plain JSON configurations take the original path.
 // - Its BPE memo cache moved every hit to the most-recent end of its 10,000-entry Map (delete + set). That churn made V8 rehash the
@@ -66,7 +66,27 @@ function nekoGreedyArgmax(data) {
   if (length === 0) throw Error("Array must not be empty");
   let best = data[0];
   let index = 0;
-  for (let i = 1; i < length; ++i) {
+  let i = 1;
+  const end = length - 7;
+  for (; i < end; i += 8) {
+    let value = data[i];
+    if (value > best) { best = value; index = i; }
+    value = data[i + 1];
+    if (value > best) { best = value; index = i + 1; }
+    value = data[i + 2];
+    if (value > best) { best = value; index = i + 2; }
+    value = data[i + 3];
+    if (value > best) { best = value; index = i + 3; }
+    value = data[i + 4];
+    if (value > best) { best = value; index = i + 4; }
+    value = data[i + 5];
+    if (value > best) { best = value; index = i + 5; }
+    value = data[i + 6];
+    if (value > best) { best = value; index = i + 6; }
+    value = data[i + 7];
+    if (value > best) { best = value; index = i + 7; }
+  }
+  for (; i < length; ++i) {
     const value = data[i];
     if (value > best) { best = value; index = i; }
   }

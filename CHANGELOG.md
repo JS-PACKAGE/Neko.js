@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Performance: unroll the dedicated greedy argmax in eight ordered comparisons, preserving first-index ties, NaNs and empty-input errors. Two actual WebGPU report comparisons preserved generated content with 23–27% less cumulative instrumented argmax time. Uninstrumented total-report timings were mixed; no stable end-to-end speedup is claimed.
 - Performance: bulk-fill invalid logits gaps for sparse structural/enumeration masks without copying allowed scores or allocating scratch arrays. Ordinary strings and bounded dense tails retain the linear path. Two instrumented actual WebGPU report comparisons preserved generated content and reduced cumulative mask-loop time by 69–129 ms; this is not a stable end-to-end speedup claim.
 - Performance: avoid callback captures in the hot JSON character parser while preserving Unicode-escape enumeration and closed-object key checks. Two actual WebGPU text-report comparisons preserved generated content, including page summaries, with 26–30 MiB less cumulative sampled grammar allocation. This is not a retained-memory/GPU-memory or stable wall-time claim.
 - Performance (browser WebGPU): keep native extension callback captures inside the nonempty-chain branch. Two actual text-report comparisons preserved generated content, including page summaries, and removed another 87–95 MiB of cumulative sampled JS allocation beyond the empty-chain guard. Heap refreshes, descriptors and errors remain equivalent; this is not a retained-memory/GPU-memory or stable wall-time claim.
