@@ -105,6 +105,10 @@ function nekoGreedyArgmax(data) {
         let source = replaceOnce(await readFile(path, 'utf8'), 't=n.getBindGroupLayout(t)', 't=nekoGetGroupLayout(n,t)', path);
         source = replaceOnce(source, 'fu(u,{327681:I=>{E=(p(),A)[I+8>>>2>>>0]}})',
           'E=(p(),A)[u>>>2>>>0]?((entry)=>{let external=0;fu(entry,{327681:I=>{external=(p(),A)[I+8>>>2>>>0]}});return external})(u):0', path);
+        // Keep the stateless converter in its runtime factory, without a new closure per bind group.
+        source = replaceOnce(source, 'function qu(e,t){function n(u){', 'function nekoNativeBindGroupEntry(u){', path);
+        source = replaceOnce(source, 'resource:c}}e>>>=0,t={label:Ne(', 'resource:c}}function qu(e,t){e>>>=0,t={label:Ne(', path);
+        source = replaceOnce(source, 'h.push(n(c+40*b))', 'h.push(nekoNativeBindGroupEntry(c+40*b))', path);
         runtimePatched = true;
         return { loader: 'js', contents: `${source}
 const nekoBindGroupLayouts = new WeakMap();
