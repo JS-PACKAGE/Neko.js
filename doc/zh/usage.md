@@ -135,6 +135,8 @@ if (structuredPlan.fits) {
 
 生成 schema 依階段區分：sections 與中間 reduction 請求一至四個 `{ text, evidenceIds }` claims；圖片描述、`page.summary` 與 `conclusion` 請求一段精簡、證據連結的文字，可包含多個受來源支持的事實。此設計限制輸出形狀，不保證事實或完整性。Checkpoint 的 request hashes 綁定實際階段 schema。
 
+沒有 token 串流、sampling 或單次 hard deadline 時，報告可把二至四個連續、尚未嘗試的純文字 sections 合成一次 left-padded batch。各列保有獨立 schema 限制、停止狀態與輸入／輸出用量；padding 與完成後的填充 tokens 不計費。只有累計預算足以涵蓋每列完整輸入加上 `maxNewTokens` 時才批次執行；否則逐段執行，不會為湊成 batch 而縮減輸出額度。失敗列只依既有明確授權的 retries 重試。整批已送出列的結果先寫入 checkpoint，再呼叫完成／錯誤 callbacks，因此出錯時後面的 sections 也可能已完成。累計生成時間只計一次 batch 耗時，分攤至各 attempt。Greedy 輸出可能與逐段生成不同；批次執行不保證品質。
+
 `budget: { maxTotalTokens, maxDurationMs }` 限制累計輸入／輸出 token 與整個請求耗時，包含排隊、載入、擷取、前處理、生成，以及支援的非同步來源 predicate、資源核准、`onEvent`、`onCheckpoint`。Deadline 取消 SDK 對使用者 Promise 的等待，不會強制搶占 native ORT／OS 呼叫，也不終止呼叫端自己的外部副作用。`onEvent` 回報階段轉換；`onCheckpoint` 提供可保存、cloneable 的 state。`resume: checkpoint` 只重用相容的完成階段，保留已花費 budget，並驗證來源／模型／設定／checksum 與圖片內容版本。報告 checkpoint 建立後的失敗提供 `ReportError.checkpoint` 最終 accounting；較早的擷取／選取／載入失敗可能只有 `NekoError`。Checkpoint 保存選取文字與 metadata，不包含圖片像素；持久化資料可能敏感。
 
 ### 結構化型別、串流與對話

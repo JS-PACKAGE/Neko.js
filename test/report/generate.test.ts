@@ -11,7 +11,7 @@ import type { Page, StructuredReport } from '../../src/types.js';
 import { generateExtractiveReport, planExtractiveReport } from '../../src/report/extractive.js';
 
 // Deterministic tokens exercise the real engine, schemas, budgets and report planner without a model download.
-function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT' | 'POLICY_DENIED' | 'LANGUAGE_MISMATCH') {
+function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT' | 'POLICY_DENIED' | 'LANGUAGE_MISMATCH', behavior: { invalidSection?: number } = {}) {
   const prompts: string[] = [];
   const encoded = (text: string) => Array.from(text, (character) => BigInt(character.codePointAt(0)!));
   let invisible = 256;
@@ -24,23 +24,46 @@ function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT
     tokenizer,
   });
   const profile = getRegisteredModelProfile();
+  let sectionCount = 0;
   const model = {
     sessions: Object.fromEntries(Object.entries(profile.dtype).map(([name, dtype]) => [name, { config: { device: 'cpu', dtype } }])),
-    generation_config: { eos_token_id: 1000 },
-    async generate(options: { input_ids: Tensor; max_new_tokens: number; streamer: { put(ids: bigint[][]): void; end(): void }; stopping_criteria: { interrupted: boolean } }) {
-      const ids = Array.from(options.input_ids.data, BigInt);
-      const prompt = ids.map((id) => String.fromCodePoint(Number(id))).join(''); prompts.push(prompt);
-      const source = JSON.parse(prompt.split(/(?:Source JSON:|引用資料（JSON）：)\n/)[1]!.split(/\n(?:Now output|現在請只輸出)/)[0]!) as { evidenceId?: string; quote?: string; text?: string; evidenceIds?: string[] }[];
-      const section = prompt.includes('Give separate key points') || prompt.includes('分別整理成繁體中文重點');
-      if (section && firstSectionFailure && prompts.filter((value) => value.includes('Give separate key points')).length === 1) throw new NekoError('Fixture first stage output failure', 'generate', firstSectionFailure);
-      const facts = section && !lossySections ? source : source.slice(0, 1);
-      const claims = facts.map((fact) => ({ text: (fact.quote ?? fact.text)!.trim(), evidenceIds: fact.evidenceId ? [fact.evidenceId] : fact.evidenceIds! }));
-      const multiple = prompt.includes('with claims (an array') || prompt.includes('包含 claims 陣列');
-      const output = encoded(JSON.stringify(multiple ? { claims } : claims[0]));
-      options.streamer.put([ids]);
-      if (!options.stopping_criteria.interrupted) { const tokens = output.slice(0, options.max_new_tokens); ids.push(...tokens); options.streamer.put([tokens]); }
+    generation_config: { eos_token_id: 1000, pad_token_id: 0 },
+    async generate(options: {
+      input_ids: Tensor; max_new_tokens: number;
+      streamer: { put(ids: bigint[][]): void; end(): void };
+      stopping_criteria: ((ids: bigint[][], scores: number[][]) => boolean[]) & { interrupted?: boolean };
+      logits_processor: (ids: bigint[][], scores: Tensor) => Tensor;
+    }) {
+      const width = options.input_ids.dims[1]!;
+      const rows = Array.from({ length: options.input_ids.dims[0]! }, (_, row) => Array.from(options.input_ids.data.slice(row * width, (row + 1) * width), BigInt));
+      const outputs = rows.map((ids) => {
+        const prompt = ids.filter((id) => id !== 0n).map((id) => String.fromCodePoint(Number(id))).join(''); prompts.push(prompt);
+        const source = JSON.parse(prompt.split(/(?:Source JSON:|引用資料（JSON）：)\n/)[1]!.split(/\n(?:Now output|現在請只輸出)/)[0]!) as { evidenceId?: string; quote?: string; text?: string; evidenceIds?: string[] }[];
+        const section = prompt.includes('Give separate key points') || prompt.includes('分別整理成繁體中文重點');
+        if (section) sectionCount++;
+        if (section && firstSectionFailure && sectionCount === 1) throw new NekoError('Fixture first stage output failure', 'generate', firstSectionFailure);
+        const facts = section && !lossySections ? source : source.slice(0, 1);
+        const claims = facts.map((fact) => ({ text: (fact.quote ?? fact.text)!.trim(), evidenceIds: section && sectionCount === behavior.invalidSection ? ['q999'] : fact.evidenceId ? [fact.evidenceId] : fact.evidenceIds! }));
+        const multiple = prompt.includes('with claims (an array') || prompt.includes('包含 claims 陣列');
+        return encoded(JSON.stringify(multiple ? { claims } : claims[0]));
+      });
+      options.streamer.put(rows.map((row) => [...row]));
+      for (let step = 0; step < options.max_new_tokens; step++) {
+        if (options.stopping_criteria.interrupted) break;
+        const scores = new Tensor('float32', new Float32Array(rows.length * 1001).fill(-100), [rows.length, 1001]);
+        outputs.forEach((output, row) => { scores.data[row * 1001 + Number(output[step] ?? 1000n)] = 100; });
+        const processed = options.logits_processor(rows, scores);
+        const tokens = rows.map((row, index) => {
+          let best = 0;
+          for (let id = 1; id < 1001; id++) if (Number(processed.data[index * 1001 + id]) > Number(processed.data[index * 1001 + best])) best = id;
+          const token = BigInt(best); row.push(token); return [token];
+        });
+        options.streamer.put(tokens);
+        const done = options.stopping_criteria(rows, []);
+        if (done.every(Boolean)) break;
+      }
       options.streamer.end();
-      return new Tensor('int64', BigInt64Array.from(ids), [1, ids.length]);
+      return new Tensor('int64', BigInt64Array.from(rows.flat()), [rows.length, rows[0]!.length]);
     },
     async dispose() {},
   };
@@ -124,7 +147,7 @@ test('failed budgets retain a serializable quote ledger; cancellation does not r
     assert.equal(failed.checkpoint.sourceFacts.map(({ citation }) => citation.quote).join(''), page.paragraphs[0]!.text);
     const controller = new AbortController();
     await assert.rejects(report(engine, { signal: controller.signal, onEvent: (event) => { if (event.type === 'stage-complete') controller.abort(); } }), (error: unknown) => error instanceof NekoError && error.code === 'ABORTED');
-    assert.equal(prompts.length, 1);
+    assert.equal(prompts.length, 2);
   } finally { await engine.dispose(); }
 });
 
@@ -152,7 +175,7 @@ test('only explicitly authorized failed output stages retry and account for fail
   const { engine, prompts } = fixture(false, 'STRUCTURED_OUTPUT');
   try {
     let checkpoint: ReportCheckpoint | undefined;
-    const result = await report(engine, { retries: { section: 1 }, onCheckpoint: (value) => { checkpoint = value; } });
+    const result = await report(engine, { onToken: () => {}, retries: { section: 1 }, onCheckpoint: (value) => { checkpoint = value; } });
     assert.ok(checkpoint); assert.equal(checkpoint.attempts[0]!.outcome, 'error');
     assert.ok(checkpoint.attempts[0]!.usage.inputTokens > 0);
     assert.ok(prompts[1]!.includes('Retry 1:'));
@@ -162,7 +185,7 @@ test('only explicitly authorized failed output stages retry and account for fail
     await serializeReportCheckpoint(checkpoint);
   } finally { await engine.dispose(); }
   const denied = fixture(false, 'POLICY_DENIED');
-  try { await assert.rejects(report(denied.engine, { retries: { section: 3 } }), (error: unknown) => error instanceof ReportError && error.code === 'POLICY_DENIED'); assert.equal(denied.prompts.length, 1); }
+  try { await assert.rejects(report(denied.engine, { onToken: () => {}, retries: { section: 3 } }), (error: unknown) => error instanceof ReportError && error.code === 'POLICY_DENIED'); assert.equal(denied.prompts.length, 1); }
   finally { await denied.engine.dispose(); }
 });
 
@@ -178,11 +201,11 @@ test('verbatim source text without the requested script passes the language chec
 
 test('a section in the wrong language is retried only when output retries are authorized', async () => {
   const unauthorized = fixture(false, 'LANGUAGE_MISMATCH');
-  try { await assert.rejects(report(unauthorized.engine), (error: unknown) => error instanceof ReportError && error.code === 'LANGUAGE_MISMATCH'); assert.equal(unauthorized.prompts.length, 1); }
+  try { await assert.rejects(report(unauthorized.engine, { onToken: () => {} }), (error: unknown) => error instanceof ReportError && error.code === 'LANGUAGE_MISMATCH'); assert.equal(unauthorized.prompts.length, 1); }
   finally { await unauthorized.engine.dispose(); }
   const authorized = fixture(false, 'LANGUAGE_MISMATCH');
   try {
-    const result = await report(authorized.engine, { retries: { section: 1 } });
+    const result = await report(authorized.engine, { onToken: () => {}, retries: { section: 1 } });
     assert.ok(authorized.prompts[1]!.includes('Retry 1:'));
     assert.equal(result.metadata.retryAttempts, 1);
   } finally { await authorized.engine.dispose(); }
@@ -226,4 +249,84 @@ test('extractive reporting retains exact multilingual text and image metadata wi
   assert.deepEqual(report.metadata.coverage.modelCitedFactIds, []);
   await parseStructuredReport(await serializeStructuredReport(report));
   assert.ok(!renderMarkdown(report).includes('<script>'));
+});
+
+test('batched sections preserve source facts and round-trip the complete attempt ledger', async () => {
+  const { engine } = fixture(); let checkpoint: ReportCheckpoint | undefined;
+  try {
+    const result = await report(engine, { onCheckpoint: (value) => { checkpoint = value; } });
+    assert.ok(checkpoint);
+    const loaded = await parseReportCheckpoint(await serializeReportCheckpoint(checkpoint));
+    assert.deepEqual(loaded.attempts.filter(({ phase }) => phase === 'section').map(({ id, outcome, attempt }) => ({ id, outcome, attempt })), [
+      { id: 'section:0', outcome: 'complete', attempt: 1 }, { id: 'section:1', outcome: 'complete', attempt: 1 },
+    ]);
+    assert.equal(loaded.usage.totalTokens, loaded.attempts.reduce((sum, attempt) => sum + attempt.usage.totalTokens, 0));
+    assert.deepEqual(loaded.usage, result.metadata.usage);
+    assert.equal(result.metadata.coverage.modelCitedFactIds.length, 5);
+  } finally { await engine.dispose(); }
+});
+
+test('one invalid batched section retries only its own row with explicit authorization', async () => {
+  const { engine, prompts } = fixture(false, undefined, { invalidSection: 1 });
+  let checkpoint: ReportCheckpoint | undefined;
+  try {
+    const result = await report(engine, { retries: { section: 1 }, onCheckpoint: (value) => { checkpoint = value; } });
+    assert.ok(checkpoint);
+    const sections = checkpoint.attempts.filter(({ phase }) => phase === 'section');
+    assert.deepEqual(sections.filter(({ id }) => id === 'section:0').map(({ outcome }) => outcome), ['error', 'complete']);
+    assert.deepEqual(sections.filter(({ id }) => id === 'section:1').map(({ outcome }) => outcome), ['complete']);
+    assert.equal(prompts.filter((prompt) => prompt.includes('Retry 1:')).length, 1);
+    assert.ok(sections[0]!.usage.outputTokens > 0);
+    assert.equal(result.metadata.retryAttempts, 1);
+    assert.equal(result.metadata.usage.totalTokens, checkpoint.attempts.reduce((sum, attempt) => sum + attempt.usage.totalTokens, 0));
+    await parseReportCheckpoint(await serializeReportCheckpoint(checkpoint));
+  } finally { await engine.dispose(); }
+});
+
+test('unauthorized invalid batch row retains sibling usage without retrying', async () => {
+  const { engine, prompts } = fixture(false, undefined, { invalidSection: 1 });
+  try {
+    let failed: ReportError | undefined;
+    await assert.rejects(report(engine), (error: unknown) => {
+      assert.ok(error instanceof ReportError); assert.equal(error.code, 'STRUCTURED_OUTPUT'); failed = error;
+      assert.deepEqual(error.checkpoint.attempts.map(({ id, outcome }) => ({ id, outcome })), [
+        { id: 'section:0', outcome: 'error' }, { id: 'section:1', outcome: 'complete' },
+      ]);
+      assert.equal(error.checkpoint.usage.totalTokens, error.checkpoint.attempts.reduce((sum, attempt) => sum + attempt.usage.totalTokens, 0));
+      return true;
+    });
+    assert.ok(failed); await parseReportCheckpoint(await serializeReportCheckpoint(failed.checkpoint));
+    assert.equal(prompts.length, 2);
+    assert.ok(prompts.every((prompt) => !prompt.includes('Retry 1:')));
+  } finally { await engine.dispose(); }
+});
+
+test('callback failure checkpoints include every already-dispatched batch row', async () => {
+  const { engine } = fixture();
+  try {
+    let failed: ReportError | undefined;
+    await assert.rejects(report(engine, { onEvent: (event) => { if (event.type === 'stage-complete') throw new Error('Consumer callback failed'); } }), (error: unknown) => {
+      assert.ok(error instanceof ReportError); failed = error; return true;
+    });
+    assert.ok(failed);
+    const checkpoint = await parseReportCheckpoint(await serializeReportCheckpoint(failed.checkpoint));
+    assert.deepEqual(checkpoint.attempts.map(({ id }) => id), ['section:0', 'section:1']);
+    assert.ok(checkpoint.attempts.every(({ usage }) => usage.inputTokens > 0 && usage.outputTokens > 0));
+    assert.equal(checkpoint.usage.totalTokens, checkpoint.attempts.reduce((sum, attempt) => sum + attempt.usage.totalTokens, 0));
+  } finally { await engine.dispose(); }
+});
+
+test('a budget below full batch reservations still completes an affordable sequential section', async () => {
+  const { engine } = fixture();
+  try {
+    const plan = await planReport(engine, page, { maxNewTokens: 512, contextWindowTokens: 8192 });
+    const limit = plan.stages[0]!.inputTokens! + 512;
+    await assert.rejects(report(engine, { budget: { maxTotalTokens: limit } }), (error: unknown) => {
+      assert.ok(error instanceof ReportError); assert.equal(error.code, 'BUDGET_EXCEEDED');
+      assert.ok(error.checkpoint.completed['section:0']);
+      assert.ok(error.checkpoint.usage.totalTokens <= limit);
+      assert.equal(error.checkpoint.usage.totalTokens, error.checkpoint.attempts.reduce((sum, attempt) => sum + attempt.usage.totalTokens, 0));
+      return true;
+    });
+  } finally { await engine.dispose(); }
 });

@@ -1,6 +1,6 @@
 import type { Citation, ExecutionInfo, Page, PageSnapshot, ReportClaim, ReportImage, ReportSection, ReportSourceFact, SourceSelection, StructuredReport } from '../types.js';
 import { extractPage, type ExtractOptions, type ExtractContext } from '../web/extract.js';
-import type { VisionEngine, InferenceBudget, InferenceResult, ModelIdentity, PreparedImage, LoadedBackend } from '../core/engine.js';
+import type { VisionEngine, InferenceBudget, InferenceResult, StructuredInferenceResult, ModelIdentity, PreparedImage, LoadedBackend } from '../core/engine.js';
 import { generationSettings, type GenerationOptions } from '../core/generation.js';
 import { atStage, awaitUser, NekoError, ERROR_CODES } from '../errors.js';
 import { hashValue, selectPage, snapshotPage } from '../web/source.js';
@@ -403,6 +403,10 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
     const { chunks, sourceFacts, sectionPlan, prompt, promptHead, fits } = planned;
     for (const { id, citation } of sourceFacts) evidence.set(id, citation);
     const quotes = new Set(sourceFacts.map(({ citation }) => citation.quote.trim()));
+    const batchCompleted = new Set<string>();
+    const batchStarted = new Set<string>();
+    const batchErrors = new Map<string, NekoError>();
+    let batchUnavailable = false;
     const run = async (id: string, phase: ReportPhase, source: unknown, allowed: Set<string>, prepared?: PreparedImage): Promise<EvidenceClaim[]> => {
       check();
       const multiple = phase === 'section' || id.startsWith('reduce:');
@@ -417,8 +421,11 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         if (saved.requestHash !== requestHash || saved.phase !== phase) failCheckpoint(`Checkpoint stage ${id} has stale source or generation settings`);
         let items: EvidenceClaim[];
         try { items = validateClaims({ claims: saved.claims }, allowed, language, quotes); } catch { failCheckpoint(`Checkpoint stage ${id} has invalid claim evidence`); }
-        resumedStages++;
-        await notify({ type: 'stage-reused', id, phase, usage: saved.usage, elapsedMs: elapsed() }); return items;
+        if (!batchCompleted.delete(id)) {
+          resumedStages++;
+          await notify({ type: 'stage-reused', id, phase, usage: saved.usage, elapsedMs: elapsed() });
+        }
+        return items;
       }
       let attempt = checkpoint.attempts.filter((item) => item.id === id).length;
       let outputFailures = checkpoint.attempts.filter((item) => item.id === id && retryableOutput(item.errorCode)).length;
@@ -432,7 +439,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         if (budget.remainingTokens < 1) throw new NekoError('Report aggregate token budget exhausted', 'report', 'BUDGET_EXCEEDED');
         const retryInstruction = outputFailures ? `\nRetry ${outputFailures}: the previous ${phase} output failed validation. Return exactly the required JSON schema, cite only supplied IDs, and use the requested language. Do not include commentary.` : '';
         const request = text + retryInstruction;
-        await notify({ type: 'stage-start', id, phase, usage: checkpoint.usage, elapsedMs: elapsed() });
+        if (!batchStarted.delete(id)) await notify({ type: 'stage-start', id, phase, usage: checkpoint.usage, elapsedMs: elapsed() });
         const beforeInput = budget.inputTokens; const beforeOutput = budget.outputTokens;
         const beforePreprocess = checkpoint.timings.preprocessMs; const beforeGeneration = checkpoint.timings.generationMs;
         let items: EvidenceClaim[]; let result: InferenceResult | undefined;
@@ -463,6 +470,86 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         await save(); await notify({ type: 'stage-complete', id, phase, usage: result.usage, elapsedMs: elapsed() }); return items;
       }
     };
+    const runSectionBatch = async (start: number): Promise<void> => {
+      const { onToken, ...batchOptions } = options;
+      if (batchUnavailable || onToken || options.generation?.sampling || options.hardDeadlineMs !== undefined) return;
+      const rows = [];
+      let reservedTokens = 0;
+      for (let index = start; index < Math.min(chunks.length, start + 4); index++) {
+        const id = `section:${index}`;
+        if (checkpoint.completed[id] || checkpoint.attempts.some((item) => item.id === id)) break;
+        const chunk = chunks[index]!;
+        const request = prompt('section', chunk);
+        const inputTokens = engine.countPrompt(request, compiledClaimSchema);
+        const reservation = inputTokens + maxNewTokens;
+        if (reservedTokens + reservation > budget.remainingTokens) break;
+        reservedTokens += reservation;
+        const timings = { preprocessMs: 0, generationMs: 0 };
+        const rowBudget: InferenceBudget = { remainingTokens: reservation, deadline: budget.deadline, inputTokens: 0, outputTokens: 0, timings };
+        rows.push({ id, request, allowed: new Set(chunk.map((item) => item.evidenceId)), budget: rowBudget, timings,
+          requestHash: await hashValue({ phase: 'section', prompt: request, schema: claimSchema, imageVersion: null }),
+          attemptHash: await hashValue({ request, schema: claimSchema }) });
+      }
+      if (rows.length < 2) return;
+      check();
+      for (const row of rows) {
+        await notify({ type: 'stage-start', id: row.id, phase: 'section', usage: checkpoint.usage, elapsedMs: elapsed() });
+        batchStarted.add(row.id);
+      }
+      let outcomes: PromiseSettledResult<StructuredInferenceResult>[] | undefined;
+      try {
+        outcomes = await engine.inferStructuredBatch(rows.map((row) => ({
+          options: { ...batchOptions, prompt: row.request, schema: claimSchema, maxNewTokens, contextWindowTokens: context },
+          context: { structured: compiledClaimSchema, budget: row.budget, diagnosticStage: { id: row.id, attempt: 1 } },
+        })));
+      } catch (reason) {
+        outcomes = rows.map(() => ({ status: 'rejected' as const, reason }));
+      }
+      if (!outcomes) {
+        for (const row of rows) checkpoint.timings.preprocessMs += row.timings.preprocessMs;
+        batchUnavailable = true; return;
+      }
+      // Every dispatched row is charged and journaled before callbacks, retries or cancellation can expose a checkpoint.
+      for (const row of rows) {
+        budget.inputTokens += row.budget.inputTokens; budget.outputTokens += row.budget.outputTokens;
+        budget.remainingTokens -= row.budget.inputTokens + row.budget.outputTokens;
+        checkpoint.timings.preprocessMs += row.timings.preprocessMs; checkpoint.timings.generationMs += row.timings.generationMs;
+      }
+      for (const [index, row] of rows.entries()) {
+        batchStarted.delete(row.id); used.add(row.id);
+        const outcome = outcomes[index]!;
+        const result = outcome.status === 'fulfilled' ? outcome.value : undefined;
+        const usage = { inputTokens: row.budget.inputTokens, outputTokens: row.budget.outputTokens, totalTokens: row.budget.inputTokens + row.budget.outputTokens };
+        let items: EvidenceClaim[] | undefined; let error: NekoError | undefined;
+        try {
+          if (outcome.status === 'rejected') throw outcome.reason;
+          items = validateClaims(outcome.value.value, row.allowed, language, quotes);
+        } catch (cause) {
+          error = cause instanceof NekoError ? new NekoError(cause.message, cause.stage, cause.code, { cause }) : new NekoError(cause instanceof Error ? cause.message : String(cause), 'report', 'OPERATION_FAILED', { cause });
+          if (options.diagnostics) {
+            const diagnostic: GenerationDiagnostic = { ...(getGenerationDiagnostic(cause) ?? {
+              version: 1, stage: error.stage, code: error.code,
+              finishReason: result?.finishReason ?? (signal?.aborted ? 'aborted' : 'error'), outputCharacters: result?.text.length ?? 0,
+            }), stageId: row.id, attempt: 1, usage,
+              aggregateUsage: { inputTokens: budget.inputTokens, outputTokens: budget.outputTokens, totalTokens: budget.inputTokens + budget.outputTokens } };
+            if (!diagnostic.capture && result && options.diagnostics !== true && options.diagnostics.capture) {
+              const maxCharacters = options.diagnostics.capture.maxCharacters;
+              diagnostic.capture = { output: result.text.slice(0, maxCharacters), truncated: result.text.length > maxCharacters, maxCharacters };
+            }
+            attachGenerationDiagnostic(error, diagnostic);
+          }
+        }
+        checkpoint.attempts.push({ id: row.id, phase: 'section', attempt: 1, requestHash: row.attemptHash, outcome: error ? 'error' : 'complete', errorCode: error?.code ?? null, usage, timings: { ...row.timings } });
+        if (error) batchErrors.set(row.id, error);
+        else {
+          checkpoint.completed[row.id] = { phase: 'section', requestHash: row.requestHash, claims: items!, usage, timings: result!.timings };
+          batchCompleted.add(row.id);
+        }
+      }
+      check();
+      await save();
+      for (const row of rows) await notify({ type: batchErrors.has(row.id) ? 'stage-error' : 'stage-complete', id: row.id, phase: 'section', usage: batchErrors.has(row.id) ? checkpoint.usage : checkpoint.completed[row.id]!.usage, elapsedMs: elapsed() });
+    };
     try {
       check();
       const images: ReportImage[] = []; const imageFacts: EvidenceClaim[] = [];
@@ -489,6 +576,9 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
       const retainedFacts: EvidenceClaim[] = sourceFacts.map(({ id, citation }) => ({ text: citation.quote, evidenceIds: [id] }));
       const sections: ReportSection[] = []; const sectionFacts: EvidenceClaim[] = [];
       for (const [index, chunk] of chunks.entries()) {
+        await runSectionBatch(index);
+        const batchError = batchErrors.get(`section:${index}`);
+        if (batchError && (!retryableOutput(batchError.code) || !(authorization.retries.section ?? 0))) throw batchError;
         const items = await run(`section:${index}`, 'section', chunk, new Set(chunk.map((item) => item.evidenceId))); sectionFacts.push(...items);
         const keyPoints = items.map((item, point) => appendClaims([item], `sections[${index}].keyPoints[${point}]`));
         sections.push({ ...(chunk[0]?.heading ? { heading: chunk[0].heading } : {}), keyPoints, paragraphIds: [...new Set(chunk.map((item) => item.paragraphId))] });

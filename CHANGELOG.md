@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reports: consecutive new text sections can share a two-to-four-row decoder batch, with independent grammar, stops and token accounting. Full per-row output allowances must fit the remaining budget; token streaming, sampling and per-call hard deadlines keep sequential execution. All dispatched outcomes are checkpointed before callbacks, and only explicitly authorized failed rows retry. Real Node CPU news reporting and checkpoint validation completed; outputs can differ from sequential generation.
 - Fixed: the bundled Transformers.js text-only RoPE delta now subtracts, rather than adds, the padded prompt length. Decode positions continue after the actual prompt instead of jumping forward by twice its padded length. Text outputs can change; this is a correctness fix, not a quality guarantee.
 - Fixed (Node): metadata probes used by `progressCallback` now recognize verified native cache path hits, instead of probing an unrelated local path and failing with `Unpinned resource URL`. Size metadata for these hits is unknown; asset size/SHA-256 verification remains unchanged. Offline text inference with a progress callback was exercised.
 - Fixed (quality tooling): restore the SHA-256 helper import used to verify the browser runtime cache seed; the browser benchmark no longer stops at `sha256 is not defined`.
