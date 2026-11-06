@@ -114,6 +114,26 @@ function nekoGreedyArgmax(data) {
         source = replaceOnce(source, nativeUtf8Decoder, replaceOnce(nativeUtf8Decoder,
           'else o+=String.fromCharCode(u)',
           'else if(t+1<n&&!((c=e[t])&128)&&!((h=e[t+1])&128)){var b;if(t+2<n&&!((b=e[t+2])&128)){o+=String.fromCharCode(u,c,h,b);t+=3}else{o+=String.fromCharCode(u,c,h);t+=2}}else o+=String.fromCharCode(u)', path), path);
+        // Pointer keys need no array length. Preserve unsigned handles and explicit resource deletion.
+        for (const [before, after] of [
+          ['de=[]', 'de=new Map()'],
+          ['uu=(e,t)=>{de[e>>>0]=t}', 'uu=(e,t)=>{de.set(e>>>0,t)}'],
+          ['L=e=>{if(e)return de[e>>>0]}', 'L=e=>{if(e)return de.get(e>>>0)}'],
+          ['function Eu(e){delete de[e>>>0]}', 'function Eu(e){de.delete(e>>>0)}'],
+          ['de[u>>>0]=B.queue,de[o>>>0]=B,G', 'de.set(u>>>0,B.queue),de.set(o>>>0,B),G'],
+          ['de[n>>>0]=u,o&&(Re[n]=[])', 'de.set(n>>>0,u),o&&(Re[n]=[])'],
+          ['de[o>>>0]=u,Pr(', 'de.set(o>>>0,u),Pr('],
+          ['de[n>>>0]=e}', 'de.set(n>>>0,e)}'],
+          ['de[o>>>0]=c,Et(', 'de.set(o>>>0,c),Et('],
+          ['n=t.beginComputePass(n),de[e>>>0]=n,e', 'n=t.beginComputePass(n),de.set(e>>>0,n),e'],
+          ['t=t.finish(),de[e>>>0]=t,e', 't=t.finish(),de.set(e>>>0,t),e'],
+          ['t=nekoGetGroupLayout(n,t),de[e>>>0]=t,e', 't=nekoGetGroupLayout(n,t),de.set(e>>>0,t),e'],
+          ['n=t.createCommandEncoder(n),de[e>>>0]=n,e', 'n=t.createCommandEncoder(n),de.set(e>>>0,n),e'],
+          ['t=n.createQuerySet(t),de[e>>>0]=t,e', 't=n.createQuerySet(t),de.set(e>>>0,t),e'],
+          ['de[te>>>0]=F.queue,de[j>>>0]=F,j', 'de.set(te>>>0,F.queue),de.set(j>>>0,F),j'],
+          ['j=Eo(j),de[j>>>0]=F,j', 'j=Eo(j),de.set(j>>>0,F),j'],
+        ]) source = replaceOnce(source, before, after, path);
+        if (source.includes('de[')) throw new Error('Pinned WebGPU runtime registry migration is incomplete');
         runtimePatched = true;
         return { loader: 'js', contents: `${source}
 const nekoBindGroupLayouts = new WeakMap();
