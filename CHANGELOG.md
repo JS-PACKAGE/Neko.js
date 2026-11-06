@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Performance: the bundled Transformers.js BPE memo cache no longer moves every hit to the most-recent end of its 10,000-entry Map (a delete and a set per lookup), which made V8 rehash the Map repeatedly; hits are plain lookups and the oldest inserted entry is evicted first. Encodings cannot change (it memoizes a pure function): a `planReport` for an 835-paragraph Wikipedia page had an identical plan and took about 170-190 ms instead of about 340-360 ms on Node, 3,002 texts had identical token counts, and a generated report was identical.
 - Examples (extension): the panel lists each image and section stage's validated claims as soon as that stage finishes, then replaces them with the full report. On the news article the first content appeared after about 20 s instead of only at the end (about 46-50 s).
 - Examples (extension): only the leading paragraphs, up to 3,000 characters, are read, and the panel says when a page had more. A Wikipedia article kept about 420 paragraphs after pruning; its first 40 alone took 35 section stages and about 180 s, while the 3,000-character limit read 21 paragraphs in 13 section stages and finished in about 84 s with six images.
 - Examples (extension): images to describe are those the page rendered visibly at 120×120 CSS pixels or larger, instead of the first six in document order, so logos and icons no longer take image stages (each costs seconds). On the news article the site logo and SVG icons were skipped and only the article's map was described.

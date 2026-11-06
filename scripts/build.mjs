@@ -34,6 +34,9 @@ const replaceOnce = (source, target, replacement, path) => {
 //   Float32Array. Same comparisons and first-index tie-breaking.
 // - Its BPE model accepts a prebuilt vocabulary Map and merge-rank Map, so Node can parse tokenizer.json on a worker thread and build
 //   the same Maps from compact strings (`src/core/text-resources.ts`). Plain JSON configurations take the original path.
+// - Its BPE memo cache moved every hit to the most-recent end of its 10,000-entry Map (delete + set). That churn made V8 rehash the
+//   Map over and over and took about half of report planning's time on long pages; hits are now plain lookups, so the oldest
+//   inserted entry is evicted first. The cache only memoizes a pure function, so encodings are unchanged.
 const transformersPatches = {
   name: 'neko-transformers-patches',
   setup(build) {
@@ -44,6 +47,7 @@ const transformersPatches = {
         '    super(config);\n    this.tokens_to_ids = config.vocab instanceof Map ? config.vocab : object_to_map(config.vocab);\n', path);
       source = replaceOnce(source, '    this.bpe_ranks = new Map(this.merges.map((x, i) => [JSON.stringify(x), i]));\n',
         '    this.bpe_ranks = config.bpe_ranks instanceof Map ? config.bpe_ranks : new Map(this.merges.map((x, i) => [JSON.stringify(x), i]));\n', path);
+      source = replaceOnce(source, '    const cached = this.cache.get(token);\n', '    const cached = this.cache.cache.get(token);\n', path);
       return { loader: 'js', contents: `${source}
 function nekoGreedyArgmax(data) {
   if (data.length === 0) throw Error("Array must not be empty");
