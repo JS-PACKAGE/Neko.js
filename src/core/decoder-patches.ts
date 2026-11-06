@@ -76,9 +76,9 @@ export function releaseConsumedDecoderOutputs(model: PreTrainedModel): void {
 }
 
 /**
- * Each generation step, Transformers.js copies the last position's logits (about 1 MB) for the logits processors and sampler, and the
- * copy is garbage once the step has sampled. Like the decoder outputs above, it is released when the next step's logits arrive, so
- * it does not feed V8's external-memory GC heuristics. Append it last, so that it sees the tensor the sampler reads. Node CPU only.
+ * Keep a reused score buffer intact; release superseded whole-buffer score storage when the next step's scores arrive.
+ * This covers upstream slicing/conversion paths without feeding old copies into V8's external-memory GC heuristics.
+ * Append it last, so that it sees the tensor the sampler reads. Node CPU only.
  */
 export class PreviousLogitsRelease extends LogitsProcessor {
   private previous: ArrayBuffer | undefined;

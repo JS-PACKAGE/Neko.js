@@ -32,6 +32,8 @@ const replaceOnce = (source, target, replacement, path) => {
 // - Its greedy sampler takes the argmax with its shared `max()`, whose call sites see arrays of many element types, so V8 runs it as a
 //   slow polymorphic loop: about 0.8 ms per token over the 248,320-entry vocabulary, against about 0.1 ms for a loop that only ever sees
 //   Float32Array. Eight ordered comparisons per iteration reduce loop overhead while preserving NaN handling and first-index ties.
+// - Generation keeps mutable last-position scores separate from raw decoder outputs, but reuses its own Float32 working tensor
+//   after each completed sampling step. Other dtypes/layouts retain upstream slicing and conversion; there is no cross-generation pool.
 // - Its BPE model accepts a prebuilt vocabulary Map and merge-rank Map, so Node can parse tokenizer.json on a worker thread and build
 //   the same Maps from compact strings (`src/core/text-resources.ts`). Plain JSON configurations take the original path.
 // - Its BPE memo cache moved every hit to the most-recent end of its 10,000-entry Map (delete + set). That churn made V8 rehash the
@@ -51,6 +53,9 @@ const transformersPatches = {
     build.onLoad({ filter: /[\\/]@huggingface[\\/]transformers[\\/]dist[\\/]transformers\.(node\.mjs|web\.js)$/ }, async ({ path }) => {
       let source = await readFile(path, 'utf8');
       source = replaceOnce(source, 'const argmax = max(logits.data)[1];', 'const argmax = nekoGreedyArgmax(logits.data);', path);
+      source = replaceOnce(source, '    let return_dict_items = {};', '    let return_dict_items = {};\n    let nekoWorkingScores;', path);
+      source = replaceOnce(source, '      const logits = outputs.logits.slice(null, -1, null).to("float32");',
+        '      const logits = nekoWorkingScores = nekoCopyLastLogits(outputs.logits, nekoWorkingScores);', path);
       source = replaceOnce(source, '    super(config);\n    this.tokens_to_ids = object_to_map(config.vocab);\n',
         '    super(config);\n    this.tokens_to_ids = config.vocab instanceof Map ? config.vocab : object_to_map(config.vocab);\n', path);
       source = replaceOnce(source, '    this.bpe_ranks = new Map(this.merges.map((x, i) => [JSON.stringify(x), i]));\n',
@@ -61,6 +66,19 @@ const transformersPatches = {
       source = replaceOnce(source, '  if (cachedResponse !== void 0 && typeof cachedResponse !== "string") {',
         '  if (typeof cachedResponse === "string") return { exists: true, fromCache: true };\n  if (cachedResponse !== void 0) {', path);
       return { loader: 'js', contents: `${source}
+function nekoCopyLastLogits(source, previous) {
+  const dims = source.dims;
+  if (source.type !== "float32" || dims.length !== 3 || dims[1] !== 1) return source.slice(null, -1, null).to("float32");
+  const data = source.data;
+  if (!(data instanceof Float32Array) || data.length === 0 || data.length !== dims[0] * dims[2]) return source.slice(null, -1, null).to("float32");
+  const previousData = previous?.data;
+  if (!(previousData instanceof Float32Array) || previous.dims.length !== 2 || previous.dims[0] !== dims[0] || previous.dims[1] !== dims[2]
+    || previousData.length !== data.length || previousData.buffer === data.buffer) {
+    previous = new Tensor2("float32", new Float32Array(data.length), [dims[0], dims[2]]);
+  }
+  previous.data.set(data);
+  return previous;
+}
 function nekoGreedyArgmax(data) {
   const length = data.length;
   if (length === 0) throw Error("Array must not be empty");

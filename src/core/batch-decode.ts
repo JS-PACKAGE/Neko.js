@@ -91,8 +91,8 @@ export class BatchDecoder {
       const target = new Uint8Array(targetData.buffer, targetData.byteOffset, targetData.byteLength);
       const rowBytes = source.byteLength / active.length;
       for (let physical = 0; physical < active.length; physical++) target.set(source.subarray(physical * rowBytes, (physical + 1) * rowBytes), active[physical]! * rowBytes);
-      // Upstream Tensor.slice copies the sampled position, so this backing store is
-      // independent of PreviousLogitsRelease and can be reused on the next step.
+      // Generation copies the sampled position into separate score storage, so this backing store
+      // remains independent of PreviousLogitsRelease and can be reused on the next step.
       const result = { ...outputs, logits: this.logits };
       if (!Object.entries(outputs).some(([name, tensor]) => name !== 'logits' && tensor === raw)) dispose([raw]);
       for (const tensor of Object.values(result)) if (tensor instanceof Tensor) temporary.delete(tensor);
