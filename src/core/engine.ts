@@ -17,7 +17,7 @@ import { JsonGrammarProcessor, tokenizerByteTrie, type TokenByteTrie } from './j
 import { promptTokenCache, renderInferenceChat, structuredInstruction, type PromptTokenCache, type PreprocessingReuse } from './tokenizer.js';
 import { pinnedTextResources } from './text-resources.js';
 import { encodeImagesSeparately, useFastPatchFlattening } from './vision-patches.js';
-import { PreviousLogitsRelease, keepLastLogits, releaseConsumedDecoderOutputs } from './decoder-patches.js';
+import { PreviousLogitsRelease, keepDecodeEmbeddingsOnGpu, keepLastLogits, releaseConsumedDecoderOutputs } from './decoder-patches.js';
 import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot } from './reuse.js';
 import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
 import { hashValue } from '../web/source.js';
@@ -186,7 +186,10 @@ export class VisionEngine {
       const sessionOptions = { executionProviders: backend.executionProviders, ...(threads ? { intraOpNumThreads: threads, extra } : {}), ...(profilePrefix && backend.runtime === 'node' ? { enableProfiling: true, profileFilePrefix: profilePrefix } : {}) };
       // The text-only class (a subclass of the conditional-generation model) builds only the embedding and decoder sessions; the vision
       // encoder session is created on the first request with images (see `ensureVision`), so text-only use never pays for it.
-      const loading = Qwen3_5ForCausalLM.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device, session_options: sessionOptions });
+      const gpuEmbeddings = backend.runtime === 'browser' && backend.device === 'webgpu';
+      // Transformers.js replaces this map with the decoder's pinned-cache outputs; it remains on the embedding session only.
+      const textSessionOptions = gpuEmbeddings ? { ...sessionOptions, preferredOutputLocation: { inputs_embeds: 'gpu-buffer' as const } } : sessionOptions;
+      const loading = Qwen3_5ForCausalLM.from_pretrained(selected.id, { ...options, dtype: selected.dtype, device: backend.device, session_options: textSessionOptions });
       loading.catch(() => undefined); // The rejection is surfaced by the awaits below; this only prevents it being unhandled while tokenizer work is pending.
       let model: PreTrainedModel;
       let processor: Processor; let context: unknown; let vocabulary: unknown;
@@ -201,6 +204,7 @@ export class VisionEngine {
         processor = new Qwen3VLProcessor({}, { tokenizer, image_processor: imageProcessor }, template);
         model = await loading;
         keepLastLogits(model);
+        if (gpuEmbeddings) keepDecodeEmbeddingsOnGpu(model);
         if (backend.runtime === 'node') releaseConsumedDecoderOutputs(model);
         encodeImagesSeparately(model as unknown as Parameters<typeof encodeImagesSeparately>[0]);
       } catch (error) {

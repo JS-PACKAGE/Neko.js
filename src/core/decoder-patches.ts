@@ -17,6 +17,28 @@ export function keepLastLogits(model: PreTrainedModel): void {
     run.call(session, feeds.num_logits_to_keep?.data[0] === 0n ? { ...feeds, num_logits_to_keep: last } : feeds, ...rest) });
 }
 
+/**
+ * WebGPU embeddings otherwise make a GPU→CPU→GPU round trip on every decode step.
+ * Prefill stays CPU-readable for the image-feature merge; single-token decode can pass
+ * the GPU tensor straight to the decoder. Forward owns only the embeddings it creates.
+ */
+export function keepDecodeEmbeddingsOnGpu(model: Pick<PreTrainedModel, 'encode_text' | 'forward'>): void {
+  const encode = model.encode_text.bind(model); const forward = model.forward.bind(model);
+  let owned: Tensor | undefined;
+  model.encode_text = async (inputs) => {
+    const tensor: Tensor = await encode(inputs);
+    if (tensor.location === 'gpu-buffer') {
+      owned = tensor;
+      if (inputs.input_ids.dims[1] !== 1) await tensor.ort_tensor.getData(true);
+    }
+    return tensor;
+  };
+  model.forward = async (inputs) => {
+    try { return await forward(inputs); }
+    finally { if (owned?.location === 'gpu-buffer') owned.dispose(); owned = undefined; }
+  };
+}
+
 /** The buffer of a CPU tensor that owns all of it; anything shared or partial is left to the garbage collector. */
 function ownedBuffer(value: unknown): ArrayBuffer | undefined {
   const { location, data } = (value ?? {}) as DecoderValue;

@@ -571,6 +571,8 @@ Node CPU 上，decoder 的 4-bit `MatMulNBits` 層會將 activation 逐 block �
 
 Vision encoder 在所有 backend 上每次只處理一張圖片。固定的 0.8B encoder 原本就遮蔽不同圖片之間的 attention（Qwen vision encoder 只在單張圖片內做 attention），因此每張圖片的特徵不變，而 attention 計算量由「所有 patch 數的平方」降為「各圖片 patch 數平方的總和」：兩張圖片的 Node CPU 提示，vision encoding 由約 10.4 s 降到約 6.7 s，greedy 輸出相同。瀏覽器 WebGPU 上，固定的 0.8B vision graph（`fp16` 與 `all-q4`）也會在 SHA-256 驗證後於記憶體中修補，移除這個跨圖片 attention bias（單張圖片時全為 0）；ONNX Runtime Web 帶 bias 的 attention 是瓶頸。在 Apple M5 的 headed Chromium 上，640×400 圖片的首個 token 由約 1.03–1.27 s 降到約 0.53–0.77 s，1600×1200 圖片由約 13.7–14.5 s 降到約 3.0–3.2 s，兩張圖片的提示由約 2.8–3.2 s 降到約 1.0–1.1 s；這些提示的 greedy 輸出相同。Node CPU 的 0.8B vision graph 也套用同一修補；原生 attention 去除 bias 後會走不同 kernel：4000×3000 圖片的 vision encoding 由約 8.2–9.3 s 降到約 7.5–7.8 s（交替三次），小圖片無可量測差異，且輸出並非逐位元相同：五個測試描述中四個相同、一個措辭不同，上述兩張圖片回答的第二句也不同。
 
+瀏覽器 WebGPU 會將單 token decode 的 embedding 保留在 GPU，不再於每一步讀回 CPU 再上傳。Prefill embedding 仍可由 CPU 讀取，以合併圖片特徵。內部建立的 GPU embedding 在 decoder 完成或失敗後釋放；呼叫端提供的 embedding 不會轉移所有權。實際 Chromium 文字與圖片報告在量測情境中保留相同生成內容。這不改變 Node 路徑，也不代表效能保證。
+
 ### 並行下載與 validator-bound 續傳
 
 ```ts
