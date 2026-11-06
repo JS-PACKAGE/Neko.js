@@ -27,6 +27,30 @@ test('schema grammar enforces closed objects, required keys and array/string bou
   }
 });
 
+test('string bounds count code points across literal and escaped surrogate boundaries', () => {
+  for (const [json, length] of [
+    ['""', 0], ['"e\\u0301"', 2], ['"漢"', 1], ['"\u{1f600}"', 1],
+    ['"\\ud83d\\ude00"', 1], ['"\\ud83d"', 1], ['"\\ude00"', 1],
+    ['"\\ud83d\\ud83d\\ude00"', 2], ['"\\ude00\\ud83d"', 2],
+    ['"\\ud83d\\ude00\\ude00"', 2], ['"\\ud83dA\\ude00"', 3],
+    ['"\\u0000\\n"', 2], ['"a\u{10000}\u{10ffff}"', 3],
+  ] as const) {
+    const bytes = encoder.encode(json);
+    const cases = [
+      { bounds: { minLength: length, maxLength: length }, expected: true },
+      { bounds: { minLength: length + 1 }, expected: false },
+      ...(length ? [{ bounds: { maxLength: length - 1 }, expected: false }] : []),
+    ];
+    for (const { bounds, expected } of cases) {
+      for (let split = 0; split <= bytes.length; split++) {
+        const state = new JsonGrammarState({ type: 'string', ...bounds });
+        assert.equal(state.push(bytes.subarray(0, split)) && state.push(bytes.subarray(split)) && state.complete,
+          expected, `${json} / ${JSON.stringify(bounds)} / byte ${split}`);
+      }
+    }
+  }
+});
+
 test('integer constraints accept integral exponent values and reject fractional values', () => {
   for (const value of [1e21, -1e21]) {
     const state = new JsonGrammarState(compileStructuredSchema({ type: 'integer', const: value }).grammar!);

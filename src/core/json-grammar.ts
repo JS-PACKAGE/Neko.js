@@ -93,6 +93,15 @@ function remainingEnum(values: readonly unknown[], used: ReadonlySet<string>): r
   }
   return remaining;
 }
+/** Match string iteration, including lone surrogates, without allocating an array for every prefix check. */
+function codePointLength(value: string): number {
+  let length = 0;
+  for (let at = 0, end = value.length; at < end; at++, length++) {
+    const unit = value.charCodeAt(at);
+    if (unit >= 0xd800 && unit <= 0xdbff) { const next = value.charCodeAt(at + 1); if (next >= 0xdc00 && next <= 0xdfff) at++; }
+  }
+  return length;
+}
 interface Frame { schema: GrammarSchema; value: unknown[] | Record<string, unknown>; phase: 'key' | 'colon' | 'value' | 'comma' | 'next'; key?: string; }
 interface Lexeme { kind: 'string' | 'number' | 'literal'; schema: GrammarSchema; text: string; key: boolean; escape: boolean; unicode: string | null; literal?: string; }
 /** A copyable incremental recognizer. Tokens and UTF-8 code points can end at any byte boundary. */
@@ -122,7 +131,7 @@ export class JsonGrammarState {
   /** Code points the open string may still gain; only meaningful while `freeStringClass` is not null. */
   get freeStringBudget(): number {
     const token = this.lexeme;
-    return token?.schema.maxLength === undefined ? Infinity : token.schema.maxLength - Array.from(token.text).length;
+    return token?.schema.maxLength === undefined ? Infinity : token.schema.maxLength - codePointLength(token.text);
   }
   get complete(): boolean {
     if (this.utfRemaining) return false;
@@ -145,7 +154,7 @@ export class JsonGrammarState {
     }
     if (byte < 128) return this.character(String.fromCharCode(byte));
     if (this.lexeme?.kind !== 'string' || this.lexeme.escape || this.lexeme.unicode !== null) return false;
-    if (this.lexeme.schema.maxLength !== undefined && Array.from(this.lexeme.text).length >= this.lexeme.schema.maxLength) return false;
+    if (this.lexeme.schema.maxLength !== undefined && codePointLength(this.lexeme.text) >= this.lexeme.schema.maxLength) return false;
     if (byte >= 0xc2 && byte <= 0xdf) { this.utfRemaining = 1; this.utfCode = byte & 31; this.utfMin = 0x80; }
     else if (byte >= 0xe0 && byte <= 0xef) { this.utfRemaining = 2; this.utfCode = byte & 15; this.utfMin = 0x800; }
     else if (byte >= 0xf0 && byte <= 0xf4) { this.utfRemaining = 3; this.utfCode = byte & 7; this.utfMin = 0x10000; }
@@ -170,7 +179,7 @@ export class JsonGrammarState {
   }
   private stringPrefix(): boolean {
     const token = this.lexeme!;
-    if (token.schema.maxLength !== undefined && Array.from(token.text).length > token.schema.maxLength) return false;
+    if (token.schema.maxLength !== undefined && codePointLength(token.text) > token.schema.maxLength) return false;
     const frame = this.frames.at(-1);
     if (token.key && frame?.schema.type === 'object') return this.stringCandidates()!.some((value) => value.startsWith(token.text));
     // Enumerations can hold thousands of paragraph IDs; test the prefix against a sorted copy built once per enum.
@@ -178,7 +187,7 @@ export class JsonGrammarState {
   }
   private valid(schema: GrammarSchema, value: unknown): boolean {
     if (schema.enum && !canonicalSet(schema.enum).has(canonical(value))) return false;
-    if (typeof value === 'string') { const length = Array.from(value).length; if (length < (schema.minLength ?? 0) || length > (schema.maxLength ?? Infinity)) return false; }
+    if (typeof value === 'string') { const length = codePointLength(value); if (length < (schema.minLength ?? 0) || length > (schema.maxLength ?? Infinity)) return false; }
     if (schema.type === 'integer' && (typeof value !== 'number' || !Number.isInteger(value))) return false;
     return true;
   }
@@ -248,7 +257,7 @@ export class JsonGrammarState {
       if (character === '\\') {
         const next = this.nextCodePoints();
         if (next && !next.length) return false;
-        if (token.schema.maxLength !== undefined && Array.from(token.text).length >= token.schema.maxLength && !/[\uD800-\uDBFF]$/.test(token.text)) return false;
+        if (token.schema.maxLength !== undefined && codePointLength(token.text) >= token.schema.maxLength && !/[\uD800-\uDBFF]$/.test(token.text)) return false;
         token.escape = true; return true;
       }
       if (character === '"') {
