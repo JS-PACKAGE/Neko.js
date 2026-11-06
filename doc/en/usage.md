@@ -97,6 +97,8 @@ try {
 
 Default `inferStructured` uses a real tokenizer-aware JSON grammar and returns `structured.mode: 'tokenizer-constrained-runtime-validation'`. Its supported subset is primitive types, primitive `enum`/`const`, string `minLength`/`maxLength`, closed objects with `properties`, `required` and `additionalProperties: false`, and homogeneous arrays with `minItems`, `maxItems` and `uniqueItems`. Numeric bounds, composition and other unsupported grammar keywords fail with `SCHEMA_UNSUPPORTED` before engine acquisition; invalid schemas fail with `SCHEMA_INVALID`. There is no silent fallback.
 
+The first constrained request per engine builds a reusable token trie, yielding to host tasks between setup stages. This reduces uninterrupted startup work but does not bound task duration or guarantee faster inference; use worker execution when model work must stay off the UI thread.
+
 Explicit `structuredMode: 'validation-only'` opts into the existing full supported Draft-07 runtime validator and JSON-boundary decoding, returning `'json-boundary-runtime-validation'`. Both modes report dialect `'draft-07'`, validate the full result, reject malformed/incomplete JSON and schema violations (`STRUCTURED_OUTPUT`), and do not repair output or guarantee factuality. Boundary handling never slices a valid-looking substring from invalid output. `inferStructured<const S>` returns `SchemaValue<S>`; retain literal schema types with `as const` for precise TypeScript inference.
 
 ### Exact inference planning

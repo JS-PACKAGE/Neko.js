@@ -115,10 +115,10 @@ test('ordinary string masks match full parsing for every one-byte and two-byte t
   }
 });
 
-test('ByteLevel token pieces preserve partial UTF-8 bytes instead of replacement characters', () => {
+test('ByteLevel token pieces preserve partial UTF-8 bytes instead of replacement characters', async () => {
   const tokenizer = new TokenizersBackend({ model: { type: 'BPE', vocab: { '"': 0, 'Ã': 1, '©': 2, x: 3 }, merges: [] },
     decoder: { type: 'ByteLevel' }, added_tokens: [], normalizer: null, pre_tokenizer: null, post_processor: null }, {});
-  const trie = tokenizerByteTrie(tokenizer);
+  const trie = await tokenizerByteTrie(tokenizer);
   assert.deepEqual(Array.from(trie.pieces.get(1)!), [0xc3]);
   assert.deepEqual(Array.from(trie.pieces.get(2)!), [0xa9]);
   const processor = new JsonGrammarProcessor(compileStructuredSchema({ type: 'string', enum: ['é'] }).grammar!, trie, 1, [4]);

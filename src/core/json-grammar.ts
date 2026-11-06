@@ -531,10 +531,13 @@ export interface ByteLevelTokenizer {
   readonly all_special_ids: readonly number[];
   get_vocab(): Iterable<readonly [string, number]>;
 }
+// Separate one-time vocabulary/trie setup from adjacent planning and inference work.
+function yieldTrieSetup(): Promise<void> { return new Promise<void>((resolve) => setTimeout(resolve, 0)); }
 /** ByteLevel is inspected, not inferred from a lossy one-token UTF-8 decode. */
-export function tokenizerByteTrie(tokenizer: ByteLevelTokenizer): TokenByteTrie {
+export async function tokenizerByteTrie(tokenizer: ByteLevelTokenizer): Promise<TokenByteTrie> {
   const decoder: unknown = tokenizer._tokenizerJSON?.decoder;
   if (typeof decoder !== 'object' || decoder === null || !('type' in decoder) || decoder.type !== 'ByteLevel') throw new NekoError('Constrained decoding requires the pinned ByteLevel tokenizer decoder', 'preprocess', 'SCHEMA_UNSUPPORTED');
+  await yieldTrieSetup();
   const lookup = new Int16Array(0x200).fill(-1);
   for (let byte = 0, code = 256; byte < 256; byte++) {
     const visible = byte >= 33 && byte <= 126 || byte >= 161 && byte <= 172 || byte >= 174;
@@ -566,7 +569,10 @@ export function tokenizerByteTrie(tokenizer: ByteLevelTokenizer): TokenByteTrie 
     }
   });
   offsets[vocabulary.length] = position;
-  return new TokenByteTrie({ ids, offsets, data });
+  await yieldTrieSetup();
+  const trie = new TokenByteTrie({ ids, offsets, data });
+  await yieldTrieSetup();
+  return trie;
 }
 interface Logits { dims: number[]; data: ArrayLike<number | bigint>; }
 interface GrammarProcessor { <T extends Logits>(ids: bigint[][], logits: T): T; _call<T extends Logits>(ids: bigint[][], logits: T): T; }

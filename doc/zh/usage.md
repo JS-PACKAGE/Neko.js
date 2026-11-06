@@ -95,6 +95,8 @@ try {
 
 預設 `structuredMode: 'constrained'` 使用真正的 tokenizer-aware JSON grammar，逐 token 限制合法候選，再完整執行 runtime schema 驗證；結果 `structured.mode` 為 `'tokenizer-constrained-runtime-validation'`。支援 primitive type、primitive `enum`／`const`、字串 `minLength`／`maxLength`、以 `properties`／`required`／`additionalProperties: false` 定義的封閉物件，以及同質 `items` 陣列的 `minItems`／`maxItems`／`uniqueItems`。數值上下界、schema composition 等不受 grammar 支援的契約在取得引擎前以 `SCHEMA_UNSUPPORTED` 拒絕，不會暗中 fallback。只有明確指定 `structuredMode: 'validation-only'` 才使用既有完整受支援 Draft-07 runtime validator 與 JSON 邊界停止，結果模式為 `'json-boundary-runtime-validation'`；無效 schema 為 `SCHEMA_INVALID`。兩種模式皆驗證整個 JSON，不修補生成、不擷取子字串，不保證完成或事實正確。完成 JSON 的同一 token 若含尾端多餘內容仍會拒絕；數字根值需空白或 EOS 確立邊界。Schema／JSON 不符為 `STRUCTURED_OUTPUT`。
 
+每個引擎的首次 constrained 請求會建立可重用的 token trie，並在建置階段間讓出 host task，減少啟動時連續佔用執行緒的工作；這不保證單一 task 的耗時上限或推理更快。若模型工作必須離開 UI 執行緒，請使用 worker 模式。
+
 ### 精確推理規劃
 
 ```ts

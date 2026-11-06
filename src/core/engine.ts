@@ -443,7 +443,7 @@ export class VisionEngine {
       });
       inputs.input_ids = new Tensor('int64', ids, [requests.length, width]);
       inputs.attention_mask = new Tensor('int64', mask, [requests.length, width]);
-      const trie = schema.effective.grammar ? (this.tokenTrie ??= tokenizerByteTrie(this.processor.tokenizer!)) : undefined;
+      const trie = schema.effective.grammar ? (this.tokenTrie ??= await tokenizerByteTrie(this.processor.tokenizer!)) : undefined;
       const results = await generateStructuredBatch({ model: this.model, processor: this.processor, identity: this.identity, backend: this.loadedBackend(), loadMs: this.loadMs, node: this.backend.runtime === 'node', started, trie,
         prefill: (modelInputs, forward, check) => prefillBatch(modelInputs, rows, forward, this.reuseCache, stagedPrefixes, check) }, inputs, rows, schema.settings, maxNewTokens);
       if (results.some((result) => result.status === 'fulfilled')) {
@@ -537,7 +537,7 @@ export class VisionEngine {
     const signal = options.signal; const started = performance.now(); const structured = compiled !== undefined;
     const budget = context.budget;
     const checkDeadline = () => { if (budget && performance.now() >= budget.deadline) throw new NekoError('Report duration budget exhausted', 'generate', 'BUDGET_EXCEEDED'); };
-    const constrainedTrie = compiled?.grammar ? (this.tokenTrie ??= tokenizerByteTrie(this.processor.tokenizer!)) : undefined;
+    const constrainedTrie = compiled?.grammar ? (this.tokenTrie ??= await tokenizerByteTrie(this.processor.tokenizer!)) : undefined;
     const prepared = await this.prepareInputs(options, instruction, false, context).catch((error: unknown) => {
       if (options.diagnostics) attachGenerationDiagnostic(error, { version: 1, stageId: context.diagnosticStage?.id ?? (structured ? 'structured' : 'inference'), attempt: context.diagnosticStage?.attempt ?? 1, stage: error instanceof NekoError ? error.stage : 'preprocess', code: error instanceof NekoError ? error.code : 'OPERATION_FAILED', finishReason: signal?.aborted ? 'aborted' : 'not-started', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, outputCharacters: 0 });
       throw error;
