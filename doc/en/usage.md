@@ -309,6 +309,8 @@ try {
 
 `createNeko({ onEvent: (event) => { /* record content-free metrics */ } })` observes `NekoEvent`: request start/end IDs, `operation`, queue/duration timings, outcome/error code, token usage, model/execution identity, or engine-loaded timing. `NekoOperation` covers `infer`, `inferStructured`, `planInference`, `ask`, `describe`, `load`, and `warmup`; it is not a promise of a distinct outer event for every composed helper. Events contain no prompts, generated text or source documents. Observer exceptions/rejections never affect results, observers are not awaited, and worker forwarding is best-effort. This factory observer differs from per-report `DescribeOptions.onEvent`, which reports report stages.
 
+Per-report `DescribeOptions.onEvent` callbacks are awaited in order in both inline and worker execution. A callback failure rejects the report with its available checkpoint; cancellation or a report duration budget stops waiting for a pending callback. These callbacks are not best-effort lifecycle observers.
+
 ### Report modes, planning and recovery
 
 ```js

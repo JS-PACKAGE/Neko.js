@@ -7,7 +7,6 @@ import { createNeko, NekoError, type NekoEvent, type NekoOptions } from '../src/
 import { EngineCache } from '../src/cache/engine.js';
 import { getRegisteredModelProfile } from '../src/cache/registry.js';
 import type { InferOptions, InferenceResult, RuntimeReadiness, VisionEngine } from '../src/core/engine.js';
-import { encode } from '../src/runtime/protocol.js';
 
 const profile = getRegisteredModelProfile();
 const result: InferenceResult = {
@@ -103,12 +102,6 @@ test('structured inference, planning and document operations retain their public
 
 test('createNeko rejects non-function observers before acquiring a runtime', async () => {
   for (const onEvent of [true, null, {}, 'callback']) await assert.rejects(createNeko({ onEvent: onEvent as never }), (error: unknown) => error instanceof NekoError && error.code === 'INVALID_INPUT' && error.cause instanceof TypeError);
-});
-
-test('worker configuration encodes onEvent as one-way notify', () => {
-  const modes: string[] = [];
-  encode([{ onEvent() {} }], (_callback, mode, key) => { modes.push(`${key}:${mode}`); return 1; });
-  assert.deepEqual(modes, ['onEvent:notify']);
 });
 
 // No model load is required: this worker operation fails on inert page validation.

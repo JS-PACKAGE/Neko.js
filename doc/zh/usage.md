@@ -307,6 +307,8 @@ try {
 
 `createNeko({ onEvent: (event) => { /* 記錄不含內容的 metrics */ } })` 觀察 `NekoEvent`：request start／end ID、`operation`、queue／duration timing、outcome／error code、token usage、model／execution 身分，或 engine loaded timing。`NekoOperation` 包含 `infer`、`inferStructured`、`planInference`、`ask`、`describe`、`load`、`warmup`；不保證每個組合 helper 都有獨立外層事件。事件不含 prompt、生成文字或來源文件。Observer throw／reject 不影響結果，SDK 不 await observer，worker 轉送為 best-effort。Factory observer 與逐報告的 `DescribeOptions.onEvent` 不同；後者回報報告 stages。
 
+逐報告的 `DescribeOptions.onEvent` 在 inline 與 worker 模式都會依序等待 callback 完成。Callback 失敗會讓報告拒絕並保留可用的 checkpoint；取消或報告耗時預算會停止等待未完成的 callback。這些 callback 不是 best-effort 的 lifecycle observer。
+
 ### 報告模式、規劃、稽核與續跑
 
 ```js

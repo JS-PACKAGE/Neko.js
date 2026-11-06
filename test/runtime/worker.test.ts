@@ -187,6 +187,90 @@ test('a report predicate that throws undefined retains its callback cause and re
   } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('worker report events finish in order without waiting for lifecycle observers', { timeout: 30_000 }, async () => {
+  const directory = await cacheDirectory();
+  const lifecycle: string[] = [];
+  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'worker',
+    onEvent: (event) => { if (event.type === 'request') lifecycle.push(`${event.operation}:${event.phase}`); return new Promise<void>(() => undefined); },
+  });
+  const page: SDK.Page = { url: 'https://example.test/', paragraphs: [
+    { id: 'p1', text: 'The exhibit opens Monday.', source: { kind: 'html' } },
+    { id: 'p2', text: 'Admission is free on Friday.', source: { kind: 'html' } },
+  ], images: [] };
+  const stages: string[] = [];
+  try {
+    const report = await neko.describe(page, { mode: 'extractive', format: 'json', hardDeadlineMs: 5_000,
+      onEvent: async (event) => { await Promise.resolve(); stages.push(event.id); },
+    });
+    assert.deepEqual(stages, ['section:0', 'section:1', 'summary', 'conclusion']);
+    assert.deepEqual(report.sections.map((section) => section.keyPoints), page.paragraphs.map((paragraph) => [paragraph.text]));
+    assert.deepEqual(lifecycle, ['describe:start', 'describe:end']);
+    assert.equal((await neko.diagnostics()).transport?.outstandingCallbacks, 0);
+  } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('worker report streams deliver their final report after stage events and close', { timeout: 30_000 }, async (context) => {
+  const directory = await cacheDirectory();
+  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'worker' });
+  const page: SDK.Page = { url: 'https://example.test/', paragraphs: [{ id: 'p1', text: 'The exhibit opens Monday.', source: { kind: 'html' } }], images: [] };
+  const sequence: string[] = [];
+  try {
+    for await (const event of neko.describeStream(page, { mode: 'extractive', signal: context.signal, hardDeadlineMs: 5_000 })) {
+      if (event.type === 'stage') sequence.push(event.event.id);
+      else if (event.type === 'result') {
+        sequence.push('result'); assert.ok(typeof event.result !== 'string');
+        assert.equal(event.result.page.summary, page.paragraphs[0]!.text);
+      } else assert.fail('Extractive reports must not emit generated tokens');
+    }
+    assert.deepEqual(sequence, ['section:0', 'summary', 'conclusion', 'result']);
+  } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('worker report event failures preserve their cause and stop subsequent stages', { timeout: 30_000 }, async (context) => {
+  const directory = await cacheDirectory();
+  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'worker' });
+  const page: SDK.Page = { url: 'https://example.test/', paragraphs: [{ id: 'p1', text: 'The exhibit opens Monday.', source: { kind: 'html' } }], images: [] };
+  try {
+    for (const cause of [undefined, new Error('Report callback rejected')]) {
+      const stages: string[] = [];
+      await assert.rejects(neko.describe(page, { mode: 'extractive', signal: context.signal,
+        onEvent: async (event) => { stages.push(event.id); throw cause; },
+      }), (error: unknown) => {
+        assert.ok(error instanceof NekoError);
+        assert.equal(error.code, 'OPERATION_FAILED'); assert.equal(Object.hasOwn(error, 'cause'), true); assert.equal(error.cause, cause);
+        assert.ok('checkpoint' in error);
+        assert.deepEqual(Object.keys((error.checkpoint as SDK.ReportCheckpoint).completed), ['section:0']);
+        return true;
+      });
+      assert.deepEqual(stages, ['section:0']);
+      assert.equal((await neko.queueStatus()).running, null);
+    }
+    const report = await neko.describe(page, { mode: 'extractive', format: 'json', signal: context.signal, onEvent: () => undefined });
+    assert.equal(report.page.summary, page.paragraphs[0]!.text);
+  } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('worker report budgets cancel a pending event callback and release queued work', { timeout: 30_000 }, async (context) => {
+  const directory = await cacheDirectory();
+  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'worker', queue: { maxPending: 1 } });
+  const page: SDK.Page = { url: 'https://example.test/', paragraphs: [{ id: 'p1', text: 'The exhibit opens Monday.', source: { kind: 'html' } }], images: [] };
+  const entered = Promise.withResolvers<void>();
+  const work: Promise<unknown>[] = [];
+  try {
+    const report = neko.describe(page, { mode: 'extractive', signal: context.signal, budget: { maxDurationMs: 1_000 },
+      onEvent: () => { entered.resolve(); return new Promise<void>(() => undefined); },
+    });
+    const rejected = assert.rejects(report, (error: unknown) => error instanceof NekoError && error.code === 'BUDGET_EXCEEDED');
+    work.push(rejected);
+    await Promise.race([entered.promise, rejected.then(() => { throw new Error('Report failed before the event callback'); })]);
+    const queued = neko.cache.model.status(); work.push(queued);
+    assert.equal((await neko.queueStatus()).pending, 1);
+    const [, status] = await Promise.all([rejected, queued]);
+    assert.equal(status.downloaded, false);
+    assert.equal((await neko.queueStatus()).running, null);
+  } finally { await neko.dispose(); await Promise.allSettled(work); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('worker creation isolates parent-only Node execution flags', { timeout: 30_000 }, async () => {
   const directory = await cacheDirectory();
   const sdk = new URL('../../node/index.js', import.meta.url).href;

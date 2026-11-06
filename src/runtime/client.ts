@@ -89,7 +89,7 @@ class Connection {
   private nextRequest = 1;
   private nextCallback = 1;
   private readonly pending = new Map<number, PendingRequest>();
-  private readonly callbacks = new Map<number, { fn: (...args: unknown[]) => unknown; key: string }>();
+  private readonly callbacks = new Map<number, { fn: (...args: unknown[]) => unknown; key: string; lifecycleObserver: boolean }>();
   private stopped = false;
   private closed = false;
   private disposePromise?: Promise<void>;
@@ -129,7 +129,8 @@ class Connection {
       try {
         const value = encode(args, (callback, _mode, key) => {
           const callbackId = this.nextCallback++;
-          this.callbacks.set(callbackId, { fn: callback, key }); callbackIds.push(callbackId);
+          const lifecycleObserver = method === 'create' && key === 'onEvent' && callback === (args[0] as NekoOptions).onEvent;
+          this.callbacks.set(callbackId, { fn: callback, key, lifecycleObserver }); callbackIds.push(callbackId);
           return callbackId;
         });
         signal?.addEventListener('abort', abort, { once: true });
@@ -163,7 +164,7 @@ class Connection {
     if (message.type === 'callback') {
       const state = this.pending.get(message.requestId);
       const callback = this.callbacks.get(message.callbackId);
-      if (callback?.key === 'onEvent') {
+      if (callback?.lifecycleObserver) {
         // Observers are independent of request cancellation and acknowledgement barriers.
         try { void Promise.resolve(callback.fn(...decode(message.args) as unknown[])).catch(() => undefined); }
         catch { /* Ignore observer failures without exposing their contents. */ }
