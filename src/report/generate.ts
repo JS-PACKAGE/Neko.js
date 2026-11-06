@@ -263,6 +263,8 @@ interface PlannedReport {
   sourceFacts: ReportSourceFact[];
   sectionPlan: string[][];
   prompt: (phase: ReportPhase, source: unknown, multiple?: boolean) => string;
+  /** The part of `prompt` before the stage's source data; identical for every stage of a phase. */
+  promptHead: (phase: ReportPhase, multiple?: boolean) => string;
   fits: (phase: ReportPhase, source: unknown, multiple?: boolean) => boolean;
   context: number;
 }
@@ -281,7 +283,8 @@ function reportPlanning(engine: VisionEngine, snapshot: PageSnapshot, options: D
     const prompts: Record<ReportPhase, string> = traditional
       ? { image: '請描述圖片中實際可見的內容，不可用網頁中繼資料代替觀察圖片。', section: '請將每段引用資料的不同事實分別整理成繁體中文重點。', summary: '請將引用來源和實際圖片描述整合成繁體中文頁面摘要，保留所引用的 ID。', conclusion: '請根據引用的原始來源事實或有損摘要，寫繁體中文整體結論，保留所引用的 ID。' }
       : { image: 'Describe only what is visibly present in the supplied image, not its metadata.', section: 'Give separate key points for distinct facts in every supplied quote.', summary: 'Summarize the supplied source facts, retaining their evidence IDs.', conclusion: 'Conclude from the supplied source facts; reduced generated claims may be lossy.' };
-    const prompt = (phase: ReportPhase, source: unknown, multiple = phase === 'section') => `${instruction}${outputInstructions[multiple ? 'multiple' : 'single']}${prompts[phase]}\n${traditional ? '引用資料（JSON）：' : 'Source JSON:'}\n${JSON.stringify(source)}\n${traditional ? '現在請只輸出所要求的 JSON 物件，文字必須為臺灣繁體中文。' : 'Now output only the requested JSON object.'}`;
+    const promptHead = (phase: ReportPhase, multiple = phase === 'section') => `${instruction}${outputInstructions[multiple ? 'multiple' : 'single']}${prompts[phase]}\n${traditional ? '引用資料（JSON）：' : 'Source JSON:'}\n`;
+    const prompt = (phase: ReportPhase, source: unknown, multiple = phase === 'section') => `${promptHead(phase, multiple)}${JSON.stringify(source)}\n${traditional ? '現在請只輸出所要求的 JSON 物件，文字必須為臺灣繁體中文。' : 'Now output only the requested JSON object.'}`;
     const fits = (phase: ReportPhase, source: unknown, multiple = phase === 'section') => engine.countPrompt(prompt(phase, source, multiple), multiple ? compiledClaimSchema : compiledAtomicSchema) + maxNewTokens <= context;
       const available = context - maxNewTokens - engine.countPrompt(prompt('section', []), compiledClaimSchema) - 96;
       if (available < 1) throw new NekoError('Context budget cannot accommodate report instructions and output', 'report', 'CONTEXT_LIMIT');
@@ -306,7 +309,7 @@ function reportPlanning(engine: VisionEngine, snapshot: PageSnapshot, options: D
       if (current.length) chunks.push(current);
       validateSourceFacts(sourceFacts, snapshot);
       const sectionPlan = chunks.map((chunk) => chunk.map(({ evidenceId }) => evidenceId));
-  return { chunks, sourceFacts, sectionPlan, prompt, fits, context };
+  return { chunks, sourceFacts, sectionPlan, prompt, promptHead, fits, context };
 }
 
 /** Uses the same exact prompt and source chunk plan as generation; future output costs stay unknown. */
@@ -397,12 +400,14 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
       await recordCheckpoint();
       throw new ReportError(cause instanceof NekoError ? cause : new NekoError(String(cause), 'report', 'OPERATION_FAILED', { cause }), copyCheckpoint(checkpoint));
     }
-    const { chunks, sourceFacts, sectionPlan, prompt, fits } = planned;
+    const { chunks, sourceFacts, sectionPlan, prompt, promptHead, fits } = planned;
     for (const { id, citation } of sourceFacts) evidence.set(id, citation);
     const quotes = new Set(sourceFacts.map(({ citation }) => citation.quote.trim()));
     const run = async (id: string, phase: ReportPhase, source: unknown, allowed: Set<string>, prepared?: PreparedImage): Promise<EvidenceClaim[]> => {
       check();
       const multiple = phase === 'section' || id.startsWith('reduce:');
+      // Section and reduction stages repeat their phase's instructions, so their state is reused; the single summary and
+      // conclusion stages keep reusing only the shared structured-output system turn.
       const schema = multiple ? claimSchema : atomicClaimSchema;
       const compiled = multiple ? compiledClaimSchema : compiledAtomicSchema;
       const text = prompt(phase, source, multiple);
@@ -432,7 +437,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         const beforePreprocess = checkpoint.timings.preprocessMs; const beforeGeneration = checkpoint.timings.generationMs;
         let items: EvidenceClaim[]; let result: InferenceResult | undefined;
         try {
-          const generated = await engine.inferStructured({ ...options, prompt: request, ...(prepared === undefined ? {} : { image: prepared.input }), schema, maxNewTokens, contextWindowTokens: context, onToken: (token) => { try { options.onToken?.(token, phase); } catch (cause) { callbackFailed = true; throw cause; } } }, { preparedImages: prepared === undefined ? undefined : [prepared], structured: compiled, budget, diagnosticStage: { id, attempt: attempt + 1 } });
+          const generated = await engine.inferStructured({ ...options, prompt: request, ...(prepared === undefined ? {} : { image: prepared.input }), schema, maxNewTokens, contextWindowTokens: context, onToken: (token) => { try { options.onToken?.(token, phase); } catch (cause) { callbackFailed = true; throw cause; } } }, { preparedImages: prepared === undefined ? undefined : [prepared], structured: compiled, budget, diagnosticStage: { id, attempt: attempt + 1 }, ...(multiple ? { promptPrefix: promptHead(phase, multiple) } : {}) });
           result = generated;
           items = validateClaims(multiple ? generated.value : { claims: [generated.value] }, allowed, language, quotes);
         } catch (cause) {

@@ -280,7 +280,7 @@ Handle 屬於 engine，不是可攜 snapshot；已釋放、淘汰或其他 engin
 
 以 `createNeko({ reuseCache: { stateEntries, stateBytes, visionEntries, visionBytes } })` 限制 entries／bytes（正 safe integers）。預設 4 個 state／512 MiB、8 個 vision entries／64 MiB。過大的 state／features 會失敗，已保留 entries 可被淘汰。`reuseCacheInfo()` 提供 accounting，engine 尚未取得時為 `null`；`releaseGenerationState(handle)` 釋放單一 state，`clearReuseCaches()` 清除兩種快取。釋放／dispose engine 會使 handle 失效。`scripts/smoke-reuse.mjs` 是明確執行的真實模型重用 exercise；檔案存在不代表已在你的後端通過。
 
-結構化呼叫（`inferStructured` 與報告階段）在固定 system 指令至少 32 個 token、請求僅含文字且未傳入 `reuse` 時，另外保留最多四個 engine 私有的 decoder state。它們不是 handle、不改變結果形狀、與 handle 分開計入 `stateBytes` 限制（過大者略過），並以 `prefixEntries`、`prefixBytes`、`prefixHits`、`prefixMisses` 出現在 `reuseCacheInfo()`；`clearReuseCaches()` 會清除它們。
+結構化呼叫（`inferStructured` 與報告階段）在固定 system 指令至少 32 個 token、請求僅含文字且未傳入 `reuse` 時，另外保留最多四個 engine 私有的 decoder state。報告的段落與歸約階段會把重用範圍延伸到 user 回合開頭、該 phase 每個階段都重複的指令，因此每個階段只需 prefill 自己的來源資料。它們不是 handle、不改變結果形狀、與 handle 分開計入 `stateBytes` 限制（過大者略過），並以 `prefixEntries`、`prefixBytes`、`prefixHits`、`prefixMisses` 出現在 `reuseCacheInfo()`；`clearReuseCaches()` 會清除它們。
 
 ### 生成診斷與生命週期事件
 

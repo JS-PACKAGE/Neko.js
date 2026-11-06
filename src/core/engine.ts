@@ -40,7 +40,11 @@ export interface InferOptions extends ImageOptions {
 }
 export interface StructuredInferOptions<S = unknown> extends InferOptions { schema: S; structuredMode?: StructuredMode; }
 export interface InferencePlanOptions extends InferOptions { schema?: unknown; structuredMode?: StructuredMode; }
-export interface InternalInferenceContext { budget?: InferenceBudget | undefined; preparedImages?: PreparedImage[] | undefined; structured?: CompiledStructuredSchema | undefined; diagnosticStage?: { id: string; attempt: number } | undefined; }
+export interface InternalInferenceContext {
+  budget?: InferenceBudget | undefined; preparedImages?: PreparedImage[] | undefined; structured?: CompiledStructuredSchema | undefined; diagnosticStage?: { id: string; attempt: number } | undefined;
+  /** Leading text of `prompt` that repeats across calls (e.g. a report phase's instructions); extends the reusable fixed prefix. */
+  promptPrefix?: string | undefined;
+}
 export interface InferencePlan {
   inputTokens: number;
   maxNewTokens: number;
@@ -387,10 +391,12 @@ export class VisionEngine {
       let prefixTokens: bigint[] | undefined;
       // Fixed system turns (the structured-output instruction) are re-prefilled by every call; decoder state for them can be reused.
       if (chat.systemPrefix !== undefined && !planning && !decoded.length && options.reuse === undefined) {
-        const head = this.processor.tokenizer!.encode(chat.systemPrefix, { add_special_tokens: false }).map(BigInt);
-        if (head.length >= MIN_PREFIX_TOKENS && head.length < inputTokens) {
-          const tokens = Array.from(ids.data, BigInt);
-          if (head.every((token, index) => token === tokens[index])) prefixTokens = head;
+        // A caller-declared repeating head of the user turn extends the prefix; any token misalignment falls back to the system turn alone.
+        const extended = context.promptPrefix && options.prompt?.startsWith(context.promptPrefix) ? `${chat.systemPrefix}<|im_start|>user\n${context.promptPrefix}` : undefined;
+        const tokens = Array.from(ids.data, BigInt);
+        for (const text of extended && chat.text.startsWith(extended) ? [extended, chat.systemPrefix] : [chat.systemPrefix]) {
+          const head = this.processor.tokenizer!.encode(text, { add_special_tokens: false }).map(BigInt);
+          if (head.length >= MIN_PREFIX_TOKENS && head.length < inputTokens && head.every((token, index) => token === tokens[index])) { prefixTokens = head; break; }
         }
       }
       if (budget) {
