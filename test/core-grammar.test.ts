@@ -136,6 +136,23 @@ test('ByteLevel token pieces preserve partial UTF-8 bytes instead of replacement
   } finally { scores.dispose(); }
 });
 
+test('added Unicode token pieces stay constrained while empty and special pieces never leak into masks', async () => {
+  const tokenizer = new TokenizersBackend({ model: { type: 'BPE', vocab: { '"': 0, x: 1, '': 2, stop: 3 }, merges: [] },
+    decoder: { type: 'ByteLevel' }, added_tokens: [{ id: 4, content: '雪', special: false }, { id: 5, content: '', special: false }, { id: 6, content: '<end>', special: true }],
+    normalizer: null, pre_tokenizer: null, post_processor: null }, {});
+  const trie = await tokenizerByteTrie(tokenizer);
+  const list = new LogitsProcessorList();
+  list.push(new JsonGrammarProcessor(compileStructuredSchema({ type: 'string', enum: ['雪'] }).grammar!, trie, 1, [6]));
+  const scores = new Tensor('float32', new Float32Array(7).fill(1), [1, 7]);
+  const cases: [bigint[], number][] = [[[99n], 0], [[99n, 0n], 4], [[99n, 0n, 4n], 0], [[99n, 0n, 4n, 0n], 6]];
+  try {
+    for (const [sequence, allowed] of cases) {
+      (scores.data as Float32Array).fill(1); list._call([sequence], scores);
+      assert.deepEqual(Array.from(scores.data), Array.from({ length: 7 }, (_, id) => id === allowed ? 1 : -Infinity));
+    }
+  } finally { scores.dispose(); }
+});
+
 test('logits grammar masks same-token trailing payload and premature EOS using the actual callable list API', () => {
   const trie = new TokenByteTrie([[0, encoder.encode('{}')], [1, encoder.encode('{} prose')], [2, encoder.encode('{')], [3, encoder.encode('}')]]);
   const list = new LogitsProcessorList();

@@ -529,7 +529,7 @@ export class TokenByteTrie {
 export interface ByteLevelTokenizer {
   readonly _tokenizerJSON: { decoder?: unknown; added_tokens?: readonly { id: number; content: string; special?: boolean }[] };
   readonly all_special_ids: readonly number[];
-  get_vocab(): Iterable<readonly [string, number]>;
+  get_vocab(): ReadonlyMap<string, number>;
 }
 // Separate one-time vocabulary/trie setup from adjacent planning and inference work.
 function yieldTrieSetup(): Promise<void> { return new Promise<void>((resolve) => setTimeout(resolve, 0)); }
@@ -547,20 +547,21 @@ export async function tokenizerByteTrie(tokenizer: ByteLevelTokenizer): Promise<
   const added = new Map<number, Uint8Array>();
   const encoder = new TextEncoder();
   for (const token of tokenizer._tokenizerJSON.added_tokens ?? []) if (!token.special) added.set(token.id, encoder.encode(token.content));
-  const vocabulary: (readonly [string, number])[] = [];
-  let total = 0;
-  for (const entry of tokenizer.get_vocab()) {
-    const [token, id] = entry;
-    if (specials.has(id)) continue;
+  const vocabulary = tokenizer.get_vocab();
+  let count = 0; let total = 0;
+  vocabulary.forEach((id, token) => {
+    if (specials.has(id)) return;
     const length = added.get(id)?.length ?? token.length;
-    if (!length) continue;
-    vocabulary.push(entry); total += length;
-  }
-  const ids = new Int32Array(vocabulary.length); const offsets = new Uint32Array(vocabulary.length + 1); const data = new Uint8Array(total);
-  let position = 0;
-  vocabulary.forEach(([token, id], entry) => {
-    ids[entry] = id; offsets[entry] = position;
+    if (!length) return;
+    count++; total += length;
+  });
+  const ids = new Int32Array(count); const offsets = new Uint32Array(count + 1); const data = new Uint8Array(total);
+  let position = 0; let entry = 0;
+  vocabulary.forEach((id, token) => {
+    if (specials.has(id)) return;
     const encoded = added.get(id);
+    if (!(encoded?.length ?? token.length)) return;
+    ids[entry] = id; offsets[entry++] = position;
     if (encoded) { data.set(encoded, position); position += encoded.length; return; }
     for (let index = 0; index < token.length; index++) {
       const byte = token.charCodeAt(index) < lookup.length ? lookup[token.charCodeAt(index)]! : -1;
@@ -568,7 +569,7 @@ export async function tokenizerByteTrie(tokenizer: ByteLevelTokenizer): Promise<
       data[position++] = byte;
     }
   });
-  offsets[vocabulary.length] = position;
+  offsets[count] = position;
   await yieldTrieSetup();
   const trie = new TokenByteTrie({ ids, offsets, data });
   await yieldTrieSetup();
