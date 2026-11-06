@@ -195,6 +195,28 @@ test('masked finite scores cannot rescue nonfinite allowed scores, including arr
   }
 });
 
+test('late finite scores remain feasible while nonfinite dense masks reject after masking the entire row', () => {
+  const width = 2048;
+  for (const inString of [false, true]) {
+    const grammar = compileStructuredSchema(inString ? { type: 'string' } : { type: 'integer', enum: [1] }).grammar!;
+    const text = inString ? 'a' : '1';
+    const pieces = Array.from({ length: width }, (_, id) => [id, encoder.encode(id === width - 1 ? '\u0000' : inString && id === 0 ? '"' : text)] as const);
+    const trie = new TokenByteTrie(pieces);
+    for (const hasFinite of [false, true]) {
+      const words = new Uint32Array(width).fill(0x7fa12345);
+      words[width - 1] = 0x41100000;
+      if (hasFinite) words[width - 3] = 0x3f000000;
+      const expected = words.slice(); expected[width - 1] = 0xff800000;
+      const logits = { dims: [1, width], data: new Float32Array(words.buffer) };
+      const processor = new JsonGrammarProcessor(grammar, trie, 0, []);
+      const run = () => processor([inString ? [0n] : []], logits);
+      if (hasFinite) run();
+      else assert.throws(run, (error: unknown) => error instanceof NekoError && error.code === 'STRUCTURED_OUTPUT' && error.stage === 'generate');
+      assert.deepEqual(words, expected);
+    }
+  }
+});
+
 test('UTF-8 grammar rejects overlong encodings, surrogates and incompatible enum prefixes before token selection', () => {
   for (const bytes of [[0xe0, 0x80], [0xed, 0xa0], [0xf0, 0x80], [0xf4, 0x90], [0x80]]) {
     const state = new JsonGrammarState(compileStructuredSchema({ type: 'string' }).grammar!);

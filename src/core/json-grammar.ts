@@ -594,11 +594,12 @@ class GrammarProcessorImplementation extends LogitsProcessor {
     this.trie.mark(this.state, this.mask);
     if (this.state.complete) for (const id of this.eos) if (id < width) this.mask[id] = 1;
     const data = logits.data as Float32Array;
+    const float32Row = data instanceof Float32Array && width === data.length;
     let possible = false;
     let start = 0;
     // Structural and enum states are usually sparse: fill invalid gaps without copying allowed scores.
     // Bound this scan; ordinary strings and the remaining tail retain the linear loop.
-    if (data instanceof Float32Array && width === data.length && this.state.freeStringClass === null) {
+    if (float32Row && this.state.freeStringClass === null) {
       for (let count = 0; count < 1024 && start < width; count++) {
         const next = this.mask.indexOf(1, start);
         if (next < 0 || next >= width) { data.fill(-Infinity, start, width); start = width; break; }
@@ -607,7 +608,18 @@ class GrammarProcessorImplementation extends LogitsProcessor {
         start = next + 1;
       }
     }
-    for (let id = start; id < width; id++) { if (!this.mask[id]) data[id] = -Infinity; else if (Number.isFinite(data[id])) possible = true; }
+    // Once one allowed score is finite, Float32 views need only masking. Preserve observable ArrayLike/proxy reads.
+    if (float32Row && ArrayBuffer.isView(data)) {
+      if (!possible) {
+        for (; start < width; start++) {
+          if (!this.mask[start]) data[start] = -Infinity;
+          else if (Number.isFinite(data[start])) { possible = true; start++; break; }
+        }
+      }
+      for (; start < width; start++) if (!this.mask[start]) data[start] = -Infinity;
+    } else {
+      for (let id = start; id < width; id++) { if (!this.mask[id]) data[id] = -Infinity; else if (Number.isFinite(data[id])) possible = true; }
+    }
     if (!possible) throw new NekoError('No token can extend the constrained JSON output', 'generate', 'STRUCTURED_OUTPUT');
     return logits;
   }
