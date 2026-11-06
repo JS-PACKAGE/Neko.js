@@ -359,6 +359,8 @@ function acceptsUtf8Prefix(data: Uint8Array, start: number, end: number, pending
 }
 /** A trie node that reaches this many children gets a byte-indexed lookup table while the trie is built. */
 const WIDE_TRIE_NODE = 16;
+const TRIE_BUILD_CHUNK = 1024;
+const TRIE_BUILD_SLICE_MS = 8;
 /** Child/sibling trie in typed arrays: one object per vocabulary entry would cost hundreds of MB for a 248k-token vocabulary. */
 class FlatTrie {
   private first: Int32Array;
@@ -440,7 +442,7 @@ export class TokenByteTrie {
   private readonly continuations = new Map<number, Uint8Array>();
   private readonly widths = new Map<number, Uint16Array>();
   private readonly slotCount: number;
-  constructor(input: Iterable<readonly [number, Uint8Array]> | PackedTokenPieces) {
+  private constructor(input: Iterable<readonly [number, Uint8Array]> | PackedTokenPieces) {
     const { ids, offsets, data } = Symbol.iterator in input ? packPieces(input) : input;
     const count = ids.length; const total = data.length;
     this.ids = ids; this.offsets = offsets; this.data = data; this.structural = new Uint8Array(count);
@@ -454,11 +456,25 @@ export class TokenByteTrie {
     }
     this.pieces = { size: count, get: (id) => { const entry = id >= 0 && id < slots.length ? slots[id]! : -1; return entry < 0 ? undefined : data.subarray(offsets[entry]!, offsets[entry + 1]!); } };
     this.root = new FlatTrie(total + 1, count); this.structuralRoot = new FlatTrie(structuralBytes + 1, count);
-    for (let entry = 0; entry < count; entry++) {
-      this.root.insert(data, offsets[entry]!, offsets[entry + 1]!, entry);
-      if (this.structural[entry]) this.structuralRoot.insert(data, offsets[entry]!, offsets[entry + 1]!, entry);
+  }
+  /** Yield periodically during large builds; publish only the completely trimmed trie. */
+  static async create(input: Iterable<readonly [number, Uint8Array]> | PackedTokenPieces): Promise<TokenByteTrie> {
+    let started = performance.now();
+    const trie = new TokenByteTrie(input);
+    const { ids, offsets, data } = trie;
+    for (let first = 0; first < ids.length; first += TRIE_BUILD_CHUNK) {
+      const end = Math.min(first + TRIE_BUILD_CHUNK, ids.length);
+      for (let entry = first; entry < end; entry++) {
+        trie.root.insert(data, offsets[entry]!, offsets[entry + 1]!, entry);
+        if (trie.structural[entry]) trie.structuralRoot.insert(data, offsets[entry]!, offsets[entry + 1]!, entry);
+      }
+      if (end < ids.length && performance.now() - started >= TRIE_BUILD_SLICE_MS) {
+        await yieldTrieSetup();
+        started = performance.now();
+      }
     }
-    this.root.trim(); this.structuralRoot.trim();
+    trie.root.trim(); trie.structuralRoot.trim();
+    return trie;
   }
   /** Ordinary string pieces for one pending-UTF-8 class, as a bitmap by token ID; built once and shared by every later token in a string. */
   private continuation(continuation: number): Uint8Array {
@@ -571,7 +587,7 @@ export async function tokenizerByteTrie(tokenizer: ByteLevelTokenizer): Promise<
   });
   offsets[count] = position;
   await yieldTrieSetup();
-  const trie = new TokenByteTrie({ ids, offsets, data });
+  const trie = await TokenByteTrie.create({ ids, offsets, data });
   await yieldTrieSetup();
   return trie;
 }

@@ -79,13 +79,13 @@ test('finite unique domains and closed objects reject prefixes with no possible 
   }
 });
 
-test('ordinary string token masks preserve all UTF-8 boundary classes and reject structural payloads', () => {
+test('ordinary string token masks preserve all UTF-8 boundary classes and reject structural payloads', async () => {
   const pieces: [number, Uint8Array][] = [
     [0, encoder.encode('abc漢')], [1, Uint8Array.of(0xc3)], [2, Uint8Array.of(0xa9)], [3, Uint8Array.of(0x80)],
     [4, encoder.encode('"')], [5, encoder.encode('" extra')], [6, encoder.encode('\\u0061')],
     [7, Uint8Array.of(0xed, 0xa0)], [8, Uint8Array.of(0xe0, 0x80)], [9, Uint8Array.of(0xf4, 0x90)], [10, Uint8Array.of(10)],
   ];
-  const trie = new TokenByteTrie(pieces);
+  const trie = await TokenByteTrie.create(pieces);
   for (const [prefix, expected] of [
     [[34, 97], [0, 1, 4, 6]], [[34, 0xc3], [2, 3]], [[34, 0xe1], [2, 3]], [[34, 0xf1], [2, 3]],
     [[34, 0xe0], [2]], [[34, 0xed], [3]], [[34, 0xf0], [2]], [[34, 0xf4], [3]],
@@ -98,13 +98,13 @@ test('ordinary string token masks preserve all UTF-8 boundary classes and reject
   }
 });
 
-test('ordinary string masks match full parsing for every one-byte and two-byte token under all pending UTF-8 classes', () => {
+test('ordinary string masks match full parsing for every one-byte and two-byte token under all pending UTF-8 classes', async () => {
   const pieces: [number, Uint8Array][] = [];
   for (let byte = 0; byte < 256; byte++) {
     pieces.push([pieces.length, Uint8Array.of(byte)]);
     for (let next = 0; next < 256; next++) pieces.push([pieces.length, Uint8Array.of(byte, next)]);
   }
-  const trie = new TokenByteTrie(pieces);
+  const trie = await TokenByteTrie.create(pieces);
   for (const lead of [0, 0xc2, 0xe1, 0xf1, 0xe0, 0xed, 0xf0, 0xf4]) {
     const state = new JsonGrammarState({ type: 'string' });
     assert.equal(state.push(lead ? Uint8Array.of(34, lead) : Uint8Array.of(34)), true);
@@ -153,8 +153,8 @@ test('added Unicode token pieces stay constrained while empty and special pieces
   } finally { scores.dispose(); }
 });
 
-test('logits grammar masks same-token trailing payload and premature EOS using the actual callable list API', () => {
-  const trie = new TokenByteTrie([[0, encoder.encode('{}')], [1, encoder.encode('{} prose')], [2, encoder.encode('{')], [3, encoder.encode('}')]]);
+test('logits grammar masks same-token trailing payload and premature EOS using the actual callable list API', async () => {
+  const trie = await TokenByteTrie.create([[0, encoder.encode('{}')], [1, encoder.encode('{} prose')], [2, encoder.encode('{')], [3, encoder.encode('}')]]);
   const list = new LogitsProcessorList();
   list.push(new JsonGrammarProcessor(compileStructuredSchema({ type: 'object', additionalProperties: false }).grammar!, trie, 1, [4]));
   const scores = new Tensor('float32', new Float32Array(5).fill(1), [1, 5]);
@@ -166,12 +166,12 @@ test('logits grammar masks same-token trailing payload and premature EOS using t
   } finally { scores.dispose(); }
 });
 
-test('logits masking preserves allowed score bits and view boundaries for sparse and broad token sets', () => {
+test('logits masking preserves allowed score bits and view boundaries for sparse and broad token sets', async () => {
   const width = 4096;
   const grammar = compileStructuredSchema({ type: 'integer', enum: [1] }).grammar!;
   for (const ids of [[0, 11, 999, 1024, width - 1], Array.from({ length: width / 2 }, (_, index) => index * 2 + 1)]) {
     const allowed = new Set(ids);
-    const trie = new TokenByteTrie(ids.map((id) => [id, encoder.encode('1')] as const));
+    const trie = await TokenByteTrie.create(ids.map((id) => [id, encoder.encode('1')] as const));
     const words = new Uint32Array(width + 2).fill(0x3f800000);
     const values = [0x3f800000, 0x80000000, 0x7fa12345, 0x7f800000, 0xff800000];
     ids.forEach((id, index) => { words[id + 1] = values[index % values.length]!; });
@@ -184,9 +184,9 @@ test('logits masking preserves allowed score bits and view boundaries for sparse
   }
 });
 
-test('masked finite scores cannot rescue nonfinite allowed scores, including array-like logits', () => {
+test('masked finite scores cannot rescue nonfinite allowed scores, including array-like logits', async () => {
   const grammar = compileStructuredSchema({ type: 'integer', enum: [1] }).grammar!;
-  const trie = new TokenByteTrie([[1, encoder.encode('1')], [3, encoder.encode('1')]]);
+  const trie = await TokenByteTrie.create([[1, encoder.encode('1')], [3, encoder.encode('1')]]);
   const inputs: ArrayLike<number>[] = [Float32Array.of(7, NaN, 8, Infinity, 9), [7, NaN, 8, Infinity, 9], { 0: 7, 1: NaN, 2: 8, 3: Infinity, 4: 9, length: 5 }];
   for (const data of inputs) {
     const processor = new JsonGrammarProcessor(grammar, trie, 0, []);
@@ -195,13 +195,13 @@ test('masked finite scores cannot rescue nonfinite allowed scores, including arr
   }
 });
 
-test('late finite scores remain feasible while nonfinite dense masks reject after masking the entire row', () => {
+test('late finite scores remain feasible while nonfinite dense masks reject after masking the entire row', async () => {
   const width = 2048;
   for (const inString of [false, true]) {
     const grammar = compileStructuredSchema(inString ? { type: 'string' } : { type: 'integer', enum: [1] }).grammar!;
     const text = inString ? 'a' : '1';
     const pieces = Array.from({ length: width }, (_, id) => [id, encoder.encode(id === width - 1 ? '\u0000' : inString && id === 0 ? '"' : text)] as const);
-    const trie = new TokenByteTrie(pieces);
+    const trie = await TokenByteTrie.create(pieces);
     for (const hasFinite of [false, true]) {
       const words = new Uint32Array(width).fill(0x7fa12345);
       words[width - 1] = 0x41100000;
@@ -284,8 +284,8 @@ test('region marker expansion preserves exact text and ordered multimodal messag
   assert.throws(() => renderInferenceChat(processor, { messages }, undefined, [65]), TypeError);
 });
 
-test('flat token trie exposes exact bytes for sparse IDs, skips empty pieces and shares prefixes without losing siblings', () => {
-  const trie = new TokenByteTrie([[900, encoder.encode('ab')], [3, encoder.encode('a')], [7, new Uint8Array()], [12, encoder.encode('ac')], [13, encoder.encode('ab')]]);
+test('flat token trie exposes exact bytes for sparse IDs, skips empty pieces and shares prefixes without losing siblings', async () => {
+  const trie = await TokenByteTrie.create([[900, encoder.encode('ab')], [3, encoder.encode('a')], [7, new Uint8Array()], [12, encoder.encode('ac')], [13, encoder.encode('ab')]]);
   assert.equal(trie.pieces.size, 4);
   assert.deepEqual(Array.from(trie.pieces.get(900)!), [97, 98]);
   assert.deepEqual(Array.from(trie.pieces.get(13)!), [97, 98]);
@@ -302,7 +302,7 @@ test('flat token trie exposes exact bytes for sparse IDs, skips empty pieces and
   assert.deepEqual(inString.sort((a, b) => a - b), [3, 12, 13, 900]);
 });
 
-test('trie branches preserve sibling masks, prefix terminals and caller state across nested JSON and UTF-8 splits', () => {
+test('trie branches preserve sibling masks, prefix terminals and caller state across nested JSON and UTF-8 splits', async () => {
   for (const { schema, json } of [
     { schema: { type: 'any' }, json: '{"items":[true,false,null,-2.5e2,{"漢":"😀\\n"}]}' },
     { schema: { type: 'array', uniqueItems: true, items: { type: 'string', enum: ['a', 'ab', 'ac', '漢', '😀'] } }, json: '["a","ab","漢","😀"]' },
@@ -315,7 +315,7 @@ test('trie branches preserve sibling masks, prefix terminals and caller state ac
     }
     for (const text of ['{}', '{} prose', 'true', 'trueX', '"a"', '"ab"', '"az"', '\\u0041', '\\ud83d']) pieces.push([pieces.length, encoder.encode(text)]);
     for (const order of [pieces, [...pieces].reverse()]) {
-      const trie = new TokenByteTrie(order);
+      const trie = await TokenByteTrie.create(order);
       for (let split = 0; split <= bytes.length; split++) {
         const state = new JsonGrammarState(schema);
         assert.equal(state.push(bytes.subarray(0, split)), true);
@@ -396,7 +396,7 @@ test('multi-byte enum prefixes and unique-item remainders match the candidates\'
   }
 });
 
-test('maxLength string masks equal a per-piece reference at every code-point budget and pending UTF-8 class', () => {
+test('maxLength string masks equal a per-piece reference at every code-point budget and pending UTF-8 class', async () => {
   let seed = 11; const random = (n: number) => (seed = (seed * 1664525 + 1013904223) >>> 0) % n;
   // Whole characters of every UTF-8 width (including the E0/ED/F0/F4 lead classes), their byte fragments, and structural bytes.
   const characters = ['a', ' ', 'é', '漢', 'ࠀ', '퟿', '😀', '𐀀', '􏿿'];
@@ -404,7 +404,7 @@ test('maxLength string masks equal a per-piece reference at every code-point bud
   const pieces: [number, Uint8Array][] = [];
   const parts = [...characters.map((character) => encoder.encode(character)), ...fragments, encoder.encode('"'), encoder.encode('\\'), Uint8Array.of(10), encoder.encode('",')];
   for (let id = 0; id < 600; id++) pieces.push([id * 3 + 1, Uint8Array.from(Array.from({ length: 1 + random(4) }, () => Array.from(parts[random(parts.length)]!)).flat())]);
-  const trie = new TokenByteTrie(pieces);
+  const trie = await TokenByteTrie.create(pieces);
   const tokens = ['a', '漢', '😀', '\\n', '\\u0041', '\\ud83d', '\\ud83d\\ude00'];
   let checked = 0;
   for (let trial = 0; trial < 400; trial++) {
