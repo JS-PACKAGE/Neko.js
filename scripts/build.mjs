@@ -121,6 +121,12 @@ function nekoGreedyArgmax(data) {
       }
       build.onLoad({ filter: /[\\/]onnxruntime-web[\\/]dist[\\/]ort\.webgpu\.bundle\.min\.mjs$/ }, async ({ path }) => {
         let source = replaceOnce(await readFile(path, 'utf8'), 't=n.getBindGroupLayout(t)', 't=nekoGetGroupLayout(n,t)', path);
+        // Cache only the existing view's buffer identity; every check still reads live Memory.buffer.
+        // Update with the private view before publishing HEAP8, preserving constructor failure and setter reentry.
+        source = replaceOnce(source, 'function p(){Fe.buffer!=X.buffer&&se()}',
+          'var nekoHeapViewBuffer;function p(){Fe.buffer!=(nekoHeapViewBuffer??X.buffer)&&se()}', path);
+        source = replaceOnce(source, 'r.HEAP8=X=new Int8Array(e),',
+          'r.HEAP8=(X=new Int8Array(e),nekoHeapViewBuffer=e,X),', path);
         source = replaceOnce(source, 'fu(u,{327681:I=>{E=(p(),A)[I+8>>>2>>>0]}})',
           'E=(p(),A)[u>>>2>>>0]?((entry)=>{let external=0;fu(entry,{327681:I=>{external=(p(),A)[I+8>>>2>>>0]}});return external})(u):0', path);
         // Keep the stateless converters in their runtime factory, without new closures per bind group.
