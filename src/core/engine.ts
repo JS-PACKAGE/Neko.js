@@ -21,6 +21,7 @@ import { PreviousLogitsRelease, keepLastLogits, releaseConsumedDecoderOutputs } 
 import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot } from './reuse.js';
 import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
 import { hashValue } from '../web/source.js';
+import { generateStructuredBatch, type PreparedBatchRow } from './structured-batch.js';
 
 export type ChatContent = { type: 'text'; text: string } | { type: 'image'; image: ImageInput };
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string | ChatContent[]; }
@@ -45,6 +46,7 @@ export interface InternalInferenceContext {
   /** Leading text of `prompt` that repeats across calls (e.g. a report phase's instructions); extends the reusable fixed prefix. */
   promptPrefix?: string | undefined;
 }
+export interface StructuredBatchRequest { options: StructuredInferOptions; context: InternalInferenceContext; }
 export interface InferencePlan {
   inputTokens: number;
   maxNewTokens: number;
@@ -379,6 +381,70 @@ export class VisionEngine {
         attachGenerationDiagnostic(error, { version: 1, stageId: context.diagnosticStage?.id ?? 'structured', attempt: context.diagnosticStage?.attempt ?? 1, stage: error.stage, code: error.code, finishReason: result.finishReason, usage: result.usage, outputCharacters: result.text.length, ...(locations ? { schema: locations } : {}), ...(options.diagnostics !== true && options.diagnostics.capture ? { capture: { output: result.text.slice(0, options.diagnostics.capture.maxCharacters), truncated: result.text.length > options.diagnostics.capture.maxCharacters, maxCharacters: options.diagnostics.capture.maxCharacters } } : {}) });
       }
       throw error;
+    }
+  }
+  async inferStructuredBatch(requests: readonly StructuredBatchRequest[]): Promise<PromiseSettledResult<StructuredInferenceResult>[] | undefined> {
+    if (requests.length < 2 || requests.length > 4) return undefined;
+    if (requests.some(({ options, context }) => typeof options.prompt !== 'string' || options.messages !== undefined || options.image !== undefined || options.images !== undefined || options.onToken !== undefined || options.reuse !== undefined || options.generation?.sampling || context.preparedImages !== undefined || options.hardDeadlineMs !== undefined)) return undefined;
+    const schemas = requests.map(({ options, context }) => {
+      validateInferenceOptions(options);
+      validateDiagnosticOptions(options.diagnostics);
+      const compiled = compileStructuredSchema(options.schema, options.structuredMode);
+      return { compiled, effective: context.structured ?? compiled, settings: generationSettings(options.generation, this.vocabularySize) };
+    });
+    const first = requests[0]!;
+    const schema = schemas[0]!;
+    if (requests.some(({ options, context }, index) => {
+      const other = schemas[index]!;
+      return (options.maxNewTokens ?? 128) !== (first.options.maxNewTokens ?? 128) || this.contextLimit(options.contextWindowTokens) !== this.contextLimit(first.options.contextWindowTokens)
+        || context.budget?.deadline !== first.context.budget?.deadline || other.compiled.json !== schema.compiled.json || other.effective.json !== schema.effective.json || other.effective.mode !== schema.effective.mode
+        || JSON.stringify(other.effective.grammar) !== JSON.stringify(schema.effective.grammar) || JSON.stringify(other.settings) !== JSON.stringify(schema.settings);
+    })) return undefined;
+    if (this.generating) throw new NekoError('Engine already has active inference', 'generate', 'RUNTIME_BUSY');
+    const budgets = requests.map(({ context }) => context.budget).filter((budget) => budget !== undefined);
+    if (new Set(budgets).size !== budgets.length) return undefined;
+    const started = performance.now();
+    const prepared: { inputs: Record<string, unknown>; inputTokens: number; maxNewTokens: number; contextLimit: number; preprocessing?: PreprocessingReuse | undefined }[] = [];
+    const inputs: Record<string, Tensor> = {};
+    this.generating = true;
+    try {
+      for (let index = 0; index < requests.length; index++) {
+        const request = requests[index]!;
+        try {
+          prepared.push(await this.prepareInputs(request.options, structuredInstruction(schemas[index]!.effective), false, request.context));
+        } catch (error) {
+          if (request.options.diagnostics) attachGenerationDiagnostic(error, { version: 1, stageId: request.context.diagnosticStage?.id ?? 'structured', attempt: request.context.diagnosticStage?.attempt ?? 1, stage: error instanceof NekoError ? error.stage : 'preprocess', code: error instanceof NekoError ? error.code : 'OPERATION_FAILED', finishReason: request.options.signal?.aborted ? 'aborted' : 'not-started', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, outputCharacters: 0 });
+          throw error;
+        }
+      }
+      const maxNewTokens = first.options.maxNewTokens ?? 128;
+      const width = Math.max(...prepared.map((row) => row.inputTokens));
+      // Padding must never shrink a row's reserved output allowance or overflow its physical decoder context.
+      if (prepared.some((row) => row.maxNewTokens !== maxNewTokens || width + maxNewTokens > row.contextLimit || Object.keys(row.inputs).some((key) => key !== 'input_ids' && key !== 'attention_mask'))) return undefined;
+      const eos = this.model.generation_config?.eos_token_id;
+      if (!(Array.isArray(eos) ? eos : [eos]).some((id) => typeof id === 'number' && Number.isSafeInteger(id) && id >= 0 && id < this.vocabularySize)) return undefined;
+      const pad = this.model.generation_config?.pad_token_id ?? (Array.isArray(eos) ? eos[0] : eos);
+      if (typeof pad !== 'number' || !Number.isSafeInteger(pad) || pad < 0) return undefined;
+      const ids = new BigInt64Array(requests.length * width).fill(BigInt(pad));
+      const mask = new BigInt64Array(ids.length);
+      const rows: PreparedBatchRow[] = prepared.map((row, index) => {
+        const source = row.inputs.input_ids;
+        if (!(source instanceof Tensor) || source.dims[0] !== 1) throw new NekoError('Processor produced invalid batch input IDs', 'preprocess', 'MODEL_OUTPUT');
+        const offset = index * width + width - row.inputTokens;
+        for (let token = 0; token < row.inputTokens; token++) ids[offset + token] = BigInt(source.data[token]!);
+        mask.fill(1n, offset, (index + 1) * width);
+        return { request: requests[index]!, compiled: schemas[index]!.compiled, effective: schemas[index]!.effective, inputTokens: row.inputTokens, preprocessing: row.preprocessing };
+      });
+      inputs.input_ids = new Tensor('int64', ids, [requests.length, width]);
+      inputs.attention_mask = new Tensor('int64', mask, [requests.length, width]);
+      const trie = schema.effective.grammar ? (this.tokenTrie ??= tokenizerByteTrie(this.processor.tokenizer!)) : undefined;
+      const results = await generateStructuredBatch({ model: this.model, processor: this.processor, identity: this.identity, backend: this.loadedBackend(), loadMs: this.loadMs, node: this.backend.runtime === 'node', started, trie }, inputs, rows, schema.settings, maxNewTokens);
+      if (results.some((result) => result.status === 'fulfilled')) this.textReady = true;
+      return results;
+    } finally {
+      this.generating = false;
+      for (const row of prepared) disposeInputs(row.inputs);
+      disposeInputs(inputs);
     }
   }
   infer(options: InferOptions, context: InternalInferenceContext = {}): Promise<InferenceResult> { return this.runInference(options, undefined, undefined, context); }
