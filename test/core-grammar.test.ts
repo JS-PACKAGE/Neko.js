@@ -293,6 +293,35 @@ test('trie branches preserve sibling masks, prefix terminals and caller state ac
   }
 });
 
+test('grammar clones isolate accepted and rejected nested continuations from parents and siblings', () => {
+  for (const { schema, documents, rejected } of [
+    {
+      schema: { type: 'any' },
+      documents: ['{"__proto__":{"items":[1,2],"name":"first"},"b":true}', '{"__proto__":{"items":[1,3],"name":"second"},"b":false}', '{"__proto__":{"items":[1,4],"name":"third"},"b":null}'],
+      rejected: '{"__proto__":{"items":[1,2],"name":"first"},"__proto__":null}',
+    },
+    {
+      schema: { type: 'array', uniqueItems: true, items: { type: 'string', enum: ['a', 'b', 'c', 'd'] } },
+      documents: ['["a","b"]', '["a","c"]', '["a","d"]'],
+      rejected: '["a","a"]',
+    },
+  ] as const) {
+    let shared = 0;
+    while (shared < documents[0].length && documents.every((text) => text[shared] === documents[0][shared])) shared++;
+    for (let split = 0; split <= shared; split++) {
+      const parent = new JsonGrammarState(schema);
+      assert.equal(parent.push(encoder.encode(documents[0].slice(0, split))), true);
+      const left = parent.clone(); const right = parent.clone(); const failed = left.clone();
+      assert.equal(failed.push(encoder.encode(rejected.slice(split))), false);
+      assert.equal(left.push(encoder.encode(documents[0].slice(split))) && left.complete, true);
+      const grandchild = right.clone();
+      assert.equal(parent.push(encoder.encode(documents[1].slice(split))) && parent.complete, true);
+      assert.equal(right.push(encoder.encode(documents[2].slice(split))) && right.complete, true);
+      assert.equal(grandchild.push(encoder.encode(documents[0].slice(split))) && grandchild.complete, true);
+    }
+  }
+});
+
 test('enum string prefixes accept exactly the prefixes of remaining unique values, however large the enumeration', () => {
   const values = ['p1', 'p10', 'p100', 'p11', 'p2', 'p20', 'q', '', 'é', 'p1x'];
   const compiled = compileStructuredSchema({ type: 'array', uniqueItems: true, items: { type: 'string', enum: values } }).grammar!;
