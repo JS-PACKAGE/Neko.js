@@ -7,6 +7,7 @@ import { JsonGrammarProcessor, type TokenByteTrie } from './json-grammar.js';
 import { validateStructuredValue, type CompiledStructuredSchema } from './structured.js';
 import { attachGenerationDiagnostic, jsonErrorPosition, type GenerationDiagnostic } from './diagnostics.js';
 import { PreviousLogitsRelease } from './decoder-patches.js';
+import { BatchDecoder } from './batch-decode.js';
 import type { PreprocessingReuse } from './tokenizer.js';
 
 export interface PreparedBatchRow {
@@ -15,6 +16,7 @@ export interface PreparedBatchRow {
   effective: CompiledStructuredSchema;
   inputTokens: number;
   preprocessing?: PreprocessingReuse | undefined;
+  prefixTokens?: bigint[] | undefined;
 }
 interface BatchRuntime {
   model: PreTrainedModel;
@@ -25,9 +27,10 @@ interface BatchRuntime {
   node: boolean;
   started: number;
   trie?: TokenByteTrie | undefined;
+  prefill?: ((inputs: Record<string, unknown>, forward: (inputs: Record<string, unknown>) => Promise<Record<string, unknown>>, check: () => void) => Promise<Record<string, unknown>>) | undefined;
 }
 
-/** One decoder invocation, with independent recognizers and terminal accounting for every row. */
+/** One generation loop, with independent recognizers and terminal accounting for every row. */
 export async function generateStructuredBatch(runtime: BatchRuntime, inputs: Record<string, Tensor>, rows: PreparedBatchRow[], settings: Required<GenerationOptions>, maxNewTokens: number): Promise<PromiseSettledResult<StructuredInferenceResult>[]> {
   const { model, processor, trie } = runtime;
   const generationStarted = performance.now();
@@ -39,12 +42,14 @@ export async function generateStructuredBatch(runtime: BatchRuntime, inputs: Rec
     boundary: new JsonBoundary(), decoder: trie ? new TextDecoder('utf-8', { fatal: true }) : undefined,
     grammar: row.effective.grammar && trie ? new JsonGrammarProcessor(row.effective.grammar, trie, width, eosIds) : undefined,
     buffer: undefined as StopBuffer | undefined, result: undefined as PromiseSettledResult<StructuredInferenceResult> | undefined }));
+  const decoder = new BatchDecoder(rows.length, (index) => states[index]!.done);
   let globalError: unknown;
   let globalFailed = false;
   let output: unknown;
   let cache: DynamicCache | undefined;
   let latestOutputs: Record<string, unknown> | undefined;
   const originalForward = model.forward;
+  let firstForward = true;
   const listeners: { signal: AbortSignal; listener: () => void }[] = [];
   const checkGlobal = () => {
     if (globalFailed) return true;
@@ -157,10 +162,18 @@ export async function generateStructuredBatch(runtime: BatchRuntime, inputs: Rec
       const listener = () => { checkGlobal(); };
       signal.addEventListener('abort', listener, { once: true }); listeners.push({ signal, listener });
     }
+    const forward = async (inputs: Record<string, unknown>) => {
+      const result = await originalForward.call(model, inputs) as unknown as Record<string, unknown>;
+      latestOutputs = result;
+      return result;
+    };
     model.forward = async (modelInputs: Record<string, unknown>) => {
       if (modelInputs.past_key_values instanceof DynamicCache) cache = modelInputs.past_key_values;
       if (checkGlobal()) throw globalError;
-      const result = await originalForward.call(model, modelInputs);
+      const result = firstForward
+        ? runtime.prefill ? await runtime.prefill(modelInputs, forward, () => { if (checkGlobal()) throw globalError; }) : await forward(modelInputs)
+        : await decoder.forward(modelInputs, forward);
+      firstForward = false;
       latestOutputs = result as unknown as Record<string, unknown>;
       return result;
     };
@@ -178,6 +191,7 @@ export async function generateStructuredBatch(runtime: BatchRuntime, inputs: Rec
   } catch (error) { for (const state of states) if (!state.result) reject(state, error); }
   finally {
     model.forward = originalForward;
+    decoder.dispose();
     for (const { signal, listener } of listeners) signal.removeEventListener('abort', listener);
     const elapsed = (performance.now() - generationStarted) / rows.length;
     for (const { request } of rows) if (request.context.budget?.timings) request.context.budget.timings.generationMs += elapsed;

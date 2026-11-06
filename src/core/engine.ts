@@ -22,6 +22,7 @@ import { InferenceReuseCache, inputVisionIdentity, type GenerationStateSnapshot 
 import { attachGenerationDiagnostic, jsonErrorPosition, validateDiagnosticOptions, type GenerationDiagnostic, type GenerationDiagnosticOptions } from './diagnostics.js';
 import { hashValue } from '../web/source.js';
 import { generateStructuredBatch, type PreparedBatchRow } from './structured-batch.js';
+import { prefillBatch } from './batch-prefill.js';
 
 export type ChatContent = { type: 'text'; text: string } | { type: 'image'; image: ImageInput };
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string | ChatContent[]; }
@@ -404,8 +405,9 @@ export class VisionEngine {
     const budgets = requests.map(({ context }) => context.budget).filter((budget) => budget !== undefined);
     if (new Set(budgets).size !== budgets.length) return undefined;
     const started = performance.now();
-    const prepared: { inputs: Record<string, unknown>; inputTokens: number; maxNewTokens: number; contextLimit: number; preprocessing?: PreprocessingReuse | undefined }[] = [];
+    const prepared: { inputs: Record<string, unknown>; inputTokens: number; prefixTokens?: bigint[] | undefined; maxNewTokens: number; contextLimit: number; preprocessing?: PreprocessingReuse | undefined }[] = [];
     const inputs: Record<string, Tensor> = {};
+    const stagedPrefixes = new Map<string, GenerationStateSnapshot>();
     this.generating = true;
     try {
       for (let index = 0; index < requests.length; index++) {
@@ -433,16 +435,21 @@ export class VisionEngine {
         const offset = index * width + width - row.inputTokens;
         for (let token = 0; token < row.inputTokens; token++) ids[offset + token] = BigInt(source.data[token]!);
         mask.fill(1n, offset, (index + 1) * width);
-        return { request: requests[index]!, compiled: schemas[index]!.compiled, effective: schemas[index]!.effective, inputTokens: row.inputTokens, preprocessing: row.preprocessing };
+        return { request: requests[index]!, compiled: schemas[index]!.compiled, effective: schemas[index]!.effective, inputTokens: row.inputTokens, prefixTokens: row.prefixTokens, preprocessing: row.preprocessing };
       });
       inputs.input_ids = new Tensor('int64', ids, [requests.length, width]);
       inputs.attention_mask = new Tensor('int64', mask, [requests.length, width]);
       const trie = schema.effective.grammar ? (this.tokenTrie ??= tokenizerByteTrie(this.processor.tokenizer!)) : undefined;
-      const results = await generateStructuredBatch({ model: this.model, processor: this.processor, identity: this.identity, backend: this.loadedBackend(), loadMs: this.loadMs, node: this.backend.runtime === 'node', started, trie }, inputs, rows, schema.settings, maxNewTokens);
-      if (results.some((result) => result.status === 'fulfilled')) this.textReady = true;
+      const results = await generateStructuredBatch({ model: this.model, processor: this.processor, identity: this.identity, backend: this.loadedBackend(), loadMs: this.loadMs, node: this.backend.runtime === 'node', started, trie,
+        prefill: (modelInputs, forward, check) => prefillBatch(modelInputs, rows, forward, this.reuseCache, stagedPrefixes, check) }, inputs, rows, schema.settings, maxNewTokens);
+      if (results.some((result) => result.status === 'fulfilled')) {
+        this.textReady = true;
+        for (const [key, snapshot] of stagedPrefixes) { this.reuseCache.commitPrefix(key, snapshot); stagedPrefixes.delete(key); }
+      }
       return results;
     } finally {
       this.generating = false;
+      for (const snapshot of stagedPrefixes.values()) this.reuseCache.discardState(snapshot);
       for (const row of prepared) disposeInputs(row.inputs);
       disposeInputs(inputs);
     }

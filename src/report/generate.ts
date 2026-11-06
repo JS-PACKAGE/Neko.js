@@ -475,7 +475,8 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
       if (batchUnavailable || onToken || options.generation?.sampling || options.hardDeadlineMs !== undefined) return;
       const rows = [];
       let reservedTokens = 0;
-      for (let index = start; index < Math.min(chunks.length, start + 4); index++) {
+      // Two rows limit padding and completion skew; four measured slower on the news report.
+      for (let index = start; index < Math.min(chunks.length, start + 2); index++) {
         const id = `section:${index}`;
         if (checkpoint.completed[id] || checkpoint.attempts.some((item) => item.id === id)) break;
         const chunk = chunks[index]!;
@@ -500,7 +501,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
       try {
         outcomes = await engine.inferStructuredBatch(rows.map((row) => ({
           options: { ...batchOptions, prompt: row.request, schema: claimSchema, maxNewTokens, contextWindowTokens: context },
-          context: { structured: compiledClaimSchema, budget: row.budget, diagnosticStage: { id: row.id, attempt: 1 } },
+          context: { structured: compiledClaimSchema, budget: row.budget, diagnosticStage: { id: row.id, attempt: 1 }, promptPrefix: promptHead('section', true) },
         })));
       } catch (reason) {
         outcomes = rows.map(() => ({ status: 'rejected' as const, reason }));
