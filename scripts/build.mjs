@@ -57,10 +57,11 @@ const transformersPatches = {
         '  if (typeof cachedResponse === "string") return { exists: true, fromCache: true };\n  if (cachedResponse !== void 0) {', path);
       return { loader: 'js', contents: `${source}
 function nekoGreedyArgmax(data) {
-  if (data.length === 0) throw Error("Array must not be empty");
+  const length = data.length;
+  if (length === 0) throw Error("Array must not be empty");
   let best = data[0];
   let index = 0;
-  for (let i = 1; i < data.length; ++i) {
+  for (let i = 1; i < length; ++i) {
     const value = data[i];
     if (value > best) { best = value; index = i; }
   }
