@@ -102,12 +102,12 @@ function codePointLength(value: string): number {
   }
   return length;
 }
-// Frames and their collected values are shared by clones; replace them on writes.
-interface Frame { readonly schema: GrammarSchema; readonly value: unknown[] | Record<string, unknown>; readonly phase: 'key' | 'colon' | 'value' | 'comma' | 'next'; readonly key?: string; }
+// Immutable linked frames and their collected values are shared by clones; replace them on writes.
+interface Frame { readonly parent: Frame | undefined; readonly schema: GrammarSchema; readonly value: unknown[] | Record<string, unknown>; readonly phase: 'key' | 'colon' | 'value' | 'comma' | 'next'; readonly key?: string; }
 interface Lexeme { kind: 'string' | 'number' | 'literal'; schema: GrammarSchema; text: string; key: boolean; escape: boolean; unicode: string | null; literal?: string; }
 /** A copyable incremental recognizer. Tokens and UTF-8 code points can end at any byte boundary. */
 export class JsonGrammarState {
-  private frames: Frame[] = [];
+  private frame: Frame | undefined;
   private lexeme: Lexeme | undefined;
   private rootDone = false;
   private utfRemaining = 0;
@@ -116,7 +116,7 @@ export class JsonGrammarState {
   constructor(private readonly schema: GrammarSchema) {}
   clone(): JsonGrammarState {
     const state = new JsonGrammarState(this.schema);
-    state.frames = this.frames.slice();
+    state.frame = this.frame;
     state.lexeme = this.lexeme && { ...this.lexeme };
     state.rootDone = this.rootDone; state.utfRemaining = this.utfRemaining; state.utfCode = this.utfCode; state.utfMin = this.utfMin;
     return state;
@@ -166,7 +166,7 @@ export class JsonGrammarState {
   }
   private stringCandidates(): string[] | undefined {
     const token = this.lexeme!;
-    const frame = this.frames.at(-1);
+    const frame = this.frame;
     return token.key && frame?.schema.type === 'object'
       ? Object.keys(frame.schema.properties ?? {}).filter((key) => !Object.hasOwn(frame.value, key))
       : token.schema.enum && sortedEnumStrings(token.schema.enum) as string[];
@@ -174,7 +174,7 @@ export class JsonGrammarState {
   /** Code points that can follow the open string's text (remaining object keys or enumeration values); undefined when unrestricted. */
   private nextCodePoints(): readonly number[] | undefined {
     const token = this.lexeme!;
-    const frame = this.frames.at(-1);
+    const frame = this.frame;
     if (token.key && frame?.schema.type === 'object') return Object.keys(frame.schema.properties ?? {}).filter((key) => !Object.hasOwn(frame.value, key) && key.startsWith(token.text) && key.length > token.text.length).map((key) => key.codePointAt(token.text.length)!);
     return token.schema.enum && followingCodePoints(sortedEnumStrings(token.schema.enum), token.text);
   }
@@ -190,7 +190,7 @@ export class JsonGrammarState {
   private stringPrefix(): boolean {
     const token = this.lexeme!;
     if (token.schema.maxLength !== undefined && codePointLength(token.text) > token.schema.maxLength) return false;
-    const frame = this.frames.at(-1);
+    const frame = this.frame;
     if (token.key && frame?.schema.type === 'object') return this.stringCandidates()!.some((value) => value.startsWith(token.text));
     // Enumerations can hold thousands of paragraph IDs; test the prefix against a sorted copy built once per enum.
     return token.schema.enum === undefined || anyStartsWith(sortedEnumStrings(token.schema.enum), token.text);
@@ -203,16 +203,16 @@ export class JsonGrammarState {
   }
   private finish(value: unknown, schema: GrammarSchema): boolean {
     if (!this.valid(schema, value)) return false;
-    const frame = this.frames.at(-1);
+    const frame = this.frame;
     if (!frame) { this.rootDone = true; return true; }
     if (Array.isArray(frame.value)) {
       if (frame.schema.uniqueItems && frame.value.some((item) => canonical(item) === canonical(value))) return false;
-      this.frames[this.frames.length - 1] = { ...frame, value: [...frame.value, value], phase: 'comma' };
+      this.frame = { ...frame, value: [...frame.value, value], phase: 'comma' };
     } else {
       if (frame.key === undefined) return false;
       const values = { ...frame.value };
       Object.defineProperty(values, frame.key, { value, enumerable: true, configurable: true, writable: true });
-      this.frames[this.frames.length - 1] = { ...frame, value: values, phase: 'comma' };
+      this.frame = { ...frame, value: values, phase: 'comma' };
     }
     return true;
   }
@@ -226,10 +226,10 @@ export class JsonGrammarState {
   private close(frame: Frame): boolean {
     if (Array.isArray(frame.value)) { if (frame.value.length < (frame.schema.minItems ?? 0)) return false; }
     else if (frame.schema.required?.some((key) => !Object.hasOwn(frame.value, key))) return false;
-    this.frames.pop(); return this.finish(frame.value, frame.schema);
+    this.frame = this.frame?.parent; return this.finish(frame.value, frame.schema);
   }
   private start(character: string, schema: GrammarSchema): boolean {
-    const parent = this.frames.at(-1);
+    const parent = this.frame;
     if (schema.enum && parent?.schema.uniqueItems && Array.isArray(parent.value)) {
       const usedValues = parent.value;
       if (!usedValues.length) { if (!schema.enum.length) return false; }
@@ -240,8 +240,8 @@ export class JsonGrammarState {
       }
     }
     const accepts = (type: GrammarSchema['type']) => schema.type === 'any' || schema.type === type;
-    if (character === '{' && accepts('object')) { this.frames.push({ schema, value: {}, phase: 'key' }); return true; }
-    if (character === '[' && accepts('array')) { this.frames.push({ schema, value: [], phase: 'value' }); return true; }
+    if (character === '{' && accepts('object')) { this.frame = { parent: this.frame, schema, value: {}, phase: 'key' }; return true; }
+    if (character === '[' && accepts('array')) { this.frame = { parent: this.frame, schema, value: [], phase: 'value' }; return true; }
     if (character === '"' && accepts('string')) { this.lexeme = { kind: 'string', schema, text: '', key: false, escape: false, unicode: null }; return this.stringPrefix(); }
     if ((character === '-' || /\d/.test(character)) && (accepts('number') || accepts('integer'))) {
       if (schema.enum && !anyStartsWith(sortedJson(schema.enum), character)) return false;
@@ -277,7 +277,7 @@ export class JsonGrammarState {
       }
       if (character === '"') {
         this.lexeme = undefined;
-        if (token.key) { const frame = this.frames.at(-1)!; if (Object.hasOwn(frame.value, token.text)) return false; if (frame.schema.type === 'object' && !Object.hasOwn(frame.schema.properties ?? {}, token.text)) return false; this.frames[this.frames.length - 1] = { ...frame, key: token.text, phase: 'colon' }; return true; }
+        if (token.key) { const frame = this.frame!; if (Object.hasOwn(frame.value, token.text)) return false; if (frame.schema.type === 'object' && !Object.hasOwn(frame.schema.properties ?? {}, token.text)) return false; this.frame = { ...frame, key: token.text, phase: 'colon' }; return true; }
         return this.finish(token.text, token.schema);
       }
       if (character.codePointAt(0)! < 32) return false;
@@ -301,7 +301,7 @@ export class JsonGrammarState {
     }
     if (character === ' ' || character === '\t' || character === '\r' || character === '\n') return true;
     if (this.rootDone) return false;
-    const frame = this.frames.at(-1);
+    const frame = this.frame;
     if (!frame) return this.start(character, this.schema);
     if (Array.isArray(frame.value)) {
       const values = frame.value;
@@ -315,7 +315,7 @@ export class JsonGrammarState {
           for (const value of used) if (candidates.has(value)) covered++;
           if (covered === candidates.size) return false;
         }
-        this.frames[this.frames.length - 1] = { ...frame, phase: 'next' }; return true;
+        this.frame = { ...frame, phase: 'next' }; return true;
       }
       if (character === ']' && frame.phase === 'value') return this.close(frame);
       if (frame.value.length >= (frame.schema.maxItems ?? Infinity)) return false;
@@ -329,14 +329,14 @@ export class JsonGrammarState {
         for (const key of Object.keys(frame.schema.properties ?? {})) if (!Object.hasOwn(frame.value, key)) { available = true; break; }
         if (!available) return false;
       }
-      this.frames[this.frames.length - 1] = { ...frame, phase: 'next' }; return true;
+      this.frame = { ...frame, phase: 'next' }; return true;
     }
     if (frame.phase === 'key' || frame.phase === 'next') {
       if (character === '}' && frame.phase === 'key') return this.close(frame);
       if (character !== '"') return false;
       this.lexeme = { kind: 'string', schema: anySchema, text: '', key: true, escape: false, unicode: null }; return this.stringPrefix();
     }
-    if (frame.phase === 'colon') { if (character !== ':') return false; this.frames[this.frames.length - 1] = { ...frame, phase: 'value' }; return true; }
+    if (frame.phase === 'colon') { if (character !== ':') return false; this.frame = { ...frame, phase: 'value' }; return true; }
     return this.start(character, frame.schema.properties?.[frame.key!] ?? anySchema);
   }
 }
