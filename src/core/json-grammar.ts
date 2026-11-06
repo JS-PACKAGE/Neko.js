@@ -582,7 +582,19 @@ class GrammarProcessorImplementation extends LogitsProcessor {
     if (this.state.complete) for (const id of this.eos) if (id < width) this.mask[id] = 1;
     const data = logits.data as Float32Array;
     let possible = false;
-    for (let id = 0; id < width; id++) { if (!this.mask[id]) data[id] = -Infinity; else if (Number.isFinite(data[id])) possible = true; }
+    let start = 0;
+    // Structural and enum states are usually sparse: fill invalid gaps without copying allowed scores.
+    // Bound this scan; ordinary strings and the remaining tail retain the linear loop.
+    if (data instanceof Float32Array && width === data.length && this.state.freeStringClass === null) {
+      for (let count = 0; count < 1024 && start < width; count++) {
+        const next = this.mask.indexOf(1, start);
+        if (next < 0 || next >= width) { data.fill(-Infinity, start, width); start = width; break; }
+        if (next > start) data.fill(-Infinity, start, next);
+        if (Number.isFinite(data[next])) possible = true;
+        start = next + 1;
+      }
+    }
+    for (let id = start; id < width; id++) { if (!this.mask[id]) data[id] = -Infinity; else if (Number.isFinite(data[id])) possible = true; }
     if (!possible) throw new NekoError('No token can extend the constrained JSON output', 'generate', 'STRUCTURED_OUTPUT');
     return logits;
   }

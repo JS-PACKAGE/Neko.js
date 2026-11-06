@@ -149,6 +149,35 @@ test('logits grammar masks same-token trailing payload and premature EOS using t
   } finally { scores.dispose(); }
 });
 
+test('logits masking preserves allowed score bits and view boundaries for sparse and broad token sets', () => {
+  const width = 4096;
+  const grammar = compileStructuredSchema({ type: 'integer', enum: [1] }).grammar!;
+  for (const ids of [[0, 11, 999, 1024, width - 1], Array.from({ length: width / 2 }, (_, index) => index * 2 + 1)]) {
+    const allowed = new Set(ids);
+    const trie = new TokenByteTrie(ids.map((id) => [id, encoder.encode('1')] as const));
+    const words = new Uint32Array(width + 2).fill(0x3f800000);
+    const values = [0x3f800000, 0x80000000, 0x7fa12345, 0x7f800000, 0xff800000];
+    ids.forEach((id, index) => { words[id + 1] = values[index % values.length]!; });
+    const expected = words.slice();
+    for (let id = 0; id < width; id++) if (!allowed.has(id)) expected[id + 1] = 0xff800000;
+    const logits = { dims: [1, width], data: new Float32Array(words.buffer, 4, width) };
+    const processor = new JsonGrammarProcessor(grammar, trie, 0, []);
+    assert.equal(processor([[]], logits), logits);
+    assert.deepEqual(words, expected);
+  }
+});
+
+test('masked finite scores cannot rescue nonfinite allowed scores, including array-like logits', () => {
+  const grammar = compileStructuredSchema({ type: 'integer', enum: [1] }).grammar!;
+  const trie = new TokenByteTrie([[1, encoder.encode('1')], [3, encoder.encode('1')]]);
+  const inputs: ArrayLike<number>[] = [Float32Array.of(7, NaN, 8, Infinity, 9), [7, NaN, 8, Infinity, 9], { 0: 7, 1: NaN, 2: 8, 3: Infinity, 4: 9, length: 5 }];
+  for (const data of inputs) {
+    const processor = new JsonGrammarProcessor(grammar, trie, 0, []);
+    assert.throws(() => processor([[]], { dims: [1, 5], data }), (error: unknown) => error instanceof NekoError && error.code === 'STRUCTURED_OUTPUT' && error.stage === 'generate');
+    assert.deepEqual(Array.from(data), [-Infinity, NaN, -Infinity, Infinity, -Infinity]);
+  }
+});
+
 test('UTF-8 grammar rejects overlong encodings, surrogates and incompatible enum prefixes before token selection', () => {
   for (const bytes of [[0xe0, 0x80], [0xed, 0xa0], [0xf0, 0x80], [0xf4, 0x90], [0x80]]) {
     const state = new JsonGrammarState(compileStructuredSchema({ type: 'string' }).grammar!);
