@@ -82,7 +82,11 @@ async function read(request, port, signal) {
   send({ type: 'status', text: '擷取頁面內容…' });
   // extractPage rejects pages with more images than maxImages, so collect generously and describe only the first few.
   const page = await extractPage(request.html, { baseUrl: pageUrl.href, content: 'main', maxHtmlBytes: 4 * 1024 * 1024, maxImages: MAX_COLLECTED_IMAGES });
-  const describedImageIds = page.images.slice(0, MAX_DESCRIBED_IMAGES).map((image) => image.id);
+  // Prefer images the page rendered large; without that information (or a match), skip SVG, which cannot be described anyway.
+  const large = new Set(Array.isArray(request.images) ? request.images.filter((url) => typeof url === 'string') : []);
+  const rendered = page.images.filter((image) => large.has(image.url));
+  const candidates = rendered.length ? rendered : page.images.filter((image) => !/\.svg(?:[?#]|$)/i.test(image.url) && !/^data:image\/svg/i.test(image.url));
+  const describedImageIds = candidates.slice(0, MAX_DESCRIBED_IMAGES).map((image) => image.id);
   const long = page.paragraphs.filter((paragraph) => paragraph.text.length >= MIN_PARAGRAPH_CHARACTERS);
   const paragraphIds = (long.length >= 3 ? long : page.paragraphs).map((paragraph) => paragraph.id);
   if (!page.paragraphs.length) throw new Error('這個頁面沒有可解析的文字。');

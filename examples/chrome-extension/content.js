@@ -74,6 +74,16 @@
     if (after >= 200 || after >= before / 2) doc.body.replaceWith(pruned);
   }
 
+  /** URLs of visible images rendered at least 120×120 CSS pixels: describing logos and icons costs seconds each and says little. */
+  function contentImages() {
+    const urls = new Set();
+    for (const image of document.images) {
+      if (image.width < 120 || image.height < 120 || image.checkVisibility?.() === false) continue;
+      for (const url of [image.currentSrc, image.src]) if (url) urls.add(url);
+    }
+    return [...urls].slice(0, 500);
+  }
+
   /** Rendered DOM without this button, page chrome, scripts, styles and other non-content markup. */
   function snapshot() {
     // Re-parse the serialized DOM into an inert document: cloning live nodes would make images load again.
@@ -101,7 +111,7 @@
     body.append(element('h3', '結論'), element('p', report.conclusion));
     const { inputTokens, outputTokens } = report.metadata.usage;
     body.append(element('p', `AI 生成內容可能有誤，請以原文為準。耗時 ${message.seconds.toFixed(1)} 秒，${inputTokens} 輸入／${outputTokens} 輸出 token。`, 'note'));
-    setStatus(`完成：${message.paragraphs} 段文字、${message.images} 張圖片${message.images > message.describedImages ? `（描述前 ${message.describedImages} 張）` : ''}。`);
+    setStatus(`完成：${message.paragraphs} 段文字、${message.images} 張圖片${message.images > message.describedImages ? `（描述其中 ${message.describedImages} 張）` : ''}。`);
   }
 
   function finish() { port = undefined; stopButton.disabled = true; progress.hidden = true; }
@@ -134,7 +144,7 @@
       const ready = await chrome.runtime.sendMessage({ type: 'neko:ensure-offscreen' });
       if (!ready?.ok) throw new Error(ready?.message ?? 'offscreen document unavailable');
       const { modelBase } = await chrome.storage.local.get({ modelBase: '' });
-      connect({ type: 'read', html: snapshot(), url: location.href, language: document.documentElement.lang || navigator.language, modelBase });
+      connect({ type: 'read', html: snapshot(), images: contentImages(), url: location.href, language: document.documentElement.lang || navigator.language, modelBase });
     } catch (error) {
       setStatus(`解析失敗：${error instanceof Error ? error.message : String(error)}`, true); finish();
     }
