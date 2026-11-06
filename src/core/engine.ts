@@ -88,6 +88,18 @@ function disposeInputs(inputs: Record<string, unknown>): void { for (const value
 type TokenizerStage = ((...args: never[]) => unknown) & { config?: Record<string, unknown>; tokenizers?: unknown; pattern?: unknown; pre_tokenize_text?: (text: string) => string[] };
 type TokenizerInternals = { normalizer?: TokenizerStage | null; pre_tokenizer?: TokenizerStage | null; model?: unknown; added_tokens?: unknown; remove_space?: unknown; do_lowercase_and_remove_accent?: unknown };
 const BOUNDED_COUNT_MEMO_LENGTH = 256;
+/** UTF-8 length as TextEncoder would produce it (a lone surrogate becomes the 3-byte U+FFFD). */
+function utf8Length(text: string): number {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length && (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00) { bytes += 4; index++; }
+    else bytes += 3;
+  }
+  return bytes;
+}
 /**
  * Counts the tokens of `text.slice(start, end)` without special tokens, but stops once the count exceeds `limit` (returning that partial
  * count), so testing whether a long slice fits a small budget costs only the budget's worth of pre-tokens. It replays the pinned
@@ -143,6 +155,7 @@ export class VisionEngine {
   private tokenTrie?: TokenByteTrie;
   /** Per structured instruction: tokens of a prompt-only chat outside its user text, or null when that shortcut was not exact. */
   private readonly promptOverheads = new Map<string, number | null>();
+  private byteLevel?: boolean;
   private readonly tokenCache: PromptTokenCache;
   private readonly reuseCache: InferenceReuseCache;
   private generating = false;
@@ -222,21 +235,46 @@ export class VisionEngine {
    * and text the template treats differently (empty, or wrapped in `<tool_response>` tags, which it rejects) is still fully rendered.
    */
   countPrompt(prompt: string, structured?: CompiledStructuredSchema): number {
-    const instruction = structured ? structuredInstruction(structured) : undefined;
-    const tokenizer = this.processor.tokenizer!;
-    const full = (text: string) => tokenizer.encode(renderInferenceChat(this.processor, { prompt: text }, instruction).text).length;
-    const section = (text: string) => tokenizer.encode(`user\n${text.trim()}`, { add_special_tokens: false }).length;
+    const overhead = this.promptOverhead(prompt, structured);
+    return overhead === null ? this.fullPromptTokens(prompt, structured) : overhead + this.userTurnTokens(prompt);
+  }
+  /**
+   * `countPrompt(prompt, structured) <= maxTokens`. With the pinned byte-level BPE, every token of the user turn spans at least one UTF-8
+   * byte of its NFC-normalized text (added tokens span more), so a turn with few enough bytes fits without being encoded; others are counted.
+   */
+  promptFits(prompt: string, structured: CompiledStructuredSchema | undefined, maxTokens: number): boolean {
+    const overhead = this.promptOverhead(prompt, structured);
+    if (overhead !== null && this.byteLevelTokenizer() && overhead + utf8Length(`user\n${prompt.trim()}`.normalize('NFC')) <= maxTokens) return true;
+    return (overhead === null ? this.fullPromptTokens(prompt, structured) : overhead + this.userTurnTokens(prompt)) <= maxTokens;
+  }
+  private fullPromptTokens(prompt: string, structured?: CompiledStructuredSchema): number {
+    return this.processor.tokenizer!.encode(renderInferenceChat(this.processor, { prompt }, structured ? structuredInstruction(structured) : undefined).text).length;
+  }
+  private userTurnTokens(prompt: string): number {
+    return this.processor.tokenizer!.encode(`user\n${prompt.trim()}`, { add_special_tokens: false }).length;
+  }
+  /** Tokens outside the user text, or null when the prompt must be counted by full rendering. */
+  private promptOverhead(prompt: string, structured?: CompiledStructuredSchema): number | null {
     const trimmed = typeof prompt === 'string' ? prompt.trim() : '';
-    if (!trimmed || trimmed.startsWith('<tool_response>') && trimmed.endsWith('</tool_response>')) return full(prompt);
-    const key = instruction ?? '';
+    if (!trimmed || trimmed.startsWith('<tool_response>') && trimmed.endsWith('</tool_response>')) return null;
+    const key = structured ? structuredInstruction(structured) : '';
     let overhead = this.promptOverheads.get(key);
     if (overhead === undefined) {
-      const base = full(PROMPT_PROBES[0]!) - section(PROMPT_PROBES[0]!);
-      overhead = PROMPT_PROBES.every((probe) => full(probe) === base + section(probe)) ? base : null;
+      const base = this.fullPromptTokens(PROMPT_PROBES[0]!, structured) - this.userTurnTokens(PROMPT_PROBES[0]!);
+      overhead = PROMPT_PROBES.every((probe) => this.fullPromptTokens(probe, structured) === base + this.userTurnTokens(probe)) ? base : null;
       if (this.promptOverheads.size >= 32) this.promptOverheads.clear();
       this.promptOverheads.set(key, overhead);
     }
-    return overhead === null ? full(prompt) : overhead + section(prompt);
+    return overhead;
+  }
+  private byteLevelTokenizer(): boolean {
+    if (this.byteLevel === undefined) {
+      const inner = (this.processor.tokenizer as { _tokenizer?: TokenizerInternals } | undefined)?._tokenizer;
+      const stages = inner?.pre_tokenizer?.tokenizers;
+      this.byteLevel = inner?.normalizer?.config?.type === 'NFC' && inner.remove_space !== true && inner.do_lowercase_and_remove_accent !== true && Array.isArray(stages)
+        && stages.some((stage) => (stage as TokenizerStage).config?.type === 'ByteLevel') && (inner.model as { config?: { type?: unknown } } | undefined)?.config?.type === 'BPE';
+    }
+    return this.byteLevel;
   }
   splitText(text: string, maxTokens: number): string[] {
     if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) throw new RangeError('Chunk token budget must be positive');

@@ -285,7 +285,7 @@ function reportPlanning(engine: VisionEngine, snapshot: PageSnapshot, options: D
       : { image: 'Describe only what is visibly present in the supplied image, not its metadata.', section: 'Give separate key points for distinct facts in every supplied quote.', summary: 'Summarize the supplied source facts, retaining their evidence IDs.', conclusion: 'Conclude from the supplied source facts; reduced generated claims may be lossy.' };
     const promptHead = (phase: ReportPhase, multiple = phase === 'section') => `${instruction}${outputInstructions[multiple ? 'multiple' : 'single']}${prompts[phase]}\n${traditional ? '引用資料（JSON）：' : 'Source JSON:'}\n`;
     const prompt = (phase: ReportPhase, source: unknown, multiple = phase === 'section') => `${promptHead(phase, multiple)}${JSON.stringify(source)}\n${traditional ? '現在請只輸出所要求的 JSON 物件，文字必須為臺灣繁體中文。' : 'Now output only the requested JSON object.'}`;
-    const fits = (phase: ReportPhase, source: unknown, multiple = phase === 'section') => engine.countPrompt(prompt(phase, source, multiple), multiple ? compiledClaimSchema : compiledAtomicSchema) + maxNewTokens <= context;
+    const fits = (phase: ReportPhase, source: unknown, multiple = phase === 'section') => engine.promptFits(prompt(phase, source, multiple), multiple ? compiledClaimSchema : compiledAtomicSchema, context - maxNewTokens);
       const available = context - maxNewTokens - engine.countPrompt(prompt('section', []), compiledClaimSchema) - 96;
       if (available < 1) throw new NekoError('Context budget cannot accommodate report instructions and output', 'report', 'CONTEXT_LIMIT');
       const chunks: { evidenceId: string; paragraphId: string; quote: string; heading?: string }[][] = []; let current: typeof chunks[number] = [];
