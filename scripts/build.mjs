@@ -42,8 +42,9 @@ const replaceOnce = (source, target, replacement, path) => {
 //   fetch correctly rejects. A path hit has unknown metadata size; the verified cache still checks bytes before returning the path.
 // - The browser native bridge reuses immutable group-zero layouts per pipeline. Weak keys do not retain pipelines, and no buffer
 //   bindings or model data are cached. Patch the embedded ORT bundle, not the separately copied runtime asset or WebGPU prototypes.
-// - Native bind-group entries without extension chains do not need callback tables. Check the refreshed heap before allocating them;
-//   nonempty chains still use upstream dispatch, including its rejection of unsupported extensions.
+// - Empty native extension chains skip callback tables and captured state. Keep that state in a nonempty-branch-only function:
+//   capturing a converter variable allocates a context even when dispatch is skipped. Refresh heap views before probing; nonempty
+//   chains retain upstream dispatch, including its rejection of unsupported extensions.
 const transformersPatches = {
   name: 'neko-transformers-patches',
   setup(build) {
@@ -83,7 +84,7 @@ function nekoGreedyArgmax(data) {
       build.onLoad({ filter: /[\\/]onnxruntime-web[\\/]dist[\\/]ort\.webgpu\.bundle\.min\.mjs$/ }, async ({ path }) => {
         let source = replaceOnce(await readFile(path, 'utf8'), 't=n.getBindGroupLayout(t)', 't=nekoGetGroupLayout(n,t)', path);
         source = replaceOnce(source, 'fu(u,{327681:I=>{E=(p(),A)[I+8>>>2>>>0]}})',
-          '(p(),A)[u>>>2>>>0]&&fu(u,{327681:I=>{E=(p(),A)[I+8>>>2>>>0]}})', path);
+          'E=(p(),A)[u>>>2>>>0]?((entry)=>{let external=0;fu(entry,{327681:I=>{external=(p(),A)[I+8>>>2>>>0]}});return external})(u):0', path);
         runtimePatched = true;
         return { loader: 'js', contents: `${source}
 const nekoBindGroupLayouts = new WeakMap();
