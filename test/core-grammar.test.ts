@@ -160,6 +160,22 @@ test('UTF-8 grammar rejects overlong encodings, surrogates and incompatible enum
   assert.equal(escaped.push(encoder.encode('"\\u1')), false);
 });
 
+test('escaped enum prefixes retain later candidates across UTF-16 and token boundaries', () => {
+  const grammar = compileStructuredSchema({ type: 'string', enum: ['a', 'é', '😀', '\ud800', '\uffff'] }).grammar!;
+  for (const json of ['"\\u00E9"', '"\\uD83D\\uDE00"', '"\\ud800"', '"\\uFFFF"']) {
+    const bytes = encoder.encode(json);
+    for (let split = 0; split <= bytes.length; split++) {
+      const state = new JsonGrammarState(grammar);
+      assert.equal(state.push(bytes.subarray(0, split)), true, json);
+      assert.equal(state.push(bytes.subarray(split)), true, json);
+      assert.equal(state.complete, true, json);
+    }
+  }
+  for (const prefix of ['"\\u00ea', '"\\uD83E', '"\\uFFFE']) {
+    assert.equal(new JsonGrammarState(grammar).push(encoder.encode(prefix)), false, prefix);
+  }
+});
+
 test('constrained subset rejects unsupported schemas explicitly; validation-only supports Draft07 and validates schema-derived types', () => {
   for (const unsupported of [{ type: 'string', pattern: '^x$' }, { type: 'object' }, { type: 'number', minimum: 0 }, { anyOf: [{ type: 'string' }] }, false]) {
     assert.throws(() => compileStructuredSchema(unsupported), (error: unknown) => error instanceof NekoError && error.code === 'SCHEMA_UNSUPPORTED');

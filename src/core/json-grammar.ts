@@ -177,6 +177,15 @@ export class JsonGrammarState {
     if (token.key && frame?.schema.type === 'object') return Object.keys(frame.schema.properties ?? {}).filter((key) => !Object.hasOwn(frame.value, key) && key.startsWith(token.text) && key.length > token.text.length).map((key) => key.codePointAt(token.text.length)!);
     return token.schema.enum && followingCodePoints(sortedEnumStrings(token.schema.enum), token.text);
   }
+  private unicodePrefix(): boolean {
+    const token = this.lexeme!;
+    const candidates = this.stringCandidates();
+    if (!candidates) return true;
+    for (const candidate of candidates) {
+      if (candidate.startsWith(token.text) && candidate.length > token.text.length && candidate.charCodeAt(token.text.length).toString(16).padStart(4, '0').startsWith(token.unicode!.toLowerCase())) return true;
+    }
+    return false;
+  }
   private stringPrefix(): boolean {
     const token = this.lexeme!;
     if (token.schema.maxLength !== undefined && codePointLength(token.text) > token.schema.maxLength) return false;
@@ -236,14 +245,14 @@ export class JsonGrammarState {
     if (!literal || schema.enum && !canonicalSet(schema.enum).has(literal)) return false;
     this.lexeme = { kind: 'literal', schema, text: character, key: false, escape: false, unicode: null, literal }; return true;
   }
+  // Keep callback captures out of this hot path: even cold branches can allocate a context per character.
   private character(character: string): boolean {
     const token = this.lexeme;
     if (token?.kind === 'string') {
       if (token.unicode !== null) {
         if (!/^[\da-fA-F]$/.test(character)) return false;
         token.unicode += character;
-        const candidates = this.stringCandidates();
-        if (candidates && !candidates.some((candidate) => candidate.startsWith(token.text) && candidate.length > token.text.length && candidate.charCodeAt(token.text.length).toString(16).padStart(4, '0').startsWith(token.unicode!.toLowerCase()))) return false;
+        if (!this.unicodePrefix()) return false;
         if (token.unicode.length === 4) { token.text += String.fromCharCode(parseInt(token.unicode, 16)); token.unicode = null; return this.stringPrefix(); }
         return true;
       }
@@ -308,7 +317,12 @@ export class JsonGrammarState {
     }
     if (frame.phase === 'comma') {
       if (character === '}') return this.close(frame);
-      if (character !== ',' || frame.schema.type === 'object' && Object.keys(frame.schema.properties ?? {}).every((key) => Object.hasOwn(frame.value, key))) return false;
+      if (character !== ',') return false;
+      if (frame.schema.type === 'object') {
+        let available = false;
+        for (const key of Object.keys(frame.schema.properties ?? {})) if (!Object.hasOwn(frame.value, key)) { available = true; break; }
+        if (!available) return false;
+      }
       frame.phase = 'next'; return true;
     }
     if (frame.phase === 'key' || frame.phase === 'next') {
