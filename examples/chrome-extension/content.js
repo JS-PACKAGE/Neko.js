@@ -50,11 +50,36 @@
   const setStatus = (text, error = false) => { status.textContent = text; status.classList.toggle('error', error); };
   let port;
 
-  /** Rendered DOM without this button and without scripts, styles and other non-content markup. */
+  /**
+   * Drops page chrome before the model sees it: every report stage costs seconds, and navigation menus, "related" and "most read"
+   * link lists can outnumber an article's paragraphs several times over. Removes landmarks outside the article and, innermost first,
+   * blocks whose text is mostly link text. Falls back to the unpruned document when too little text would remain.
+   */
+  function pruneChrome(doc) {
+    const length = (node) => node.textContent.replace(/\s+/g, '').length;
+    const before = length(doc.body);
+    const pruned = doc.body.cloneNode(true);
+    for (const node of pruned.querySelectorAll('nav, aside, [role="navigation"], [role="complementary"], [role="banner"], [role="contentinfo"], header, footer')) {
+      if ((node.localName === 'header' || node.localName === 'footer') && node.closest('article, main')) continue;
+      node.remove();
+    }
+    for (const node of [...pruned.querySelectorAll('li, ul, ol, div, section, table, p')].reverse()) {
+      const total = length(node);
+      if (!total) continue;
+      let linked = 0;
+      for (const link of node.querySelectorAll('a')) linked += length(link);
+      if (linked / total > 0.6) node.remove();
+    }
+    const after = length(pruned);
+    if (after >= 200 || after >= before / 2) doc.body.replaceWith(pruned);
+  }
+
+  /** Rendered DOM without this button, page chrome, scripts, styles and other non-content markup. */
   function snapshot() {
     // Re-parse the serialized DOM into an inert document: cloning live nodes would make images load again.
     const inert = new DOMParser().parseFromString(document.documentElement.outerHTML, 'text/html');
     for (const node of inert.querySelectorAll('[data-neko-reader], script, style, noscript, template, iframe, link')) node.remove();
+    pruneChrome(inert);
     return `<!doctype html>${inert.documentElement.outerHTML}`;
   }
 

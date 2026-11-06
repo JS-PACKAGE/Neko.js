@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Examples (extension): the page snapshot drops navigation, landmark asides and blocks that are mostly link text (menus, "related" and "most read" lists) before reading, since every report stage costs seconds. On the rendered news article used before, 48 paragraphs of 20 or more characters became 10 (the article's own paragraphs kept), and the report finished in about 42 s instead of about 278 s in headed Chromium WebGPU; on Wikipedia, MDN, GitHub, BBC and Hacker News pages the leading article text was kept.
 - Performance: report section and reduction stages reuse decoder state for their phase's instructions (about 140 tokens at the start of the user turn in Traditional Chinese reports), not only for the structured-output system turn, so each stage after the first prefills only its own source data. On the loaded Apple M5, the first-token time summed over four section stages of a news article fell from about 5.3-5.9 to 3.8-4.2 s on Node CPU (three alternating runs) and from about 3.6-5.0 to 2.4-2.7 s in headed Chromium WebGPU (two runs). Reports for that article and for an English page were identical to 1.8.0's; a misaligned token boundary falls back to the system turn alone.
 
 ## 1.8.0 — 2026-11-06
