@@ -284,7 +284,7 @@ export class JsonGrammarState {
       if (!this.finishNumber()) return false;
       return this.character(character);
     }
-    if (/^[ \t\r\n]$/.test(character)) return true;
+    if (character === ' ' || character === '\t' || character === '\r' || character === '\n') return true;
     if (this.rootDone) return false;
     const frame = this.frames.at(-1);
     if (!frame) return this.start(character, this.schema);
