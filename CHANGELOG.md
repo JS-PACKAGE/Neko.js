@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Examples (extension): the panel lists each image and section stage's validated claims as soon as that stage finishes, then replaces them with the full report. On the news article the first content appeared after about 20 s instead of only at the end (about 46-50 s).
 - Examples (extension): only the leading paragraphs, up to 3,000 characters, are read, and the panel says when a page had more. A Wikipedia article kept about 420 paragraphs after pruning; its first 40 alone took 35 section stages and about 180 s, while the 3,000-character limit read 21 paragraphs in 13 section stages and finished in about 84 s with six images.
 - Examples (extension): images to describe are those the page rendered visibly at 120×120 CSS pixels or larger, instead of the first six in document order, so logos and icons no longer take image stages (each costs seconds). On the news article the site logo and SVG icons were skipped and only the article's map was described.
 - Examples (extension): the page snapshot drops navigation, landmark asides and blocks that are mostly link text (menus, "related" and "most read" lists) before reading, since every report stage costs seconds. On the rendered news article used before, 48 paragraphs of 20 or more characters became 10 (the article's own paragraphs kept), and the report finished in about 42 s instead of about 278 s in headed Chromium WebGPU; on Wikipedia, MDN, GitHub, BBC and Hacker News pages the leading article text was kept.

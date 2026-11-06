@@ -388,7 +388,7 @@ node examples/read-sample-page.mjs --cache-dir=/absolute/path/to/neko-model-cach
 
 ### 瀏覽器擴充功能
 
-瀏覽器依網站分開存放資料，若每個網站各自嵌入解析器，就會在每個網站各下載一次約 830 MiB 的模型。`examples/chrome-extension/` 把浮動「AI 解析頁面」按鈕放到每個 http(s) 頁面，並讓所有頁面共用一份模型：content script 以 closed shadow root 加入按鈕（頁面腳本讀不到面板內容），而 offscreen document（Cache Storage 屬於擴充功能來源的擴充功能頁面）以 WebGPU 執行 Neko.js。按下按鈕時，content script 把已渲染 DOM 的惰性快照（移除腳本、樣式、frame 與按鈕本身，並剪除頁面框架：`nav`／`aside`／landmark role、`article`／`main` 以外的 `header`／`footer`，以及由內而外、連結文字超過六成的區塊；若剩下不到 200 字且不到一半文字，則改用未剪除的快照）送到該文件，由它擷取主內容並以 JSON 回傳 `describe` 報告，面板以純文字顯示摘要、分段重點、圖片描述與結論。生成可停止，之後再按會重用已載入的模型（先關閉面板，面板會蓋住按鈕）。第一次按下前不會載入模型，閒置 10 分鐘後會釋放（此釋放尚未實測）。
+瀏覽器依網站分開存放資料，若每個網站各自嵌入解析器，就會在每個網站各下載一次約 830 MiB 的模型。`examples/chrome-extension/` 把浮動「AI 解析頁面」按鈕放到每個 http(s) 頁面，並讓所有頁面共用一份模型：content script 以 closed shadow root 加入按鈕（頁面腳本讀不到面板內容），而 offscreen document（Cache Storage 屬於擴充功能來源的擴充功能頁面）以 WebGPU 執行 Neko.js。按下按鈕時，content script 把已渲染 DOM 的惰性快照（移除腳本、樣式、frame 與按鈕本身，並剪除頁面框架：`nav`／`aside`／landmark role、`article`／`main` 以外的 `header`／`footer`，以及由內而外、連結文字超過六成的區塊；若剩下不到 200 字且不到一半文字，則改用未剪除的快照）送到該文件，由它擷取主內容並以 JSON 回傳 `describe` 報告，面板以純文字顯示摘要、分段重點、圖片描述與結論。執行期間，每個完成的圖片或段落階段的已驗證 claim（取自 `onCheckpoint`）會隨完成依序列出，最後換成完整報告。生成可停止，之後再按會重用已載入的模型（先關閉面板，面板會蓋住按鈕）。第一次按下前不會載入模型，閒置 10 分鐘後會釋放（此釋放尚未實測）。
 
 瀏覽器無法直接從 Hugging Face 下載模型（隱藏的跨來源 redirect 會 fail closed），因此第一次下載來自 loopback mirror。manifest 內含公鑰，解壓縮載入的擴充功能 ID 固定為 `nadgcicfppcloakehhefeknhbdbhmfkj`：
 

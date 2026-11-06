@@ -122,6 +122,12 @@
     port.onMessage.addListener((message) => {
       answered = true;
       if (message.type === 'status') { progress.hidden = true; setStatus(message.text); }
+      else if (message.type === 'partial') {
+        if (!body.querySelector('.partial')) body.append(element('h3', '已整理的內容（完成後會換成完整報告）', 'partial'));
+        const list = element('ul');
+        for (const claim of message.claims) list.append(element('li', message.phase === 'image' ? `圖片：${claim}` : claim));
+        body.append(list); body.scrollTop = body.scrollHeight;
+      }
       else if (message.type === 'progress') {
         progress.hidden = false; progress.max = message.total || 1; progress.value = message.loaded;
         setStatus(`${message.phase === 'verify' ? '驗證' : '下載'}模型檔案：${(message.loaded / 2 ** 20).toFixed(0)} / ${(message.total / 2 ** 20).toFixed(0)} MiB`);

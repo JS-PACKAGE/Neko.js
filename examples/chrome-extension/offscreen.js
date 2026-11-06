@@ -100,6 +100,7 @@ async function read(request, port, signal) {
   }
   if (!page.paragraphs.length) throw new Error('這個頁面沒有可解析的文字。');
   const stages = { image: [], section: [], summary: [], conclusion: [] };
+  let latest;
   const names = { image: '描述圖片', section: '整理段落', summary: '撰寫摘要', conclusion: '撰寫結論' };
   const begun = performance.now();
   const report = await neko.describe(page, {
@@ -111,7 +112,13 @@ async function read(request, port, signal) {
     validateDestination(url) {
       if (url.origin !== pageUrl.origin && isPrivateHost(url.hostname)) throw new Error(`Blocked private address: ${url.host}`);
     },
+    // Completed stages are validated claims; showing them as they finish turns a silent minute into steady output.
+    onCheckpoint(checkpoint) { latest = checkpoint; },
     onEvent(event) {
+      if (event.type === 'stage-complete' && (event.phase === 'section' || event.phase === 'image')) {
+        const claims = latest?.completed[event.id]?.claims.map((claim) => claim.text) ?? [];
+        if (claims.length) send({ type: 'partial', phase: event.phase, claims });
+      }
       if (event.type !== 'stage-start') return;
       const seen = stages[event.phase]; const retry = seen.includes(event.id);
       if (!retry) seen.push(event.id);
