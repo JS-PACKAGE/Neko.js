@@ -149,8 +149,7 @@
     try {
       const ready = await chrome.runtime.sendMessage({ type: 'neko:ensure-offscreen' });
       if (!ready?.ok) throw new Error(ready?.message ?? 'offscreen document unavailable');
-      const { modelBase } = await chrome.storage.local.get({ modelBase: '' });
-      connect({ type: 'read', html: snapshot(), images: contentImages(), url: location.href, language: document.documentElement.lang || navigator.language, modelBase });
+      connect({ type: 'read', html: snapshot(), images: contentImages(), url: location.href, language: document.documentElement.lang || navigator.language });
     } catch (error) {
       setStatus(`解析失敗：${error instanceof Error ? error.message : String(error)}`, true); finish();
     }

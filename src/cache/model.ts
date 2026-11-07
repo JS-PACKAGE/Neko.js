@@ -4,7 +4,7 @@ import { getRegisteredModelProfile, type ModelId, type RegisteredModelProfile } 
 import { exportModelBundle, importModelBundle, type BundleBacking, type ModelBundleSource } from './bundle.js';
 import type { ModelFileName } from './manifest.js';
 import { NekoError } from '../errors.js';
-import { authorizeNetwork, type ResourcePolicy } from '../web/policy.js';
+import { authorizeNetwork, isPackagedResource, type ResourcePolicy } from '../web/policy.js';
 import type * as NodeFs from 'node:fs/promises';
 import type * as NodePath from 'node:path';
 import type { constants as NodeFileConstants, Stats } from 'node:fs';
@@ -24,7 +24,10 @@ const isNode = typeof process !== 'undefined' && process.release?.name === 'node
 
 export class ModelIntegrityError extends Error { override name = 'ModelIntegrityError'; }
 export interface ModelSource {
-  /** Absolute HTTP(S) directory containing only the selected profile's pinned model files. */
+  /**
+   * Absolute HTTP(S) directory containing only the selected profile's pinned model files, or a directory inside the installed package
+   * that holds this bundle (a browser extension's own origin). Package files are read and verified in place, never copied to Cache Storage.
+   */
   baseUrl: string;
 }
 /** Own the URL without losing prototype/private-field getters during worker serialization. */
@@ -36,8 +39,8 @@ export function captureModelSource(source?: ModelSource): ModelSource | undefine
   const baseUrl = source.baseUrl;
   if (typeof baseUrl !== 'string') throw new TypeError('modelSource must be an object with a string baseUrl');
   const base = new URL(baseUrl);
-  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) {
-    throw new TypeError('modelSource.baseUrl must be an absolute HTTP(S) directory without credentials, query, or fragment');
+  if (!['http:', 'https:'].includes(base.protocol) && !isPackagedResource(base) || base.username || base.password || base.search || base.hash) {
+    throw new TypeError('modelSource.baseUrl must be an absolute HTTP(S) or installed-package directory without credentials, query, or fragment');
   }
   if (!base.pathname.endsWith('/')) base.pathname += '/';
   return Object.freeze({ baseUrl: base.href });
@@ -64,7 +67,8 @@ export interface ModelCacheDiagnostics {
   model: ModelId;
   revision: string;
   profile: ModelProfileId;
-  backend: 'filesystem' | 'cache-storage';
+  /** `package`: read-only model files inside the installed package that holds this bundle (see `ModelSource`). */
+  backend: 'filesystem' | 'cache-storage' | 'package';
   path: string;
   requiredBytes: number;
   storage: { usage: number | null; quota: number | null; available: number | null; persisted: boolean | null; source: 'browser-storage-estimate' | 'unavailable' };
@@ -97,6 +101,7 @@ type NativeCache = {
   stage(request: string): Promise<DownloadStage>;
   withLock<T>(request: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   path: string;
+  backend: ModelCacheDiagnostics['backend'];
   /** Node directory holding the pinned `onnx/` files. */
   onnxDirectory?: string;
 };
@@ -329,11 +334,33 @@ function rejectedResponse(error: ModelIntegrityError): Response {
 async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> {
   const model = getRegisteredModelProfile(options.profile, options.model);
   if (!isNode) {
+    const source = captureModelSource(options.modelSource);
+    if (source && isPackagedResource(new URL(source.baseUrl))) {
+      // The package is installed and replaced as a whole and cannot be written; copying it into Cache Storage would only double its disk use.
+      // Reads are local (no network policy applies, as with Cache Storage hits) and are hashed against the pinned manifest like any cache hit.
+      const readOnly = () => new NekoError('Model files inside the installed package are read-only', 'cache', 'POLICY_DENIED');
+      return {
+        backend: 'package', path: source.baseUrl,
+        async match(request) {
+          const name = request.startsWith(model.baseUrl) ? request.slice(model.baseUrl.length) : '';
+          if (!Object.hasOwn(model.allFiles, name)) return undefined;
+          let response: Response;
+          try { response = await fetch(new URL(name, source.baseUrl)); } catch { return undefined; }
+          if (response.ok) return response;
+          await response.body?.cancel();
+          return undefined;
+        },
+        async put() { throw readOnly(); },
+        async delete() { throw readOnly(); },
+        async stage(request) { throw new ModelIntegrityError(`Pinned model file is missing from the installed package: ${request}`); },
+        async withLock(_request, operation, signal) { signal?.throwIfAborted(); return operation(); },
+      };
+    }
     if (typeof caches === 'undefined') throw new Error('Verified model caching requires the browser Cache API in a secure context');
     const cache = await caches.open(env.cacheKey);
     const namespace = `CacheStorage:${env.cacheKey}`;
     return {
-      path: namespace, match: (request) => cache.match(request), put: (request, response) => cache.put(request, response),
+      backend: 'cache-storage', path: namespace, match: (request) => cache.match(request), put: (request, response) => cache.put(request, response),
       async delete(request) { await cache.delete(request); },
       stage(request) { return browserDownloadStage(`${namespace}:${request}`, async (body) => { await cache.put(request, new Response(body)); }); },
       withLock(request, operation, signal) { return withBrowserInstallLock(`${namespace}:${request}`, operation, signal); },
@@ -424,7 +451,7 @@ async function nativeCache(options: VerifiedCacheOptions): Promise<NativeCache> 
   };
   await secureDirectory();
   return {
-    path: root,
+    backend: 'filesystem', path: root,
     onnxDirectory: path.join(root, model.id, model.revision, 'onnx'),
     async stage(request) {
       return nodeDownloadStage({
@@ -786,7 +813,7 @@ export async function installVerifiedCache(options: VerifiedCacheOptions = {}): 
         if (navigator.storage.persisted) storage.persisted = await navigator.storage.persisted();
         signal?.throwIfAborted();
       }
-      return { model: model.id, revision: model.revision, profile: model.profile, backend: isNode ? 'filesystem' : 'cache-storage', path: backing.path,
+      return { model: model.id, revision: model.revision, profile: model.profile, backend: backing.backend, path: backing.path,
         requiredBytes: Object.values(selectedFiles).reduce((total, file) => total + file.size, 0), storage };
     },
     async status(signal) {

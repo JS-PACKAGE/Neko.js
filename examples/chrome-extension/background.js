@@ -1,5 +1,5 @@
-// The model runs in one offscreen document (an extension page, so its Cache Storage belongs to the extension origin
-// and is shared by every site). This worker only makes sure that document exists.
+// The model runs in one offscreen document, shared by every site; it reads the model files bundled in the extension package.
+// This worker only makes sure that document exists.
 let creating;
 
 async function ensureOffscreen() {

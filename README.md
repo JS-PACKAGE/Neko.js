@@ -53,13 +53,13 @@ try {
 - 可選主內容擷取、表格與段落關聯、帶精確引用的文件問答、圖片 ROI／tiling 與有界前處理快取。
 - 離線 bundle、安裝／配額診斷、worker health／restart／硬期限；硬期限會終止同一 worker 所有待處理請求，需明確 restart，不自動重播。
 
-完整契約與可執行範例見[繁體中文使用說明](doc/zh/usage.md)。建置後執行 `node examples/read-sample-page.mjs --cache-dir=<快取目錄>`，可看到 Neko.js 透過網址讀取隨附的[範例網頁](doc/zh/usage.md#範例網頁)並輸出報告。瀏覽器中的「AI 解析頁面」浮動按鈕由 Chromium [擴充功能範例](doc/zh/usage.md#瀏覽器擴充功能)放到每個網站，所有網站共用一份模型；`node scripts/serve-examples.mjs` 可在本機提供範例網頁供試用。
+完整契約與可執行範例見[繁體中文使用說明](doc/zh/usage.md)。建置後執行 `node examples/read-sample-page.mjs --cache-dir=<快取目錄>`，可看到 Neko.js 透過網址讀取隨附的[範例網頁](doc/zh/usage.md#範例網頁)並輸出報告。瀏覽器中的「AI 解析頁面」浮動按鈕由 Chromium [擴充功能](doc/zh/usage.md#瀏覽器擴充功能)放到每個網站，模型直接打包在擴充功能內；`npm run build:extension` 也會產生可上傳 Chrome 線上應用程式商店的 zip，`node scripts/serve-examples.mjs` 可在本機提供範例網頁供試用。
 
 ### 瀏覽器
 
 建置後從安全的 HTTP(S) 來源提供 `examples/browser-prototype.html`。Browser bundle 位於 `dist/browser/`，ONNX WASM 資產隨 bundle 一起輸出。瀏覽器 CPU/WASM 不支援此模型：ONNX Runtime Web 缺少 `GatherBlockQuantized(1)`，Neko 會回報錯誤，不會自動 fallback。瀏覽器 URL 圖片仍受 CORS 限制。
 
-首次線上模型下載請使用經驗證的 `modelSource: { baseUrl }` mirror／broker；瀏覽器隱藏 Hugging Face 跨來源 redirect 時會 fail closed，不會繞過逐 hop 核准。[首次使用流程](doc/zh/usage.md#瀏覽器首次使用流程)涵蓋 Node prefetch、現有 runner 自建 server／mirror、同 origin reverse proxy、runtime asset MIME／佈局和精確 CORS origin。隨附 demo 沒有 mirror URL 欄位，空快取時單純開啟不代表首次下載已設定。
+首次線上模型下載請使用經驗證的 `modelSource: { baseUrl }` mirror／broker；瀏覽器隱藏 Hugging Face 跨來源 redirect 時會 fail closed，不會繞過逐 hop 核准。[首次使用流程](doc/zh/usage.md#瀏覽器首次使用流程)涵蓋 Node prefetch、現有 runner 自建 server／mirror、同 origin reverse proxy、runtime asset MIME／佈局和精確 CORS origin。隨附 demo 沒有 mirror URL 欄位，空快取時單純開啟不代表首次下載已設定。瀏覽器擴充功能可把模型打包進套件，並讓 `modelSource.baseUrl` 指向自己的 `chrome-extension:` 目錄：檔案就地讀取、每次載入仍驗證大小與 SHA-256，不需要 mirror，也不複製到 Cache Storage（見[瀏覽器擴充功能](doc/zh/usage.md#瀏覽器擴充功能)）。
 
 ### 驗證與安全
 
@@ -138,13 +138,13 @@ First prefetch a verified cache, then infer with the same model/profile and `loc
 - Opt-in main-content extraction, tables/paragraph relations, citation-grounded document questions, image ROI/tiling and bounded preprocessing caches.
 - Offline bundles, installation/quota diagnostics and worker health/restart/hard deadlines. A hard deadline terminates all pending work in that worker; explicit restart is required, with no automatic replay.
 
-See the [English usage guide](doc/en/usage.md) for complete contracts and examples. After building, `node examples/read-sample-page.mjs --cache-dir=<cache dir>` reads the bundled [sample page](doc/en/usage.md#sample-page) by URL and prints its report. In the browser, the Chromium [extension example](doc/en/usage.md#browser-extension) puts a floating reader button on every site with one shared model; `node scripts/serve-examples.mjs` serves the sample page locally to try it on.
+See the [English usage guide](doc/en/usage.md) for complete contracts and examples. After building, `node examples/read-sample-page.mjs --cache-dir=<cache dir>` reads the bundled [sample page](doc/en/usage.md#sample-page) by URL and prints its report. In the browser, the Chromium [extension](doc/en/usage.md#browser-extension) puts a floating reader button on every site and carries the model in its package; `npm run build:extension` also writes a Chrome Web Store upload zip, and `node scripts/serve-examples.mjs` serves the sample page locally to try it on.
 
 ### Browser
 
 After building, serve `examples/browser-prototype.html` from a secure HTTP(S) origin. Browser bundles and their ONNX WASM assets are emitted under `dist/browser/`. Browser CPU/WASM is unsupported for this model because ONNX Runtime Web lacks `GatherBlockQuantized(1)`; Neko reports an error and does not automatically fall back. Browser image URLs remain subject to CORS.
 
-For first-online model downloads use a verified `modelSource: { baseUrl }` mirror/broker. Concealed Hugging Face cross-origin redirects fail closed rather than bypassing per-hop approval. The [first-use workflow](doc/en/usage.md#first-use-browser-workflow) covers Node prefetch, the existing runner's automatic server/mirror, same-origin reverse proxying, runtime-asset MIME/layout and exact-origin CORS. The shipped demo has no mirror URL field; simply opening it with an empty cache does not configure first-online downloads.
+For first-online model downloads use a verified `modelSource: { baseUrl }` mirror/broker. Concealed Hugging Face cross-origin redirects fail closed rather than bypassing per-hop approval. The [first-use workflow](doc/en/usage.md#first-use-browser-workflow) covers Node prefetch, the existing runner's automatic server/mirror, same-origin reverse proxying, runtime-asset MIME/layout and exact-origin CORS. The shipped demo has no mirror URL field; simply opening it with an empty cache does not configure first-online downloads. A browser extension can instead bundle the model and point `modelSource.baseUrl` at its own `chrome-extension:` directory: files are read in place and still checked against the pinned size and SHA-256 on every load, with no mirror and no copy in Cache Storage (see [Browser extension](doc/en/usage.md#browser-extension)).
 
 ### Verification and security
 

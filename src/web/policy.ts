@@ -33,8 +33,16 @@ function trustedResource(url: URL, kind: ResourceKind, transfer?: ModelTransfer)
 }
 // Runtime files shipped beside the bundle keep the bundle's own scheme, e.g. chrome-extension: inside a browser
 // extension. Opaque ("null") origins such as file: and data: never count as the bundle's origin.
-const bundleOrigin = new URL(import.meta.url).origin;
+const bundleUrl = new URL(import.meta.url);
+const bundleOrigin = bundleUrl.origin;
 const bundledRuntime = (url: URL, kind: ResourceKind) => (kind === 'runtime' || kind === 'worker') && bundleOrigin !== 'null' && url.origin === bundleOrigin;
+/**
+ * True for files inside the installed package that also holds this bundle, such as a browser extension's `chrome-extension:`
+ * origin. Such a package is read-only and installed as a whole; HTTP(S), file:, blob: and opaque origins never qualify.
+ */
+export function isPackagedResource(url: URL): boolean {
+  return bundleOrigin !== 'null' && !['http:', 'https:', 'file:', 'blob:', 'data:'].includes(bundleUrl.protocol) && url.origin === bundleOrigin;
+}
 export async function authorizeNetwork(policy: ResourcePolicy | undefined, url: URL, kind: ResourceKind, offline = false, transfer?: ModelTransfer, signal?: AbortSignal): Promise<void> {
   const trusted = trustedResource(url, kind, transfer);
   if ((!['http:', 'https:', 'file:', 'blob:'].includes(url.protocol) && !bundledRuntime(url, kind)) || url.username || url.password) throw new NekoError('Resource protocol is denied', 'preprocess', 'POLICY_DENIED');

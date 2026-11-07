@@ -396,21 +396,22 @@ node examples/read-sample-page.mjs --cache-dir=/absolute/path/to/neko-model-cach
 
 ### 瀏覽器擴充功能
 
-瀏覽器依網站分開存放資料，若每個網站各自嵌入解析器，就會在每個網站各下載一次約 830 MiB 的模型。`examples/chrome-extension/` 把浮動「AI 解析頁面」按鈕放到每個 http(s) 頁面，並讓所有頁面共用一份模型：content script 以 closed shadow root 加入按鈕（頁面腳本讀不到面板內容），而 offscreen document（Cache Storage 屬於擴充功能來源的擴充功能頁面）以 WebGPU 執行 Neko.js。按下按鈕時，content script 把已渲染 DOM 的惰性快照（移除腳本、樣式、frame 與按鈕本身，並剪除頁面框架：`nav`／`aside`／landmark role、`article`／`main` 以外的 `header`／`footer`，以及由內而外、連結文字超過六成的區塊；若剩下不到 200 字且不到一半文字，則改用未剪除的快照）送到該文件，由它擷取主內容並以 JSON 回傳 `describe` 報告，面板以純文字顯示摘要、分段重點、圖片描述與結論。執行期間，每個完成的圖片或段落階段的已驗證 claim（取自 `onCheckpoint`）會隨完成依序列出，最後換成完整報告。生成可停止，之後再按會重用已載入的模型（先關閉面板，面板會蓋住按鈕）。第一次按下前不會載入模型，閒置 10 分鐘後會釋放（此釋放尚未實測）。
+瀏覽器依網站分開存放資料，若每個網站各自嵌入解析器，就會在每個網站各下載一次約 830 MiB 的模型。`examples/chrome-extension/` 把浮動「AI 解析頁面」按鈕放到每個 http(s) 頁面，並把一份模型打包在擴充功能內供所有頁面共用：content script 以 closed shadow root 加入按鈕（頁面腳本讀不到面板內容），而 offscreen document 以 WebGPU 執行 Neko.js。按下按鈕時，content script 把已渲染 DOM 的惰性快照（移除腳本、樣式、frame 與按鈕本身，並剪除頁面框架：`nav`／`aside`／landmark role、`article`／`main` 以外的 `header`／`footer`，以及由內而外、連結文字超過六成的區塊；若剩下不到 200 字且不到一半文字，則改用未剪除的快照）送到該文件，由它擷取主內容並以 JSON 回傳 `describe` 報告，面板以純文字顯示摘要、分段重點、圖片描述與結論。執行期間，每個完成的圖片或段落階段的已驗證 claim（取自 `onCheckpoint`）會隨完成依序列出，最後換成完整報告。生成可停止，之後再按會重用已載入的模型（先關閉面板，面板會蓋住按鈕）。第一次按下前不會載入模型，閒置 10 分鐘後會釋放（此釋放尚未實測）。
 
-瀏覽器無法直接從 Hugging Face 下載模型（隱藏的跨來源 redirect 會 fail closed），因此第一次下載來自 loopback mirror。manifest 內含公鑰，解壓縮載入的擴充功能 ID 固定為 `nadgcicfppcloakehhefeknhbdbhmfkj`：
+固定的 default profile 檔案打包在 `model/`，並以 `modelSource: { baseUrl }` 傳入。位於「承載 SDK bundle 的已安裝套件」內（擴充功能自己的 `chrome-extension:` 來源）的 `modelSource` 會就地讀取：每次載入都像一般快取命中一樣，以固定大小與 SHA-256 雜湊驗證每個檔案；不會複製到 Cache Storage，也不發出任何模型網路請求。這些檔案唯讀，因此 `cache.model.clear()` 與 `importBundle()` 會以 `POLICY_DENIED` 拒絕，`cache.model.diagnostics().backend` 為 `'package'`。HTTP(S) 來源（包括同 origin）仍維持下載到 Cache Storage 的行為。
 
 ```sh
 npm run build
-npm run build:extension   # 輸出 dist/extension/
-node scripts/serve-model-mirror.mjs --cache-dir=/absolute/path/to/neko-model-cache --allow-origin=chrome-extension://nadgcicfppcloakehhefeknhbdbhmfkj
+npm run build:extension   # 可選：-- --cache-dir=/absolute/path/to/SDK/model/cache/root
 ```
 
-接著在 `chrome://extensions`（開發人員模式）以「載入未封裝項目」載入 `dist/extension/`。選項頁可改用其他 mirror；每個檔案仍會以固定的大小與 SHA-256 檢查。第一次下載完成後就不再需要 mirror。`serve-model-mirror.mjs` 的 `--allow-origin` 現在也接受精確的 Chromium 擴充功能來源。
+建置時若 Node SDK 快取缺少模型會先下載（Node 能以相同檢查跟隨 Hugging Face redirect），並再次雜湊每個複本，輸出 `dist/extension/`（在 `chrome://extensions` 開發人員模式以「載入未封裝項目」載入）與 `dist/neko-extension-<version>.zip`（約 690 MiB，`manifest.json` 位於根目錄，可上傳到 Chrome 線上應用程式商店；上限 2 GB）。套件內的 `THIRD_PARTY_NOTICES.txt` 列出模型授權及打包進 `neko.js` 的套件授權；若打包的套件沒有授權檔且沒有已知聲明，建置會失敗。每次上傳商店前請提高 `examples/chrome-extension/manifest.json` 的 `version`。
 
-擴充功能需要 `<all_urls>` 主機權限才能讀取頁面圖片，因此抓圖不受 CORS 限制。為了不讓頁面藉此讀取內部主機，位於其他來源、主機為字面上的 loopback、私有或 link-local 位址，或 `localhost`／`.local`／`.internal` 名稱的圖片網址會被拒絕；解析到這類位址的 DNS 名稱無法偵測。這類圖片及其他原因失敗的圖片會列為無法讀取，而不會讓整份報告失敗；輸出無效或語言不符的報告階段最多重試兩次。每頁最多描述六張圖片：依文件順序、頁面上可見且顯示尺寸至少 120×120 CSS 像素者（都不符合時改用前幾張非 SVG 圖片；最多收集 500 張）；頁面有至少三段 20 字以上的段落時，更短的段落（通常是沒有 `<main>` 的頁面上的導覽標籤）不納入報告，且只解析其餘段落中開頭、合計最多 3,000 字的段落（面板會註明）；HTML 超過 4 MiB 的頁面會被拒絕。僅支援 Chromium：Firefox 與 Safari 沒有 `chrome.offscreen`，且只實測過 Playwright 的 Chrome for Testing。
+上架資訊：[隱私權政策](../../examples/chrome-extension/PRIVACY.md)可發布為商店的隱私權政策網址。單一用途是把目前頁面在裝置上整理成摘要。權限理由：`offscreen` 在一個所有分頁共用的擴充功能文件中載入模型並解析頁面快照；`<all_urls>` 用來讀取頁面自身的圖片以進行描述，也是 content script 在每個 http(s) 頁面加入按鈕所需。商店截圖與宣傳圖需在開發人員控制台上傳，建置不會產生。實際發布需要你的開發人員帳號，尚未執行。
 
-在 Apple M5 上以全新 profile 的 headed WebGPU 實測中，第一次在範例頁按下按鈕時從 mirror 取得模型（13 個請求），約 72–80 秒完成。重新啟動瀏覽器後，另一個來源的頁面（`localhost` 而非 `127.0.0.1`）沒有任何 mirror 請求，三段文字的報告約 18 秒完成。圖片指向另一個 loopback 來源的頁面，報告完成並把該圖片列為已封鎖，圖片主機只收到頁面自己的請求，沒有來自擴充功能的請求。報告文字同樣有錯誤（例如把有固定營業時間的圖書館寫成「24 小時營業」）。
+擴充功能需要 `<all_urls>` 主機權限才能讀取頁面圖片，因此抓圖不受 CORS 限制。為了不讓頁面藉此讀取內部主機，位於其他來源、主機為字面上的 loopback、私有或 link-local 位址，或 `localhost`／`.local`／`.internal` 名稱的圖片網址會被拒絕；解析到這類位址的 DNS 名稱無法偵測。這類圖片及其他原因失敗的圖片會列為無法讀取，而不會讓整份報告失敗；輸出無效或語言不符的報告階段最多重試兩次。每頁最多描述六張圖片：依文件順序、頁面上可見且顯示尺寸至少 120×120 CSS 像素者（都不符合時改用前幾張非 SVG 圖片；最多收集 500 張）；頁面有至少三段 20 字以上的段落時，更短的段落（通常是沒有 `<main>` 的頁面上的導覽標籤）不納入報告，且只解析其餘段落中開頭、合計最多 3,000 字的段落（面板會註明）；HTML 超過 4 MiB 的頁面會被拒絕。僅支援 Chromium 120 以上（`minimum_chrome_version`）：Firefox 與 Safari 沒有 `chrome.offscreen`，且只實測過 Playwright 的 Chromium。
+
+在 Apple M5 上以全新 profile、打包版的 headed WebGPU 實測中，第一次在範例頁按下按鈕時驗證了套件內檔案，約 15 秒完成報告（7 段文字、2 張圖片），範例頁來源以外沒有任何 HTTP 請求，擴充功能來源的 Cache Storage 維持空的。報告文字有錯誤（例如前後矛盾的搬遷日期）。先前以 mirror 進行的實測中，圖片指向另一個 loopback 來源的頁面，報告完成並把該圖片列為已封鎖，圖片主機只收到頁面自己的請求，沒有來自擴充功能的請求。
 
 
 ### 文件結構與有來源引用的問答

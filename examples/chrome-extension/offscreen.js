@@ -1,7 +1,6 @@
 // Hosts the single Neko.js instance for the whole browser. Content scripts connect a port named "neko:read",
 // send one request, and receive status/progress messages followed by a result or an error.
 import { createNeko, extractPage } from './neko/neko.js';
-import { DEFAULT_MODEL_BASE } from './config.js';
 
 const IDLE_UNLOAD_MS = 10 * 60_000;
 const MAX_COLLECTED_IMAGES = 500;
@@ -12,7 +11,10 @@ const MIN_PARAGRAPH_CHARACTERS = 20;
 // paragraphs) would take many minutes, so only the leading text is read.
 const MAX_CHARACTERS = 3000;
 const bundleDirectory = new URL('./neko/', import.meta.url).href;
-let current; // { modelBase, neko: Promise }
+// The pinned model files ship inside the extension package; the SDK reads and SHA-256-verifies them in place on each load.
+const modelDirectory = new URL('./model/', import.meta.url);
+let current; // Promise of the loaded instance
+let released = Promise.resolve(); // Disposal of an idle instance; only one Neko runtime may be active at a time.
 let active = 0;
 let idleTimer;
 
@@ -28,20 +30,17 @@ function isPrivateHost(hostname) {
   return host === '::' || host === '::1' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host);
 }
 
-function instance(modelBase, report) {
-  if (current?.modelBase === modelBase) return current.neko;
-  const previous = current;
-  const base = new URL(modelBase);
+function instance(report) {
+  if (current) return current;
   let loading = true;
   const files = new Map();
   const neko = (async () => {
-    await previous?.neko.then((value) => value.dispose(), () => undefined);
+    await released;
     const created = await createNeko({
       device: 'webgpu',
-      modelSource: { baseUrl: base.href },
+      modelSource: { baseUrl: modelDirectory.href },
       // A custom policy replaces the default one. Images are checked per request by validateDestination below.
       policy: { network(url, kind) {
-        if (kind === 'model') return url.origin === base.origin;
         if (kind === 'runtime' || kind === 'worker') return url.href.startsWith(bundleDirectory);
         return kind === 'image';
       } },
@@ -57,19 +56,19 @@ function instance(modelBase, report) {
     loading = false;
     return created;
   })();
-  current = { modelBase, neko };
+  current = neko;
   // A failed load is not cached; the next request retries.
-  neko.catch(() => { if (current?.neko === neko) current = undefined; });
+  neko.catch(() => { if (current === neko) current = undefined; });
   return neko;
 }
 
 function scheduleUnload() {
   clearTimeout(idleTimer);
   if (active) return;
-  // Release the model (about 1 GB of memory) when unused; the verified files stay in the extension's cache.
+  // Release the model (about 1 GB of memory) when unused; the next request reloads it from the extension package.
   idleTimer = setTimeout(() => {
     const idle = current; current = undefined;
-    idle?.neko.then((neko) => neko.dispose(), () => undefined);
+    if (idle) released = idle.then((neko) => neko.dispose()).catch(() => undefined);
   }, IDLE_UNLOAD_MS);
 }
 
@@ -77,10 +76,8 @@ async function read(request, port, signal) {
   const send = (message) => { if (!signal.aborted) port.postMessage(message); };
   const pageUrl = new URL(request.url);
   if (pageUrl.protocol !== 'http:' && pageUrl.protocol !== 'https:') throw new Error('Only http and https pages can be read.');
-  const modelBase = new URL(request.modelBase || DEFAULT_MODEL_BASE);
-  if ((modelBase.protocol !== 'http:' && modelBase.protocol !== 'https:') || modelBase.username || modelBase.password) throw new Error('The model source must be an http(s) URL without credentials.');
   send({ type: 'status', text: '載入模型中…' });
-  const neko = await instance(modelBase.href, send);
+  const neko = await instance(send);
   signal.throwIfAborted();
   send({ type: 'status', text: '擷取頁面內容…' });
   // extractPage rejects pages with more images than maxImages, so collect generously and describe only the first few.

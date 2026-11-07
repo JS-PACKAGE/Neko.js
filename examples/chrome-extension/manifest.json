@@ -1,12 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Neko.js 頁面解析",
-  "version": "0.1.0",
-  "description": "Floating button that reads the current page with the local Neko.js model (WebGPU); one shared model cache for every site.",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmN6qoqpp512uT1tKkQQQMcz1Q7aPuXqnV51de6/HFHrtZJzI1TNg4GTlGlV5M4CtGj6EECwuUKbuJANOYImYw2TuO/z5IpdRKfKAZzOegrtt3RJEytwKiIL7dNLhvOP5vYd7pqD2r9YPvMvQoVfu9iJorXvGhZA+gzVVq9fe3M5sLut6i1wNi+GcfSaGPLtsc1lEkBbKMncwM/bbcak7MU05W0dKGjRRSE1r34CTl0K/tO4MhQVo4dakFSltQn/8rYDcxM8Dmgax8ZqmFlgm2EfkQyIDnUr694LwTRXqUENDGl1TFj33W/6Pn0LJ7bWyoy3iEbeCAXlRJHulWhhyXQIDAQAB",
+  "version": "1.0.0",
+  "description": "Floating button that summarizes the current page with a bundled on-device AI model (WebGPU). Page content is not uploaded.",
+  "minimum_chrome_version": "120",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "permissions": [
-    "offscreen",
-    "storage"
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -27,10 +32,6 @@
       "run_at": "document_idle"
     }
   ],
-  "options_ui": {
-    "page": "options.html",
-    "open_in_tab": false
-  },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   }
