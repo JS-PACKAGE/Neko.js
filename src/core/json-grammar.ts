@@ -102,6 +102,28 @@ function codePointLength(value: string): number {
   }
   return length;
 }
+/**
+ * Whether `value` has between `min` and `max` code points. A string of n UTF-16 units has between ceil(n / 2) and n code points, so most
+ * checks are decided from its length; only strings straddling a bound are counted. Structural trie walks test every closing candidate.
+ */
+function codePointLengthWithin(value: string, min: number, max: number): boolean {
+  const units = value.length; const least = (units + 1) >>> 1;
+  if (units < min || least > max) return false;
+  if (least >= min && units <= max) return true;
+  const length = codePointLength(value);
+  return length >= min && length <= max;
+}
+const keysLeft = new WeakMap<Frame, readonly string[]>();
+/** Object keys not yet used. Frames are immutable (writes replace them), so each frame computes this once for all its probes. */
+function remainingKeys(frame: Frame): readonly string[] {
+  let keys = keysLeft.get(frame);
+  if (!keys) {
+    const value = frame.value;
+    keys = Object.keys(frame.schema.properties ?? {}).filter((key) => !Object.hasOwn(value, key));
+    keysLeft.set(frame, keys);
+  }
+  return keys;
+}
 // Immutable linked frames and their collected values are shared by clones; replace them on writes.
 interface Frame { readonly parent: Frame | undefined; readonly schema: GrammarSchema; readonly value: unknown[] | Record<string, unknown>; readonly phase: 'key' | 'colon' | 'value' | 'comma' | 'next'; readonly key?: string; }
 interface Lexeme { kind: 'string' | 'number' | 'literal'; schema: GrammarSchema; text: string; key: boolean; escape: boolean; unicode: string | null; literal?: string; }
@@ -134,6 +156,19 @@ export class JsonGrammarState {
     const token = this.lexeme;
     return token?.schema.maxLength === undefined ? Infinity : token.schema.maxLength - codePointLength(token.text);
   }
+  /**
+   * An object under which this free string's structural continuations (closing it and whatever may follow in the same token) are the
+   * same at every step, or undefined when they may depend on its text: enumerations, `maxLength`, a `minLength` not yet met, or any
+   * enclosing `enum`/`uniqueItems` that compares completed values. Otherwise the outcome depends only on the immutable frame chain and
+   * the pending UTF-8 class.
+   */
+  get freeStringWalkKey(): object | undefined {
+    const token = this.lexeme;
+    if (token?.kind !== 'string' || token.key || token.escape || token.unicode !== null || token.schema.enum !== undefined || token.schema.maxLength !== undefined || !this.frame) return undefined;
+    if (token.schema.minLength !== undefined && !codePointLengthWithin(token.text, token.schema.minLength, Infinity)) return undefined;
+    for (let frame: Frame | undefined = this.frame; frame; frame = frame.parent) if (frame.schema.uniqueItems || frame.schema.enum !== undefined) return undefined;
+    return this.frame;
+  }
   get complete(): boolean {
     if (this.utfRemaining) return false;
     const copy = this.clone();
@@ -147,35 +182,54 @@ export class JsonGrammarState {
       if (this.utfRemaining === 2 && this.utfCode === 0 && byte < 0xa0 || this.utfRemaining === 2 && this.utfCode === 13 && byte > 0x9f || this.utfRemaining === 3 && this.utfCode === 0 && byte < 0x90 || this.utfRemaining === 3 && this.utfCode === 4 && byte > 0x8f) return false;
       this.utfCode = this.utfCode * 64 + (byte & 63);
       --this.utfRemaining;
-      const next = this.nextCodePoints();
-      if (next && !next.some((point) => point >= this.utfMin && point >>> (this.utfRemaining * 6) === this.utfCode)) return false;
+      const continues = this.continuesWith(this.utfMin, this.utfRemaining * 6, this.utfCode);
+      if (continues === false) return false;
       if (this.utfRemaining) return true;
       if (this.utfCode < this.utfMin || this.utfCode > 0x10ffff || this.utfCode >= 0xd800 && this.utfCode <= 0xdfff) return false;
       return this.character(String.fromCodePoint(this.utfCode));
     }
     if (byte < 128) return this.character(String.fromCharCode(byte));
     if (this.lexeme?.kind !== 'string' || this.lexeme.escape || this.lexeme.unicode !== null) return false;
-    if (this.lexeme.schema.maxLength !== undefined && codePointLength(this.lexeme.text) >= this.lexeme.schema.maxLength) return false;
+    if (this.lexeme.schema.maxLength !== undefined && !codePointLengthWithin(this.lexeme.text, 0, this.lexeme.schema.maxLength - 1)) return false;
     if (byte >= 0xc2 && byte <= 0xdf) { this.utfRemaining = 1; this.utfCode = byte & 31; this.utfMin = 0x80; }
     else if (byte >= 0xe0 && byte <= 0xef) { this.utfRemaining = 2; this.utfCode = byte & 15; this.utfMin = 0x800; }
     else if (byte >= 0xf0 && byte <= 0xf4) { this.utfRemaining = 3; this.utfCode = byte & 7; this.utfMin = 0x10000; }
     else return false;
-    const next = this.nextCodePoints();
     // The lead byte's payload bits alone also match shorter encodings (an E0 or F0 lead leaves them zero, like ASCII), so the candidate must need this many bytes.
-    return next === undefined || next.some((point) => point >= this.utfMin && point >>> (this.utfRemaining * 6) === this.utfCode);
+    return this.continuesWith(this.utfMin, this.utfRemaining * 6, this.utfCode) !== false;
   }
-  private stringCandidates(): string[] | undefined {
+  /**
+   * Whether a code point of at least `min` whose bits above `shift` equal `code` can follow the open string's text (a remaining object key
+   * or enumeration value); undefined when unrestricted. Called for every probed byte, so it scans without allocating.
+   */
+  private continuesWith(min: number, shift: number, code: number): boolean | undefined {
+    const token = this.lexeme!;
+    const frame = this.frame;
+    const text = token.text;
+    if (token.key && frame?.schema.type === 'object') {
+      for (const key of remainingKeys(frame)) {
+        if (key.length <= text.length || !key.startsWith(text)) continue;
+        const point = key.codePointAt(text.length)!;
+        if (point >= min && point >>> shift === code) return true;
+      }
+      return false;
+    }
+    if (!token.schema.enum) return undefined;
+    for (const point of followingCodePoints(sortedEnumStrings(token.schema.enum), text)) if (point >= min && point >>> shift === code) return true;
+    return false;
+  }
+  private stringCandidates(): readonly string[] | undefined {
     const token = this.lexeme!;
     const frame = this.frame;
     return token.key && frame?.schema.type === 'object'
-      ? Object.keys(frame.schema.properties ?? {}).filter((key) => !Object.hasOwn(frame.value, key))
+      ? remainingKeys(frame)
       : token.schema.enum && sortedEnumStrings(token.schema.enum) as string[];
   }
   /** Code points that can follow the open string's text (remaining object keys or enumeration values); undefined when unrestricted. */
   private nextCodePoints(): readonly number[] | undefined {
     const token = this.lexeme!;
     const frame = this.frame;
-    if (token.key && frame?.schema.type === 'object') return Object.keys(frame.schema.properties ?? {}).filter((key) => !Object.hasOwn(frame.value, key) && key.startsWith(token.text) && key.length > token.text.length).map((key) => key.codePointAt(token.text.length)!);
+    if (token.key && frame?.schema.type === 'object') return remainingKeys(frame).filter((key) => key.startsWith(token.text) && key.length > token.text.length).map((key) => key.codePointAt(token.text.length)!);
     return token.schema.enum && followingCodePoints(sortedEnumStrings(token.schema.enum), token.text);
   }
   private unicodePrefix(): boolean {
@@ -189,7 +243,7 @@ export class JsonGrammarState {
   }
   private stringPrefix(): boolean {
     const token = this.lexeme!;
-    if (token.schema.maxLength !== undefined && codePointLength(token.text) > token.schema.maxLength) return false;
+    if (token.schema.maxLength !== undefined && !codePointLengthWithin(token.text, 0, token.schema.maxLength)) return false;
     const frame = this.frame;
     if (token.key && frame?.schema.type === 'object') return this.stringCandidates()!.some((value) => value.startsWith(token.text));
     // Enumerations can hold thousands of paragraph IDs; test the prefix against a sorted copy built once per enum.
@@ -197,7 +251,7 @@ export class JsonGrammarState {
   }
   private valid(schema: GrammarSchema, value: unknown): boolean {
     if (schema.enum && !canonicalSet(schema.enum).has(canonical(value))) return false;
-    if (typeof value === 'string') { const length = codePointLength(value); if (length < (schema.minLength ?? 0) || length > (schema.maxLength ?? Infinity)) return false; }
+    if (typeof value === 'string' && !codePointLengthWithin(value, schema.minLength ?? 0, schema.maxLength ?? Infinity)) return false;
     if (schema.type === 'integer' && (typeof value !== 'number' || !Number.isInteger(value))) return false;
     return true;
   }
@@ -272,7 +326,7 @@ export class JsonGrammarState {
       if (character === '\\') {
         const next = this.nextCodePoints();
         if (next && !next.length) return false;
-        if (token.schema.maxLength !== undefined && codePointLength(token.text) >= token.schema.maxLength && !/[\uD800-\uDBFF]$/.test(token.text)) return false;
+        if (token.schema.maxLength !== undefined && !codePointLengthWithin(token.text, 0, token.schema.maxLength - 1) && !/[\uD800-\uDBFF]$/.test(token.text)) return false;
         token.escape = true; return true;
       }
       if (character === '"') {
@@ -441,6 +495,8 @@ export class TokenByteTrie {
   private readonly data: Uint8Array;
   private readonly continuations = new Map<number, Uint8Array>();
   private readonly widths = new Map<number, Uint16Array>();
+  /** Structural continuations of free strings whose outcome cannot depend on their text, by frame and pending UTF-8 class. */
+  private readonly structuralWalks = new WeakMap<object, Map<number, Int32Array>>();
   private readonly slotCount: number;
   private constructor(input: Iterable<readonly [number, Uint8Array]> | PackedTokenPieces) {
     const { ids, offsets, data } = Symbol.iterator in input ? packPieces(input) : input;
@@ -474,6 +530,12 @@ export class TokenByteTrie {
       }
     }
     trie.root.trim(); trie.structuralRoot.trim();
+    // Build every ordinary-string bitmap here, between slices, rather than stalling the decode step that first opens a string or
+    // leaves a UTF-8 sequence pending. Classes are the `freeStringClass` values 0..7.
+    for (let continuation = 0; continuation < 8; continuation++) {
+      if (performance.now() - started >= TRIE_BUILD_SLICE_MS) { await yieldTrieSetup(); started = performance.now(); }
+      trie.continuation(continuation);
+    }
     return trie;
   }
   /** Ordinary string pieces for one pending-UTF-8 class, as a bitmap by token ID; built once and shared by every later token in a string. */
@@ -539,6 +601,21 @@ export class TokenByteTrie {
         for (let id = 0, end = Math.min(allowed.length, mask.length); id < end; id++) if (allowed[id] && widths[id]! <= budget) mask[id] = 1;
       }
     }
+    if (continuation !== null) {
+      const key = state.freeStringWalkKey;
+      if (key) {
+        let byClass = this.structuralWalks.get(key);
+        if (!byClass) this.structuralWalks.set(key, byClass = new Map());
+        let ids = byClass.get(continuation);
+        if (!ids) {
+          const found: number[] = [];
+          this.structuralRoot.walk(state, this.ids, (id) => { found.push(id); });
+          ids = Int32Array.from(found); byClass.set(continuation, ids);
+        }
+        for (const id of ids) if (id < mask.length) mask[id] = 1;
+        return;
+      }
+    }
     (continuation === null ? this.root : this.structuralRoot).walk(state, this.ids, (id) => { if (id < mask.length) mask[id] = 1; });
   }
 }
@@ -563,6 +640,7 @@ export async function tokenizerByteTrie(tokenizer: ByteLevelTokenizer): Promise<
   const added = new Map<number, Uint8Array>();
   const encoder = new TextEncoder();
   for (const token of tokenizer._tokenizerJSON.added_tokens ?? []) if (!token.special) added.set(token.id, encoder.encode(token.content));
+  let started = performance.now();
   const vocabulary = tokenizer.get_vocab();
   let count = 0; let total = 0;
   vocabulary.forEach((id, token) => {
@@ -572,19 +650,21 @@ export async function tokenizerByteTrie(tokenizer: ByteLevelTokenizer): Promise<
     count++; total += length;
   });
   const ids = new Int32Array(count); const offsets = new Uint32Array(count + 1); const data = new Uint8Array(total);
-  let position = 0; let entry = 0;
-  vocabulary.forEach((id, token) => {
-    if (specials.has(id)) return;
+  let position = 0; let entry = 0; let seen = 0;
+  // Packing every piece is one of the longest setup stretches (tens of ms on a busy page), so it yields between slices like trie insertion.
+  for (const [token, id] of vocabulary) {
+    if ((++seen & 4095) === 0 && performance.now() - started >= TRIE_BUILD_SLICE_MS) { await yieldTrieSetup(); started = performance.now(); }
+    if (specials.has(id)) continue;
     const encoded = added.get(id);
-    if (!(encoded?.length ?? token.length)) return;
+    if (!(encoded?.length ?? token.length)) continue;
     ids[entry] = id; offsets[entry++] = position;
-    if (encoded) { data.set(encoded, position); position += encoded.length; return; }
+    if (encoded) { data.set(encoded, position); position += encoded.length; continue; }
     for (let index = 0; index < token.length; index++) {
       const byte = token.charCodeAt(index) < lookup.length ? lookup[token.charCodeAt(index)]! : -1;
       if (byte < 0) throw new NekoError('Tokenizer vocabulary is incompatible with ByteLevel decoding', 'preprocess', 'SCHEMA_UNSUPPORTED');
       data[position++] = byte;
     }
-  });
+  }
   offsets[count] = position;
   await yieldTrieSetup();
   const trie = await TokenByteTrie.create({ ids, offsets, data });

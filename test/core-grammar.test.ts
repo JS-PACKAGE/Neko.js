@@ -424,3 +424,27 @@ test('maxLength string masks equal a per-piece reference at every code-point bud
   }
   assert.ok(checked > 200, `bounded free-string states exercised: ${checked}`);
 });
+
+test('free-string structural masks reused across a string still equal full parsing as its text grows', async () => {
+  const schema = { type: 'object', additionalProperties: false, required: ['text', 'notes'], properties: {
+    text: { type: 'string', minLength: 2 },
+    notes: { type: 'array', maxItems: 2, items: { type: 'object', required: ['n'], properties: { n: { type: 'string', minLength: 1 } } } },
+  } } as const;
+  const json = '{"text":"a漢\\"b😀c","notes":[{"n":"x\\\\y漢z"},{"n":"q"}]}';
+  const bytes = encoder.encode(json);
+  const pieces: [number, Uint8Array][] = [];
+  for (let start = 0; start < bytes.length; start++) {
+    for (let end = start + 1; end <= Math.min(start + 7, bytes.length); end++) pieces.push([pieces.length, bytes.slice(start, end)]);
+  }
+  for (const text of ['"', '",', '"}', '"]', '"},{"', '"]}', 'ab"', '\\"', '\\u0041"', '","notes":[', '"}]}', '"}, {"n":"', ' ', '\n']) pieces.push([pieces.length, encoder.encode(text)]);
+  const trie = await TokenByteTrie.create(pieces);
+  // One state advances byte by byte, so masks cached early in a string are reused after its text has changed.
+  const state = new JsonGrammarState(schema);
+  for (let at = 0; at <= bytes.length; at++) {
+    const expected = pieces.filter(([, piece]) => state.clone().push(piece)).map(([id]) => id);
+    const mask = new Uint8Array(pieces.length); trie.mark(state, mask);
+    assert.deepEqual(Array.from(mask.keys()).filter((id) => mask[id]), expected, `after ${at} bytes`);
+    if (at < bytes.length) assert.equal(state.pushByte(bytes[at]!), true);
+  }
+  assert.equal(state.complete, true);
+});
