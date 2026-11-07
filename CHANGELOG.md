@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.9.1 — 2026-11-08
 
 - Browser: a `modelSource.baseUrl` inside the installed package that holds the SDK bundle (a browser extension's own `chrome-extension:` origin) is accepted and read in place. Every load still hashes each file against the pinned size and SHA-256; nothing is copied into Cache Storage, no network policy or model request is involved, `clear()`/`importBundle()` reject with `POLICY_DENIED`, and `diagnostics().backend` is the new `'package'`. HTTP(S) sources, including same-origin ones, are unchanged.
 - Examples (extension): the model now ships inside the extension, so the loopback mirror, options page, `storage` permission and fixed `key` are gone. `npm run build:extension [-- --cache-dir=<root>]` downloads the model through the Node SDK when needed, re-verifies each packaged copy, adds `THIRD_PARTY_NOTICES.txt` and icons, sets `minimum_chrome_version` 120, and writes `dist/neko-extension-<version>.zip` (about 690 MiB) for Chrome Web Store upload, with a privacy policy in `examples/chrome-extension/PRIVACY.md`. In a fresh headed Chromium WebGPU profile the sample page report finished in about 15 s with no request outside the page's origin and an empty extension Cache Storage; report text still contained errors. Not published.
