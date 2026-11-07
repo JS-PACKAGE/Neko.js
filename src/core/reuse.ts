@@ -6,10 +6,15 @@ export interface GenerationStateSnapshot { tokens: bigint[]; compatibility: stri
 interface RetainedState { snapshots: GenerationStateSnapshot[]; bytes: number; }
 interface Feature { tensor: Tensor; bytes: number; }
 function tensorBytes(tensor: Tensor): number { const data = tensor.data; if (!ArrayBuffer.isView(data)) throw new TypeError('Reuse requires numeric tensor storage'); return data.byteLength; }
-/** GPU data must be downloaded before cloning; Tensor.clone() alone cannot clone GPU storage. */
+/**
+ * An owned CPU copy of a tensor. Tensor.clone() cannot clone GPU storage, so GPU data is downloaded first. That download is a fresh
+ * buffer which no session output tracks and which disposing the source tensor never touches; generation only reads it (as the next
+ * run's input), so the snapshot shares it instead of copying tens of MB of hybrid state on the main thread.
+ */
 export async function ownedTensor(tensor: Tensor): Promise<Tensor> {
-  if (tensor.location !== 'cpu') await tensor.ort_tensor.getData(true);
-  return tensor.clone();
+  if (tensor.location === 'cpu') return tensor.clone();
+  const data = await tensor.ort_tensor.getData(true);
+  return new Tensor(tensor.type, data, tensor.dims.slice());
 }
 export async function inputVisionIdentity(inputs: Record<string, unknown>): Promise<string> {
   const pixels = inputs.pixel_values; const grid = inputs.image_grid_thw;

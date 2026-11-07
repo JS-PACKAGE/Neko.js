@@ -205,7 +205,7 @@ export class VisionEngine {
         model = await loading;
         keepLastLogits(model);
         if (gpuEmbeddings) keepDecodeEmbeddingsOnGpu(model);
-        if (backend.runtime === 'node') releaseConsumedDecoderOutputs(model);
+        releaseConsumedDecoderOutputs(model);
         encodeImagesSeparately(model as unknown as Parameters<typeof encodeImagesSeparately>[0]);
       } catch (error) {
         // Never leave a half-built model holding native sessions.

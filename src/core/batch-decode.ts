@@ -4,7 +4,11 @@ function dispose(tensors: Iterable<Tensor>): void {
   for (const tensor of new Set(tensors)) if (tensor.location !== 'none') tensor.dispose();
 }
 
-/** Compact native decode rows without changing generation's logical batch or positions. */
+/**
+ * Compact native decode rows without changing generation's logical batch or positions. A GPU-resident cache is left whole:
+ * shrinking it means downloading every state tensor, gathering on the CPU and uploading again (tens of MB per row on the pinned
+ * model), while a memory-bound GPU decode step costs about the same with a finished row kept as padding.
+ */
 export class BatchDecoder {
   private active: number[];
   private logits: Tensor | undefined;
@@ -21,8 +25,10 @@ export class BatchDecoder {
       if (this.isDone(previous[physical]!)) retained ??= Array.from({ length: physical }, (_, index) => index);
       else retained?.push(physical);
     }
-    const active = retained ? retained.map((physical) => previous[physical]!) : previous;
+    let active = retained ? retained.map((physical) => previous[physical]!) : previous;
     if (!active.length) { this.dispose(); throw new Error('Cannot decode an empty active batch'); }
+    const resident = inputs.past_key_values;
+    if (retained && resident instanceof DynamicCache && Object.values(resident).some((tensor) => tensor instanceof Tensor && tensor.location !== 'cpu')) { retained = undefined; active = previous; }
     if (active.length === this.batchSize) return await forward(inputs);
 
     const temporary = new Set<Tensor>();

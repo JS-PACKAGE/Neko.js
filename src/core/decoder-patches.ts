@@ -41,17 +41,21 @@ export function keepDecodeEmbeddingsOnGpu(model: Pick<PreTrainedModel, 'encode_t
 
 /** The buffer of a CPU tensor that owns all of it; anything shared or partial is left to the garbage collector. */
 function ownedBuffer(value: unknown): ArrayBuffer | undefined {
-  const { location, data } = (value ?? {}) as DecoderValue;
-  if (location !== 'cpu' || !ArrayBuffer.isView(data) || !(data.buffer instanceof ArrayBuffer)) return undefined;
+  const tensor = (value ?? {}) as DecoderValue;
+  // Read `data` only for CPU tensors: the getter throws for GPU-resident ones.
+  if (tensor.location !== 'cpu') return undefined;
+  const { data } = tensor;
+  if (!ArrayBuffer.isView(data) || !(data.buffer instanceof ArrayBuffer)) return undefined;
   return data.byteOffset === 0 && data.byteLength === data.buffer.byteLength && data.byteLength > 0 ? data.buffer : undefined;
 }
 
 /**
  * onnxruntime-node copies every output into a fresh ArrayBuffer, and a Qwen3.5 decode step returns about 21 MB of recurrent,
  * convolution and attention state (plus 1 MB of logits). It became garbage one step later, so V8's external-memory pressure forced
- * a full mark-compact every two or three tokens. Generation never reads state again once the decoder has consumed it as `past_*`
- * (cache checkouts and snapshots own clones), nor a run's logits once the next run starts (generation has copied them), so their
- * memory is released at that point instead. Only buffers this session itself returned are detached. Node CPU only.
+ * a full mark-compact every two or three tokens. onnxruntime-web keeps the state on the GPU but still copies the 1 MB logits row
+ * into a fresh buffer, which triggered a mark-compact about every 50 tokens. Generation never reads state again once the decoder
+ * has consumed it as `past_*` (cache checkouts and snapshots own clones), nor a run's logits once the next run starts (generation
+ * has copied them), so their memory is released at that point instead. Only CPU buffers this session itself returned are detached.
  */
 export function releaseConsumedDecoderOutputs(model: PreTrainedModel): void {
   const session = model.sessions.decoder_model_merged as DecoderSession | undefined;

@@ -209,23 +209,34 @@ for (const compacted of [false, true]) test(`native failure ${compacted ? 'after
   } finally { run.dispose(); }
 });
 
-test('GPU-like hybrid cache is downloaded before batch gathering and original storage is retained', async () => {
-  const run = scenario(2); let downloads = 0;
+test('GPU-resident hybrid cache keeps finished rows as padding instead of a CPU round trip', async () => {
+  const done = new Set<number>([0]); const decoder = new BatchDecoder(2, (row) => done.has(row));
+  let downloads = 0;
+  const gpuLike = (tensor: Tensor) => {
+    Object.defineProperties(tensor, { location: { get: () => 'gpu-buffer' }, data: { get: () => { throw new Error('GPU cache read on the CPU'); } } });
+    tensor.ort_tensor.getData = async () => { downloads++; throw new Error('GPU cache downloaded'); };
+    return tensor;
+  };
+  const cache = new DynamicCache({
+    [pastName(names[0])]: gpuLike(new Tensor('float32', new Float32Array(16), [2, 2, 2, 2])),
+    [pastName(names[2])]: gpuLike(new Tensor('float32', new Float32Array(4), [2, 2])),
+  });
+  const inputs: Values = {
+    input_ids: new Tensor('int64', BigInt64Array.from([10n, 11n]), [2, 1]),
+    attention_mask: new Tensor('int64', BigInt64Array.from([1n, 1n, 1n, 1n]), [2, 2]),
+    position_ids: new Tensor('int64', BigInt64Array.from([0n, 0n, 1n, 1n, 2n, 2n]), [3, 2, 1]),
+    past_key_values: cache,
+  };
+  const outputs: Values = { logits: new Tensor('float32', new Float32Array(8), [2, 1, 4]) };
+  let received: Values | undefined;
+  const native = async (passed: Values) => { received = passed; return outputs; };
   try {
-    for (const tensor of Object.values(run.cache)) {
-      const data = tensor.data; const getData = tensor.ort_tensor.getData.bind(tensor.ort_tensor); let downloaded = false;
-      Object.defineProperties(tensor, {
-        location: { get: () => downloaded ? 'cpu' : 'gpu-buffer' },
-        data: { get: () => { assert.ok(downloaded, 'GPU cache read before download'); return data; } },
-      });
-      tensor.ort_tensor.getData = async (release?: boolean) => {
-        assert.equal(release, true); downloaded = true; downloads++; return getData(release);
-      };
+    for (let step = 0; step < 2; step++) {
+      assert.equal(await decoder.forward(inputs, native), outputs, 'the native outputs pass through unchanged');
+      assert.equal(received, inputs, 'the full logical batch reaches the native decoder untouched');
     }
-    run.done.add(0);
-    (await run.decode()).copy.dispose(); (await run.decode()).copy.dispose();
-    assert.equal(downloads, 4); assert.deepEqual(run.calls, [[1], [1]]); run.caller.assertRetained();
-  } finally { run.dispose(); }
+    assert.equal(downloads, 0);
+  } finally { decoder.dispose(); (outputs.logits as Tensor).dispose(); for (const tensor of Object.values(inputs)) if (tensor instanceof Tensor) tensor.dispose(); }
 });
 
 test('empty active batch is rejected before native dispatch and caller state survives', async () => {

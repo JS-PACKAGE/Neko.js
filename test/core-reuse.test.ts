@@ -127,3 +127,28 @@ test('engine-private prefixes extend only by exact tokens, hand out isolated clo
   assert.deepEqual([cache.info().prefixEntries, cache.info().prefixBytes], [0, 0]);
   for (const tensor of [...Object.values(stored), ...Object.values(hit.cache), ...Object.values(again.cache)]) tensor.dispose();
 });
+
+test('GPU-resident state snapshots survive the working cache being consumed and disposed', async () => {
+  const { Tensor: OrtTensor } = await import('onnxruntime-node');
+  let downloads = 0; let releases = 0;
+  const gpu = (values: number[], dims: number[]) => new Tensor(OrtTensor.fromGpuBuffer({} as never, { dataType: 'float32', dims,
+    download: async () => { downloads++; return Float32Array.from(values); }, dispose: () => { releases++; } }) as never);
+  const working = new DynamicCache({
+    'past_key_values.3.key': gpu([1, 2, 3, 4], [1, 1, 2, 2]), 'past_key_values.3.value': gpu([5, 6, 7, 8], [1, 1, 2, 2]),
+    'past_conv.0': gpu([9, 10], [1, 2]), 'past_recurrent.0': gpu([11, 12], [1, 2]),
+  });
+  const cache = new InferenceReuseCache();
+  const saved = await cache.snapshot(working, [1n, 2n], 'conversation');
+  assert.deepEqual([downloads, releases], [4, 4]);
+  assert.equal(saved.bytes, 48);
+  // Generation feeds the downloaded state to its next run, then replaces and disposes it.
+  for (const tensor of Object.values(working)) { assert.equal(tensor.location, 'cpu'); tensor.dispose(); }
+  const handle = cache.commitState(saved);
+  const a = cache.checkout(handle, [1n, 2n, 3n], 'conversation');
+  (a.cache['past_recurrent.0']!.data as Float32Array)[0] = 99;
+  const b = cache.checkout(handle, [1n, 2n, 4n], 'conversation');
+  assert.deepEqual(Array.from(b.cache['past_key_values.3.value']!.data), [5, 6, 7, 8]);
+  assert.deepEqual(Array.from(b.cache['past_recurrent.0']!.data), [11, 12]);
+  cache.clear();
+  for (const tensor of [...Object.values(a.cache), ...Object.values(b.cache)]) tensor.dispose();
+});
