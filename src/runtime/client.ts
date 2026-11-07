@@ -324,7 +324,9 @@ export async function createWorkerClient(options: NekoOptions = {}): Promise<Wor
     await authorizeNetwork(configuration.policy, url, 'worker', configuration.localFilesOnly ?? false, undefined, active);
     active.throwIfAborted();
     const next = new Connection(await spawnWorker(url, active));
-    try { await next.request('create', [{ ...configuration, execution: 'inline' }], active); return next; }
+    // A browser SDK worker runs from a blob: URL with its module URL as `location`; caller-relative URLs must resolve against this realm.
+    const context = typeof location === 'object' ? [{ callerBaseUrl: location.href }] : [];
+    try { await next.request('create', [{ ...configuration, execution: 'inline' }, ...context], active); return next; }
     catch (cause) { await next.dispose(); throw cause; }
   };
   let connection = await initialize(creationSignal);

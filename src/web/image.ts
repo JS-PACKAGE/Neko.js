@@ -13,6 +13,7 @@ import { cachedImage, cacheImage } from './image-cache.js';
 import type { ImagePreprocessCache } from './image-cache.js';
 import { MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS, normalizeImageRegion, normalizedImageRegion, tileImageRegions, validateImageDimensions, validateImageTiling } from './image-regions.js';
 import type { ImageRegion, ImageTilingOptions, PixelRegion, NormalizedRegion } from './image-regions.js';
+import { callerBaseUrl } from '../runtime/context.js';
 
 export interface DecodedImage { data: Uint8Array | Uint8ClampedArray; width: number; height: number; channels: 1 | 2 | 3 | 4; }
 export type ImageInput = string | URL | Blob | DecodedImage;
@@ -199,7 +200,7 @@ async function prepareRegions(source: ImageInput, options: InternalImageOptions,
     } else if (isNode && (input instanceof URL ? input.protocol === 'file:' : !/^[a-z][a-z\d+.-]+:/i.test(input))) {
       bytes = await localBytes(input, maxBytes, signal, policy, offline !== undefined);
     } else {
-      const url = new URL(input, typeof location === 'object' ? location.href : undefined);
+      const url = new URL(input, callerBaseUrl());
       if (isNode && url.protocol === 'file:') bytes = await localBytes(url, maxBytes, signal, policy, offline !== undefined);
       else if (url.protocol === 'blob:') {
         const response = await fetch(url, { signal });

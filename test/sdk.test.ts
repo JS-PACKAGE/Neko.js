@@ -7,12 +7,12 @@ import { createNeko, MODEL_ID, MODEL_REVISION, NekoError } from '../src/index.js
 
 test('lazy SDK owns one runtime, scoped clearing preserves unrelated files, and concurrent disposal is awaited', async () => {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-sdk-'));
-  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu' });
+  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'inline' });
   try {
     assert.equal((await neko.cache.engine.status()).loaded, false);
     const status = await neko.cache.model.status();
     assert.equal(status.downloaded, false); assert.equal(status.verified, false); assert.equal(status.bytes, 0); assert.equal(status.path, directory);
-    await assert.rejects(createNeko({ cacheDir: directory, device: 'cpu' }), (error: unknown) => error instanceof NekoError && error.code === 'RUNTIME_BUSY');
+    await assert.rejects(createNeko({ cacheDir: directory, device: 'cpu', execution: 'inline' }), (error: unknown) => error instanceof NekoError && error.code === 'RUNTIME_BUSY');
     const namespace = join(directory, MODEL_ID, MODEL_REVISION);
     await mkdir(namespace, { recursive: true });
     await writeFile(join(namespace, 'notes.txt'), 'preserve namespace neighbor');
@@ -29,7 +29,7 @@ test('lazy SDK owns one runtime, scoped clearing preserves unrelated files, and 
       () => neko.planInference({ prompt: '', schema: { type: 'invalid' } }),
       () => neko.describe('', { language: 'not_a_language' }),
     ]) await assert.rejects(request(), (error: unknown) => error instanceof NekoError && error.code === 'DISPOSED');
-    const next = await createNeko({ cacheDir: directory, device: 'cpu' }); await next.dispose();
+    const next = await createNeko({ cacheDir: directory, device: 'cpu', execution: 'inline' }); await next.dispose();
   } finally { await neko.dispose(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -38,10 +38,10 @@ test('cancelling a factory after runtime installation releases ownership before 
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-abort-create-'));
   try {
     await assert.rejects(createNeko({
-      cacheDir: directory, device: 'cpu', signal: controller.signal,
+      cacheDir: directory, device: 'cpu', execution: 'inline', signal: controller.signal,
       cache: { get engineTtlMs() { controller.abort('cancelled during factory configuration'); return 0; } },
     }), (error: unknown) => error instanceof NekoError && error.code === 'ABORTED');
-    const next = await createNeko({ cacheDir: directory, device: 'cpu' }); await next.dispose();
+    const next = await createNeko({ cacheDir: directory, device: 'cpu', execution: 'inline' }); await next.dispose();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -83,7 +83,7 @@ test('prototype policy methods deny worker bootstrap, retain private receivers, 
 test('cold offline invalid requests fail preflight without acquiring an engine or fetching sources', async () => {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'neko-preflight-'));
   let requests = 0;
-  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', policy: { network: () => { requests++; return false; } } });
+  const neko = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'inline', policy: { network: () => { requests++; return false; } } });
   try {
     const controller = new AbortController(); controller.abort('already cancelled');
     for (const request of [

@@ -24,3 +24,9 @@ export function activeRequestSignal(instance: object): AbortSignal | undefined {
 export function workerBootstrapUrl(): URL {
   return new URL('./worker.js', import.meta.url);
 }
+
+let callerBase: string | undefined;
+/** Set once in a browser SDK worker from its creating page, so caller-relative URLs resolve as they would inline. */
+export function setCallerBaseUrl(href: string): void { callerBase = new URL(href).href; }
+/** Base for caller-relative URLs: the creating page in a browser SDK worker (not the worker's module URL), else this realm's location. */
+export function callerBaseUrl(): string | undefined { return callerBase ?? (typeof location === 'object' ? location.href : undefined); }

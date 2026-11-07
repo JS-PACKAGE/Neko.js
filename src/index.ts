@@ -69,6 +69,13 @@ export interface NekoOptions {
   model?: ModelId;
   modelProfile?: ModelProfileId;
   modelSource?: ModelSource;
+  /**
+   * Where inference runs. Defaults to `'worker'`: Node's native ONNX Runtime runs every session call synchronously on the calling thread
+   * (an inline prefill can block the event loop for seconds), and a browser page's ONNX Runtime WebGPU dispatch, session creation and
+   * prefill otherwise run on the page's main thread. In a browser, when this option is omitted and the SDK worker cannot be created (for
+   * example a CSP without `blob:` workers, a policy that denies the worker script, or no WebGPU in workers), the instance is created
+   * inline instead; `health()`/results report the actual mode. Pass `'inline'` to keep the realm-local owner, or `'worker'` to require one.
+   */
   execution?: 'inline' | 'worker';
   policy?: ResourcePolicy;
   queue?: { maxPending?: number };
@@ -400,7 +407,13 @@ export async function createNeko(configuration: NekoOptions = {}): Promise<Neko>
     const { policy, modelSource, ...settings } = configuration;
     const source = captureModelSource(modelSource);
     const options: OwnedNekoOptions = { ...settings, model: profile.id, modelProfile: profile.profile, ...(source === undefined ? {} : { modelSource: source }), policy: capturePolicy(policy), localFilesOnly: settings.localFilesOnly ?? false, cache: { ...settings.cache }, queue: { ...settings.queue }, ...(settings.reuseCache === undefined ? {} : { reuseCache: Object.freeze({ ...settings.reuseCache }) }) };
-    if (options.execution === 'worker') return createWorkerClient(options);
+    const node = typeof process !== 'undefined' && process.release?.name === 'node';
+    if (options.execution === 'worker' || options.execution === undefined && node) return createWorkerClient({ ...options, execution: 'worker' });
+    if (options.execution === undefined) {
+      // Only the default may fall back: everything the inline path does (and its errors) is unchanged when no worker can run here.
+      try { return await createWorkerClient({ ...options, execution: 'worker' }); }
+      catch (error) { if (options.signal?.aborted) throw error; }
+    }
     const admission = new RequestQueue(options.queue?.maxPending);
     const backend = await atStage('backend', options.signal, () => inspectBackend(options.device ?? 'webgpu', options.modelProfile));
     if (backend.runtime === 'browser' && backend.device === 'cpu') throw new NekoError('CPU/WASM cannot execute this pinned model: GatherBlockQuantized(1) is unavailable. Use a supported WebGPU browser; no automatic fallback is performed.', 'backend', 'UNSUPPORTED_BACKEND');

@@ -1,6 +1,6 @@
 import type { Neko, NekoOptions } from '../index.js';
 import { NekoError } from '../errors.js';
-import { activeRequestSignal, setWorkerExecution } from './context.js';
+import { activeRequestSignal, setCallerBaseUrl, setWorkerExecution } from './context.js';
 import { aborted, decode, encode, encodeFailure, encodedCharacters, failure, MAX_NOTIFICATION_CHARACTERS, MAX_OUTSTANDING_NOTIFICATIONS, streamTransfers, type CallbackMode, type MainMessage, type MessagePort, type RequestMessage, type WorkerExecution, type WorkerMessage } from './protocol.js';
 
 interface Operation {
@@ -112,6 +112,8 @@ export function installWorkerServer(port: MessagePort<MainMessage, WorkerMessage
       if (message.method === 'create') {
         if (initialized) throw new NekoError('Worker is already initialized', 'create', 'RUNTIME_BUSY');
         const options = args[0] as NekoOptions;
+        const context = args[1] as { callerBaseUrl?: unknown } | undefined;
+        if (typeof context?.callerBaseUrl === 'string') setCallerBaseUrl(context.callerBaseUrl);
         creatingSignal = operation.controller.signal;
         initialized = create({ ...options, execution: 'inline', signal: operation.controller.signal });
         owner = await initialized;

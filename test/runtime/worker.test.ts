@@ -18,10 +18,13 @@ test('native workers have independent runtime ownership and disposal releases ea
   const directory = await cacheDirectory();
   const owners: SDK.Neko[] = [];
   try {
-    const inline = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu' }); owners.push(inline);
+    const inline = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'inline' }); owners.push(inline);
     const first = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'worker' }); owners.push(first);
     const second = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'worker' }); owners.push(second);
-    await assert.rejects(createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu' }), (error: unknown) => error instanceof NekoError && error.code === 'RUNTIME_BUSY');
+    await assert.rejects(createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu', execution: 'inline' }), (error: unknown) => error instanceof NekoError && error.code === 'RUNTIME_BUSY');
+    // Node defaults to a worker, which never competes for the realm-local inline owner.
+    const defaulted = await createNeko({ cacheDir: directory, localFilesOnly: true, device: 'cpu' }); owners.push(defaulted);
+    assert.equal((await defaulted.health()).execution.mode, 'worker');
     assert.equal((await first.backend.current())?.runtime, 'node');
     assert.equal((await second.backend.current())?.runtime, 'node');
     assert.equal(await first.runtimeStatus(), null);

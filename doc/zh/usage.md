@@ -95,7 +95,7 @@ try {
 
 預設 `structuredMode: 'constrained'` 使用真正的 tokenizer-aware JSON grammar，逐 token 限制合法候選，再完整執行 runtime schema 驗證；結果 `structured.mode` 為 `'tokenizer-constrained-runtime-validation'`。支援 primitive type、primitive `enum`／`const`、字串 `minLength`／`maxLength`、以 `properties`／`required`／`additionalProperties: false` 定義的封閉物件，以及同質 `items` 陣列的 `minItems`／`maxItems`／`uniqueItems`。數值上下界、schema composition 等不受 grammar 支援的契約在取得引擎前以 `SCHEMA_UNSUPPORTED` 拒絕，不會暗中 fallback。只有明確指定 `structuredMode: 'validation-only'` 才使用既有完整受支援 Draft-07 runtime validator 與 JSON 邊界停止，結果模式為 `'json-boundary-runtime-validation'`；無效 schema 為 `SCHEMA_INVALID`。兩種模式皆驗證整個 JSON，不修補生成、不擷取子字串，不保證完成或事實正確。完成 JSON 的同一 token 若含尾端多餘內容仍會拒絕；數字根值需空白或 EOS 確立邊界。Schema／JSON 不符為 `STRUCTURED_OUTPUT`。
 
-每個引擎的首次 constrained 請求會建立可重用的 token trie，並在建置階段間讓出 host task，減少啟動時連續佔用執行緒的工作；這不保證單一 task 的耗時上限或推理更快。若模型工作必須離開 UI 執行緒，請使用 worker 模式。
+每個引擎的首次 constrained 請求會建立可重用的 token trie，並在建置階段間讓出 host task，減少啟動時連續佔用執行緒的工作；這不保證單一 task 的耗時上限或推理更快。若模型工作必須離開 UI 執行緒，請維持 worker 模式（預設）。
 
 ### 精確推理規劃
 
@@ -349,7 +349,7 @@ try {
 
 `ReportError.partial`／checkpoint 亦跨 worker 傳輸；partial 不是完整可驗證報告。失敗在 checkpoint 建立前可能只有 `NekoError`；續跑保留所有已花費 accounting，不重置預算。
 
-除 `inferStream` 與 `cache.model.exportBundle` 同步回傳串流，以及同步建立 session 外，cache／backend／status 方法回傳 Promise。`cache.model.prefetch/status/clear` 僅操作選取的 pinned profile；`cache.engine.status/release` 檢查／釋放 live engine。`cache: { engine: true, engineTtlMs: 1_800_000 }` 於閒置 30 分鐘內重用引擎。`backend.detect()` 不證明 native driver／session 成功。預設 `execution: 'inline'` 只允許一個 process-global runtime owner；`'worker'` 使用真正 Node thread 或 browser module worker。各實例使用有上限 FIFO（`queue: { maxPending: 8 }`），滿額為 `QUEUE_FULL`；`queueStatus()` 提供狀態。Worker 保留 callback 順序與 typed errors／checkpoints／partial。`dispose()` 取消排隊工作、等待目前工作的安全清理、釋放資源並還原 hooks。
+除 `inferStream` 與 `cache.model.exportBundle` 同步回傳串流，以及同步建立 session 外，cache／backend／status 方法回傳 Promise。`cache.model.prefetch/status/clear` 僅操作選取的 pinned profile；`cache.engine.status/release` 檢查／釋放 live engine。`cache: { engine: true, engineTtlMs: 1_800_000 }` 於閒置 30 分鐘內重用引擎。`backend.detect()` 不證明 native driver／session 成功。`execution` 在 Node 與瀏覽器皆預設為 `'worker'`。瀏覽器未指定 `execution` 且無法建立 SDK worker 時（例如 CSP 禁止 `blob:` worker、policy 拒絕 `worker` 腳本，或 worker 內沒有 WebGPU），會改以 inline 建立，行為與錯誤與 `execution: 'inline'` 相同；`health()` 與結果會回報實際模式。明確指定 `'worker'` 時不會改用 inline。瀏覽器 worker 中的相對圖片 URL 字串仍以建立它的頁面為基準解析。`'inline'` 只允許一個 process-global runtime owner；`'worker'` 使用真正 Node thread 或 browser module worker。Node 的原生 ONNX Runtime 1.30 會在呼叫執行緒上同步執行每次 session 呼叫，因此 inline 執行會在每次 prefill 與 decode 步驟阻塞 event loop：一份在高負載機器上的 inline 文字報告，於階段開始時量到最長約 1.9 秒的 event loop 停頓；worker 則約 55–71 ms。在 Node 若需保留 realm-local owner（例如共用程序內 hooks），請明確傳入 `execution: 'inline'`。各實例使用有上限 FIFO（`queue: { maxPending: 8 }`），滿額為 `QUEUE_FULL`；`queueStatus()` 提供狀態。Worker 保留 callback 順序與 typed errors／checkpoints／partial。`dispose()` 取消排隊工作、等待目前工作的安全清理、釋放資源並還原 hooks。
 
 `policy.network(url, kind)` 正常回傳（`undefined`／`true`）表示核准；拋錯／回傳 `false` 表示拒絕。`kind` 為 `model`、`runtime`、`worker`、`page`、`image`。`policy.localFiles(canonicalPath)` 明確核准 Node 輸入檔案。預設只允許固定模型傳輸與套件 bootstrap；任意頁面／圖片目的地與本機檔案預設拒絕。每個可觀測 redirect hop 都先核准；每次呼叫的 `validateDestination` 只增加限制，不取代實例 policy。SDK 無法替部署判斷 private／SSRF-safe 邊界，應用程式核准須自行落實。
 
@@ -648,7 +648,7 @@ try {
    ```
 
    環境變數是 **revision 目錄**，不是快取根目錄。`256` 是明確的每階段輸出預算，不保證所有報告都能完成。Runner 結束會關閉暫存 server／profile；它是真實推理檢查，不是持續運作的開發伺服器。瀏覽器／driver 須支援 WebGPU，`--headed` 不會產生 adapter。隨附 demo 本身沒有 mirror URL 欄位，故空快取時單純開啟 demo 並不會設定首次線上 mirror。
-3. 自己的應用程式須透過 HTTPS 或可信任 loopback HTTP 提供 ESM bundle 與整個 `dist/browser/assets/`，**不可**使用 `file:`。保留輸出的 `neko.js`、`worker.js`、`assets/` 相對佈局；`.js`／`.mjs` 使用 JavaScript MIME、`.wasm` 使用 `application/wasm`。WebGPU 仍需要 ONNX WASM runtime 資產，這不是 CPU fallback。若使用 SDK 的 fetched/blob runtime modules 與 module workers，CSP 須允許它們。
+3. 自己的應用程式須透過 HTTPS 或可信任 loopback HTTP 提供 ESM bundle 與整個 `dist/browser/assets/`，**不可**使用 `file:`。保留輸出的 `neko.js`、`worker.js`、`assets/` 相對佈局；`.js`／`.mjs` 使用 JavaScript MIME、`.wasm` 使用 `application/wasm`。WebGPU 仍需要 ONNX WASM runtime 資產，這不是 CPU fallback。CSP 須允許 SDK 的 fetched/blob runtime modules；預設的 worker 執行另需允許 `blob:` module worker（否則預設實例會改以 inline 執行）。在頁面主執行緒上，inline 執行也會用短暫的 classic `blob:` worker 解析固定的 tokenizer.json，並計算大型已驗證模型檔的 SHA-256（Chromium 的 `crypto.subtle.digest` 否則會在頁面上同步執行，decoder 資料約 0.3 秒）；位元組以 transfer 往返，不複製。若 `worker-src` 阻擋這些 worker，頁面會自行處理，模型載入期間會多出 long task。
 4. 建議以應用程式同 origin 的 `/models/` reverse proxy 連至 loopback mirror，完整保留固定路徑，upstream 設定 `Host: 127.0.0.1:8787`（helper 拒絕任意 Host）。若轉送 `Origin`，`--allow-origin` 應為精確應用程式 origin。勿公開任意快取檔案或通用 URL proxy。例如既有 nginx server 監聽 `http://127.0.0.1:4173` 時：
 
    ```nginx

@@ -26,7 +26,7 @@ async function fixture(context: TestContext, onEvent: NekoOptions['onEvent'], in
     planInference: async () => ({ inputTokens: 4, maxNewTokens: 128, contextLimit: 4096, availableOutputTokens: 4092, fits: true, model: result.model }),
   } as unknown as VisionEngine;
   context.mock.method(EngineCache.prototype, 'use', async (operation: (engine: VisionEngine) => Promise<unknown>) => operation(engine));
-  const neko = await createNeko({ device: 'cpu', localFilesOnly: true, cacheDir: directory, ...(onEvent ? { onEvent } : {}) });
+  const neko = await createNeko({ device: 'cpu', execution: 'inline', localFilesOnly: true, cacheDir: directory, ...(onEvent ? { onEvent } : {}) });
   context.after(async () => { await neko.dispose(); await rm(directory, { recursive: true, force: true }); });
   return neko;
 }
