@@ -18,6 +18,7 @@ import { withBrowserInstallLock, withNodeInstallLock } from './lock.js';
 import type { AsyncLocalStorage } from 'node:async_hooks';
 import type * as NodeWorkerThreads from 'node:worker_threads';
 import type { GraphPatch } from './graph-patch.js';
+import { onPageMainThread, PageWorkerUnavailable, runPageWorker } from '../runtime/page-worker.js';
 
 const isNode = typeof process !== 'undefined' && process.release?.name === 'node';
 
@@ -170,12 +171,43 @@ function lazilyVerified(response: CachedResponse, name: ModelFileName, spec: Res
   }, { highWaterMark: 0 });
   const verified = new Response(body, { status: response.status, headers });
   // Chromium's native body readers replace stream errors with TypeError('Failed to fetch'); surface the integrity error instead.
-  for (const method of ['arrayBuffer', 'bytes', 'blob', 'text', 'json'] as const) {
+  for (const method of ['blob', 'text', 'json'] as const) {
     const read = verified[method] as (() => Promise<unknown>) | undefined;
     if (typeof read === 'function') Object.defineProperty(verified, method, { value: async () => { try { return await read.call(verified); } catch (error) { throw failure ?? error; } } });
   }
+  // Whole-body reads (Transformers.js uses `arrayBuffer()` without a progress callback) return the verified buffer itself: the native
+  // readers would copy every payload again on the calling thread (about 130 ms of main-thread time for the pinned model on a page).
+  // The body is locked first and cancelled afterwards, so it reads as used and cannot be consumed a second time.
+  const whole = async (): Promise<Uint8Array<ArrayBuffer>> => {
+    if (verified.bodyUsed || body.locked) throw new TypeError('Body has already been consumed');
+    const lock = body.getReader();
+    try { return await readVerifiedBytes(response, name, spec, options, 'verify', signal); }
+    catch (error) { failure = error; report(error); throw error; }
+    finally { await lock.cancel().catch(() => undefined); }
+  };
+  Object.defineProperty(verified, 'arrayBuffer', { value: async () => (await whole()).buffer });
+  if (typeof verified.bytes === 'function') Object.defineProperty(verified, 'bytes', { value: whole });
   verifiedResponses.set(verified, spec);
   return verified;
+}
+/**
+ * Chromium computes `crypto.subtle.digest` synchronously on the calling thread: hashing the 484 MB decoder data blocked a page for
+ * about 0.3 s. On a page's main thread, large payloads move to a worker and back (transfers, not copies); the worker hashes exactly
+ * the bytes it returns. A worker that cannot start leaves the bytes here to be hashed in place.
+ */
+const DIGEST_IN_WORKER_BYTES = 16 * 1024 * 1024;
+const DIGEST_WORKER = `self.onmessage = async (event) => { const bytes = event.data; const sha = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)); self.postMessage({ sha, bytes }, [bytes.buffer]); };`;
+async function browserDigest(bytes: Uint8Array<ArrayBuffer>): Promise<{ sha: Uint8Array; bytes: Uint8Array<ArrayBuffer> }> {
+  if (!globalThis.crypto?.subtle) throw new Error('Verified model loading requires WebCrypto in a secure context');
+  if (bytes.byteLength >= DIGEST_IN_WORKER_BYTES && onPageMainThread()) {
+    const length = bytes.byteLength;
+    try {
+      const result = await runPageWorker<{ sha: Uint8Array; bytes: Uint8Array<ArrayBuffer> }>(DIGEST_WORKER, bytes, [bytes.buffer]);
+      if (!(result.sha instanceof Uint8Array) || result.sha.byteLength !== 32 || !(result.bytes instanceof Uint8Array) || result.bytes.byteLength !== length) throw new Error('Digest worker returned an invalid result');
+      return result;
+    } catch (error) { if (!(error instanceof PageWorkerUnavailable)) throw error; }
+  }
+  return { sha: new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), bytes };
 }
 async function readVerifiedBytes(response: CachedResponse, name: ModelFileName, spec: ResourceSpec, options: VerifiedCacheOptions, phase: CacheProgress['phase'], signal?: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
   checkLength(response, name, spec);
@@ -200,16 +232,17 @@ async function readVerifiedBytes(response: CachedResponse, name: ModelFileName, 
     signal?.throwIfAborted();
     if (loaded !== spec.size) throw integrity(name, 'size');
     let digest: string;
+    let verified = bytes;
     if (hash) digest = hash.digest('hex');
     else {
-      if (!globalThis.crypto?.subtle) throw new Error('Verified model loading requires WebCrypto in a secure context');
-      const sha = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+      const result = await browserDigest(bytes);
+      verified = result.bytes;
       digest = '';
-      for (const byte of sha) digest += byte.toString(16).padStart(2, '0');
+      for (const byte of result.sha) digest += byte.toString(16).padStart(2, '0');
     }
     signal?.throwIfAborted();
     if (digest !== spec.sha256) throw integrity(name, 'SHA-256');
-    return bytes;
+    return verified;
   } catch (error) {
     await reader.cancel(error).catch(() => undefined);
     throw error;
