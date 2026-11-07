@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import test from 'node:test';
+import { parse } from 'parse5';
 import { extractPage } from '../../src/web/index.js';
+import { parseHtml } from '../../src/web/extract.js';
 import type { TableCell } from '../../src/types.js';
 
 test('extracts visible text once in DOM order and retains source offsets', async () => {
@@ -202,4 +204,17 @@ test('implicit table header association matches a whole-table reference scan', a
     }
   }
   assert.ok(links > 1000);
+});
+
+test('chunked HTML parsing yields the same tree and source offsets as one parse at every chunk boundary', async () => {
+  type Node = { nodeName: string; value?: string; data?: string; attrs?: { name: string; value: string }[]; childNodes?: Node[]; content?: Node; sourceCodeLocation?: unknown };
+  const shape = (node: Node): unknown => ({ name: node.nodeName, value: node.value, data: node.data, attrs: node.attrs, at: node.sourceCodeLocation, children: node.childNodes?.map(shape), content: node.content && shape(node.content) });
+  // CRLF pairs, surrogate pairs, character references, raw text, comments, attributes and misnested tags at every possible split.
+  const html = '<!DOCTYPE html>\r\n<html><head><title>A &amp; B</title><style>p{}</style></head><body>\r\n<p class="a" data-x=\'&lt;\'>😀 caf\u00e9 &copy;&#x1F600;&notanentity;</p><!-- c -->\r\n'
+    + '<script>if (a < b && "</p>") {}</script><table><tr><td>1<td>2</table><b><i>x</b>y</i><textarea>\r\n t</textarea><template><p>t</p></template><svg><path d="M0"/></svg>\r</body></html>';
+  const expected = shape(parse(html, { scriptingEnabled: false, sourceCodeLocationInfo: true }) as unknown as Node);
+  for (const chunk of [1, 2, 3, 5, 7, 64]) assert.deepEqual(shape(await parseHtml(html, undefined, chunk) as unknown as Node), expected, `chunk ${chunk}`);
+  const aborted = new AbortController(); aborted.abort();
+  const large = '<p>x</p>'.repeat(200_000);
+  await assert.rejects(parseHtml(large, aborted.signal, 64), (error: unknown) => error instanceof Error && error.name === 'AbortError');
 });

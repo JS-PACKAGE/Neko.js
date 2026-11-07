@@ -1,6 +1,7 @@
 import type { Page } from '../types.js';
 import { canonicalJson, hashText, validatePage } from '../web/source.js';
 import { NekoError } from '../errors.js';
+import { yieldToPage } from '../runtime/page-worker.js';
 import { cosineRanking, EmbeddingStore, embedTexts, rankOrder, reciprocalRankFusion, semanticSettings, validateEmbedder, type DocumentEmbedder, type Ranked, type SemanticCoverage, type SemanticSearchSettings } from './semantic.js';
 
 export interface DocumentSource {
@@ -217,7 +218,16 @@ function canonicalDocument(document: IndexedDocument): string {
   return text;
 }
 interface CreatedChunk { id: string; entry: ChunkEntry; frequencies: Map<string, number>; }
-function chunkDocument(document: DocumentInput, versionId: string, options: DocumentIndexConfig, capacity: number): CreatedChunk[] {
+const INDEX_SLICE_MS = 8;
+/**
+ * Yields to the event loop once the current slice has run `INDEX_SLICE_MS`. Building a large corpus is otherwise one synchronous
+ * stretch on Node (whose hashing does not yield): about 300 ms for 50 documents of 138K characters.
+ */
+function slicer(): () => Promise<void> {
+  let started = performance.now();
+  return async () => { if (performance.now() - started >= INDEX_SLICE_MS) { await yieldToPage(); started = performance.now(); } };
+}
+async function chunkDocument(document: DocumentInput, versionId: string, options: DocumentIndexConfig, capacity: number, pace: () => Promise<void>): Promise<CreatedChunk[]> {
   const created: CreatedChunk[] = [];
   for (const range of ranges(document)) {
     let start = range.startOffset;
@@ -239,6 +249,7 @@ function chunkDocument(document: DocumentInput, versionId: string, options: Docu
         const frequencies = new Map<string, number>(); const tokens = terms(text);
         for (const term of tokens) frequencies.set(term, (frequencies.get(term) ?? 0) + 1);
         created.push({ id, entry: { chunk, length: tokens.length }, frequencies });
+        await pace();
       }
       start = end;
     }
@@ -250,6 +261,7 @@ function chunkDocument(document: DocumentInput, versionId: string, options: Docu
  * postings; only changed, added and removed documents are re-tokenized. The result is identical to a from-scratch build.
  */
 async function build(documents: DocumentInput[], options: DocumentIndexConfig, revision: number, previous?: IndexState): Promise<IndexState> {
+  const pace = slicer();
   if (documents.length > options.maxDocuments || documents.reduce((n, doc) => n + doc.text.length, 0) > options.maxCharacters) throw new RangeError('Document index capacity exceeded');
   const sorted = [...documents].sort((a, b) => compare(a.id, b.id));
   const priorDocuments = previous?.snapshot.options === options ? new Map(previous.snapshot.documents.map((document) => [document.id, document])) : undefined;
@@ -266,6 +278,7 @@ async function build(documents: DocumentInput[], options: DocumentIndexConfig, r
   const indexed: IndexedDocument[] = []; const chunks = new Map<string, ChunkEntry>(); const created: CreatedChunk[] = []; let totalLength = 0;
   const keptDocuments = new Set<string>();
   for (const document of sorted) {
+    await pace();
     if (indexed.at(-1)?.id === document.id) throw new TypeError('Duplicate document ID');
     const prior = incremental ? unchanged(document) : undefined;
     let versionId: string; let entries: { id: string; entry: ChunkEntry }[]; let canonicalText: string | undefined;
@@ -274,7 +287,7 @@ async function build(documents: DocumentInput[], options: DocumentIndexConfig, r
       entries = (priorChunks.get(document.id) ?? []).map((entry) => ({ id: entry.chunk.id, entry }));
     } else {
       canonicalText = canonicalJson(document); versionId = await hashText(canonicalText);
-      const fresh = chunkDocument(document, versionId, options, options.maxChunks - chunks.size);
+      const fresh = await chunkDocument(document, versionId, options, options.maxChunks - chunks.size, pace);
       for (const item of fresh) created.push(item);
       entries = fresh;
     }
@@ -295,14 +308,18 @@ async function build(documents: DocumentInput[], options: DocumentIndexConfig, r
     for (const entry of previous.chunks.values()) {
       if (keptDocuments.has(entry.chunk.documentId)) continue;
       removed.add(entry.chunk.id); for (const term of terms(entry.chunk.text)) touched.add(term);
+      await pace();
     }
     const additions = new Map<string, [string, number][]>();
-    for (const { id, frequencies } of created) for (const [term, count] of frequencies) {
-      touched.add(term); const list = additions.get(term); if (list) list.push([id, count]); else additions.set(term, [[id, count]]);
+    for (const { id, frequencies } of created) {
+      for (const [term, count] of frequencies) { touched.add(term); const list = additions.get(term); if (list) list.push([id, count]); else additions.set(term, [[id, count]]); }
+      await pace();
     }
     const order = new Map<string, number>(); let position = 0;
     for (const id of chunks.keys()) order.set(id, position++);
+    let visited = 0;
     for (const term of touched) {
+      if ((++visited & 255) === 0) await pace();
       const ids: string[] = []; const counts: number[] = [];
       const prior = previous.postings.get(term);
       if (prior) for (let index = 0; index < prior.ids.length; index++) if (!removed.has(prior.ids[index]!)) { ids.push(prior.ids[index]!); counts.push(prior.counts[index]!); }
@@ -317,8 +334,11 @@ async function build(documents: DocumentInput[], options: DocumentIndexConfig, r
       if (ids.length) postings.set(term, { ids, counts }); else postings.delete(term);
     }
   } else {
-    for (const { id, frequencies } of created) for (const [term, count] of frequencies) {
-      let posting = postings.get(term); if (!posting) { posting = { ids: [], counts: [] }; postings.set(term, posting); } posting.ids.push(id); posting.counts.push(count);
+    for (const { id, frequencies } of created) {
+      for (const [term, count] of frequencies) {
+        let posting = postings.get(term); if (!posting) { posting = { ids: [], counts: [] }; postings.set(term, posting); } posting.ids.push(id); posting.counts.push(count);
+      }
+      await pace();
     }
   }
   Object.freeze(indexed);

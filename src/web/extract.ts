@@ -1,8 +1,9 @@
-import { parse } from 'parse5';
+import { parse, Parser } from 'parse5';
 import type { ImageDiscovery, Page, PageImage, Paragraph, PageContainer, PageTable, TableCell } from '../types.js';
 import { policyDestination } from './policy.js';
 import type { ResourcePolicy } from './policy.js';
 import { awaitUser } from '../errors.js';
+import { yieldToPage } from '../runtime/page-worker.js';
 
 export interface ExtractOptions {
   baseUrl?: string;
@@ -38,6 +39,30 @@ const flowContainerTags: Record<string, true> = { div: true, section: true, arti
 const defaultHtmlLimit = 2 * 1024 * 1024;
 const defaultImageCount = 20;
 const defaultTimeout = 10_000;
+const HTML_PARSE_CHUNK = 65_536;
+const HTML_PARSE_SLICE_MS = 8;
+const parseOptions = { scriptingEnabled: false, sourceCodeLocationInfo: true } as const;
+/**
+ * Parse a document, yielding between 64K-character chunks once a slice has run 8 ms: a 1.5 MB page parsed in one call blocked the
+ * calling thread for about 40-80 ms. parse5's tokenizer accepts chunked input (its own streaming parser feeds it the same way, and
+ * this exact pinned version is used), producing the same tree and source offsets as a single `parse`. `chunk` is exposed for tests.
+ */
+export async function parseHtml(html: string, signal?: AbortSignal, chunk = HTML_PARSE_CHUNK): Promise<HtmlNode> {
+  if (html.length <= chunk) return parse(html, parseOptions) as unknown as HtmlNode;
+  const parser = new Parser(parseOptions);
+  let started = performance.now();
+  for (let at = 0; at < html.length; at += chunk) {
+    const end = Math.min(at + chunk, html.length);
+    parser.tokenizer.write(html.slice(at, end), end === html.length);
+    // Yield after the last chunk too, so the final parse slice and the structure walk that follows are separate tasks.
+    if (performance.now() - started >= HTML_PARSE_SLICE_MS) {
+      await yieldToPage();
+      signal?.throwIfAborted();
+      started = performance.now();
+    }
+  }
+  return parser.document as unknown as HtmlNode;
+}
 
 function attr(node: HtmlNode, name: string): string | undefined {
   return node.attrs?.find((item) => item.name === name)?.value;
@@ -503,7 +528,7 @@ export async function extractPage(input: string, options: ExtractOptions = {}, c
     html = input;
   }
   options.signal?.throwIfAborted();
-  const document = parse(html, { scriptingEnabled: false, sourceCodeLocationInfo: true }) as unknown as HtmlNode;
+  const document = await parseHtml(html, options.signal);
   const titleNode = findFirst(document, 'title');
   const title = titleNode ? normalizeText(textContent(titleNode)) : '';
   const root = contentRoot(document, options.content ?? 'full');
