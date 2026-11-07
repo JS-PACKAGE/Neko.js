@@ -250,3 +250,22 @@ for (const failure of ['abort', 'forward'] as const) test(`${failure} between pr
   assert.equal(reuse.info().prefixEntries, 0);
   disposeOutputs(inputs); discard(staged, reuse); reuse.clear();
 });
+
+test('each image row prefills with only its own patches and grid; text rows see neither', async () => {
+  const tokens = [[5n, 9n], [2n, 7n, 11n], [4n, 6n, 8n, 10n]];
+  const { inputs, width } = batch(tokens); const retained = watchInputs(inputs);
+  const vision = [undefined, { pixel_values: new Tensor('float32', new Float32Array(4), [2, 2]), image_grid_thw: new Tensor('int64', [1n, 2n, 2n], [1, 3]) },
+    { pixel_values: new Tensor('float32', new Float32Array(8), [4, 2]), image_grid_thw: new Tensor('int64', [1n, 2n, 4n], [1, 3]) }];
+  // Batch-level vision inputs, as upstream generation carries them, must never reach a row's prefill.
+  inputs.pixel_values = new Tensor('float32', new Float32Array(12), [6, 2]); inputs.image_grid_thw = new Tensor('int64', [1n, 2n, 2n, 1n, 2n, 4n], [2, 3]);
+  const reuse = new InferenceReuseCache(); const staged = new Map<string, GenerationStateSnapshot>(); const model = synthetic();
+  const seen: unknown[][] = [];
+  const forward = (row: Outputs) => { seen.push([row.pixel_values, row.image_grid_thw]); return model.forward(row); };
+  const output = await prefillBatch(inputs, tokens.map((row, index) => ({ inputTokens: row.length, vision: vision[index] })), forward, reuse, staged, () => {});
+  assertMerged(output, tokens, width);
+  assert.equal(seen.length, 3);
+  for (const [index, [pixels, grid]] of seen.entries()) { assert.equal(pixels, vision[index]?.pixel_values); assert.equal(grid, vision[index]?.image_grid_thw); }
+  model.owned.assertDisposed(); assertInputsRetained(inputs, retained);
+  disposeOutputs(output); disposeOutputs(inputs); reuse.clear();
+  for (const row of vision) if (row) { row.pixel_values.dispose(); row.image_grid_thw.dispose(); }
+});

@@ -85,6 +85,8 @@ async function availableThreads(): Promise<number> {
 }
 type PretrainedConfigOption = NonNullable<NonNullable<Parameters<typeof PreTrainedModel.from_pretrained>[1]>['config']>;
 const MIN_PREFIX_TOKENS = 32;
+/** Processor outputs an image row may carry into a batch; the size metadata is never read by generation. */
+const BATCH_IMAGE_INPUTS: Record<string, true> = { pixel_values: true, image_grid_thw: true, original_sizes: true, reshaped_input_sizes: true };
 /** Prompt texts whose counts must match full rendering before `countPrompt` counts only the user text; the first is the base. */
 const PROMPT_PROBES = ['x', '  Source JSON:\n[{"evidenceId":"q1","quote":"Ünïcödé 貓 😀"}]\nNow output only the requested JSON object.\n\n', '\u0301 combining first and last e\u0301', '<|im_end|>\n<|im_start|>assistant\nspecial-token text', '\t\u3000wide\u00a0spaces\u2028'];
 function disposeInputs(inputs: Record<string, unknown>): void { for (const value of Object.values(inputs)) if (value instanceof Tensor) value.dispose(); }
@@ -388,9 +390,15 @@ export class VisionEngine {
       throw error;
     }
   }
+  /**
+   * Whether `inferStructuredBatch` accepts image rows: only on browser WebGPU, where batched decoding was measured to reproduce
+   * unbatched output. On the Node CPU backend batched arithmetic changed a generated word, so images stay sequential there.
+   */
+  get batchesImages(): boolean { return this.backend.runtime === 'browser' && this.backend.device === 'webgpu'; }
   async inferStructuredBatch(requests: readonly StructuredBatchRequest[]): Promise<PromiseSettledResult<StructuredInferenceResult>[] | undefined> {
     if (requests.length < 2 || requests.length > 4) return undefined;
-    if (requests.some(({ options, context }) => typeof options.prompt !== 'string' || options.messages !== undefined || options.image !== undefined || options.images !== undefined || options.onToken !== undefined || options.reuse !== undefined || options.generation?.sampling || context.preparedImages !== undefined || options.hardDeadlineMs !== undefined)) return undefined;
+    // A row may carry one prepared (untiled) image; every other multimodal or streaming form keeps the single-request path.
+    if (requests.some(({ options, context }) => typeof options.prompt !== 'string' || options.messages !== undefined || options.images !== undefined || options.tiling !== undefined || (options.image !== undefined) !== (context.preparedImages?.length === 1) || options.image !== undefined && !this.batchesImages || options.onToken !== undefined || options.reuse !== undefined || options.generation?.sampling || options.hardDeadlineMs !== undefined)) return undefined;
     const schemas = requests.map(({ options, context }) => {
       validateInferenceOptions(options);
       validateDiagnosticOptions(options.diagnostics);
@@ -409,7 +417,7 @@ export class VisionEngine {
     const budgets = requests.map(({ context }) => context.budget).filter((budget) => budget !== undefined);
     if (new Set(budgets).size !== budgets.length) return undefined;
     const started = performance.now();
-    const prepared: { inputs: Record<string, unknown>; inputTokens: number; prefixTokens?: bigint[] | undefined; maxNewTokens: number; contextLimit: number; preprocessing?: PreprocessingReuse | undefined }[] = [];
+    const prepared: { inputs: Record<string, unknown>; inputTokens: number; prefixTokens?: bigint[] | undefined; maxNewTokens: number; contextLimit: number; images: ImageObservation[]; preprocessing?: PreprocessingReuse | undefined }[] = [];
     const inputs: Record<string, Tensor> = {};
     const stagedPrefixes = new Map<string, GenerationStateSnapshot>();
     this.generating = true;
@@ -426,7 +434,15 @@ export class VisionEngine {
       const maxNewTokens = first.options.maxNewTokens ?? 128;
       const width = Math.max(...prepared.map((row) => row.inputTokens));
       // Padding must never shrink a row's reserved output allowance or overflow its physical decoder context.
-      if (prepared.some((row) => row.maxNewTokens !== maxNewTokens || width + maxNewTokens > row.contextLimit || Object.keys(row.inputs).some((key) => key !== 'input_ids' && key !== 'attention_mask'))) return undefined;
+      if (prepared.some((row) => row.maxNewTokens !== maxNewTokens || width + maxNewTokens > row.contextLimit || Object.keys(row.inputs).some((key) => !(key === 'input_ids' || key === 'attention_mask' || row.images.length === 1 && Object.hasOwn(BATCH_IMAGE_INPUTS, key))))) return undefined;
+      const grids: Tensor[] = [];
+      for (const row of prepared) {
+        if (!row.images.length) continue;
+        const { pixel_values: pixels, image_grid_thw: grid } = row.inputs;
+        if (!(pixels instanceof Tensor) || !(grid instanceof Tensor) || grid.dims.length !== 2 || grid.dims[0] !== 1 || grid.dims[1] !== 3) return undefined;
+        grids.push(grid);
+      }
+      if (grids.length) await this.ensureVision(first.options.signal);
       const eos = this.model.generation_config?.eos_token_id;
       if (!(Array.isArray(eos) ? eos : [eos]).some((id) => typeof id === 'number' && Number.isSafeInteger(id) && id >= 0 && id < this.vocabularySize)) return undefined;
       const pad = this.model.generation_config?.pad_token_id ?? (Array.isArray(eos) ? eos[0] : eos);
@@ -439,15 +455,19 @@ export class VisionEngine {
         const offset = index * width + width - row.inputTokens;
         for (let token = 0; token < row.inputTokens; token++) ids[offset + token] = BigInt(source.data[token]!);
         mask.fill(1n, offset, (index + 1) * width);
-        return { request: requests[index]!, compiled: schemas[index]!.compiled, effective: schemas[index]!.effective, inputTokens: row.inputTokens, prefixTokens: row.prefixTokens, preprocessing: row.preprocessing };
+        const vision = row.images.length ? { pixel_values: row.inputs.pixel_values as Tensor, image_grid_thw: row.inputs.image_grid_thw as Tensor } : undefined;
+        return { request: requests[index]!, compiled: schemas[index]!.compiled, effective: schemas[index]!.effective, inputTokens: row.inputTokens, prefixTokens: row.prefixTokens, preprocessing: row.preprocessing, ...(vision ? { vision, images: row.images } : {}) };
       });
       inputs.input_ids = new Tensor('int64', ids, [requests.length, width]);
       inputs.attention_mask = new Tensor('int64', mask, [requests.length, width]);
+      // Grids alone let upstream compute every row's multimodal RoPE positions; each row's own patches are encoded in its prefill.
+      if (grids.length) inputs.image_grid_thw = cat(grids, 0);
       const trie = schema.effective.grammar ? (this.tokenTrie ??= await tokenizerByteTrie(this.processor.tokenizer!)) : undefined;
       const results = await generateStructuredBatch({ model: this.model, processor: this.processor, identity: this.identity, backend: this.loadedBackend(), loadMs: this.loadMs, node: this.backend.runtime === 'node', started, trie,
         prefill: (modelInputs, forward, check) => prefillBatch(modelInputs, rows, forward, this.reuseCache, stagedPrefixes, check) }, inputs, rows, schema.settings, maxNewTokens);
       if (results.some((result) => result.status === 'fulfilled')) {
-        this.textReady = true;
+        if (results.some((result, index) => result.status === 'fulfilled' && !rows[index]!.vision)) this.textReady = true;
+        if (results.some((result, index) => result.status === 'fulfilled' && rows[index]!.vision)) this.visionReady = true;
         for (const [key, snapshot] of stagedPrefixes) { this.reuseCache.commitPrefix(key, snapshot); stagedPrefixes.delete(key); }
       }
       return results;

@@ -406,7 +406,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
     const batchCompleted = new Set<string>();
     const batchStarted = new Set<string>();
     const batchErrors = new Map<string, NekoError>();
-    let batchUnavailable = false;
+    const batchUnavailable = new Set<ReportPhase>();
     const run = async (id: string, phase: ReportPhase, source: unknown, allowed: Set<string>, prepared?: PreparedImage): Promise<EvidenceClaim[]> => {
       check();
       const multiple = phase === 'section' || id.startsWith('reduce:');
@@ -470,45 +470,57 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         await save(); await notify({ type: 'stage-complete', id, phase, usage: result.usage, elapsedMs: elapsed() }); return items;
       }
     };
-    const runSectionBatch = async (start: number): Promise<void> => {
+    /**
+     * Decodes up to two consecutive independent stages together (adjacent images or sections, or the summary and conclusion, whose
+     * inputs do not depend on each other); `run` then reuses each completed row or retries it alone. Stops at the first stage already
+     * completed or attempted, so a resumed report keeps its recorded stage order.
+     */
+    const runBatch = async (stages: { id: string; phase: ReportPhase; source: unknown; allowed: Set<string>; prepared?: PreparedImage }[]): Promise<void> => {
       const { onToken, ...batchOptions } = options;
-      if (batchUnavailable || onToken || options.generation?.sampling || options.hardDeadlineMs !== undefined) return;
+      const kind = stages[0]?.phase;
+      if (kind === undefined || batchUnavailable.has(kind) || onToken || options.generation?.sampling || options.hardDeadlineMs !== undefined) return;
       const rows = [];
       let reservedTokens = 0;
-      // Two rows limit padding and completion skew; four measured slower on the news report.
-      for (let index = start; index < Math.min(chunks.length, start + 2); index++) {
-        const id = `section:${index}`;
+      for (const { id, phase, source, allowed, prepared } of stages) {
         if (checkpoint.completed[id] || checkpoint.attempts.some((item) => item.id === id)) break;
-        const chunk = chunks[index]!;
-        const request = prompt('section', chunk);
-        const inputTokens = engine.countPrompt(request, compiledClaimSchema);
+        const multiple = phase === 'section';
+        const schema = multiple ? claimSchema : atomicClaimSchema; const compiled = multiple ? compiledClaimSchema : compiledAtomicSchema;
+        const request = prompt(phase, source, multiple);
+        // Image tokens are counted by the exact planner; text prompts by the cheaper prompt counter. A planning failure only skips
+        // batching: the stage then runs alone and reports its own error.
+        let inputTokens: number;
+        try {
+          inputTokens = prepared
+            ? (await engine.planInference({ ...batchOptions, prompt: request, image: prepared.input, schema, maxNewTokens, contextWindowTokens: context }, compiled)).inputTokens
+            : engine.countPrompt(request, compiled);
+        } catch { break; }
         const reservation = inputTokens + maxNewTokens;
         if (reservedTokens + reservation > budget.remainingTokens) break;
         reservedTokens += reservation;
         const timings = { preprocessMs: 0, generationMs: 0 };
         const rowBudget: InferenceBudget = { remainingTokens: reservation, deadline: budget.deadline, inputTokens: 0, outputTokens: 0, timings };
-        rows.push({ id, request, allowed: new Set(chunk.map((item) => item.evidenceId)), budget: rowBudget, timings,
-          requestHash: await hashValue({ phase: 'section', prompt: request, schema: claimSchema, imageVersion: null }),
-          attemptHash: await hashValue({ request, schema: claimSchema }) });
+        rows.push({ id, phase, multiple, schema, compiled, request, allowed, prepared, budget: rowBudget, timings,
+          requestHash: await hashValue({ phase, prompt: request, schema, imageVersion: phase === 'image' ? checkpoint.imageObservations[id.slice(6)]?.versionId : null }),
+          attemptHash: await hashValue({ request, schema }) });
       }
       if (rows.length < 2) return;
       check();
       for (const row of rows) {
-        await notify({ type: 'stage-start', id: row.id, phase: 'section', usage: checkpoint.usage, elapsedMs: elapsed() });
+        await notify({ type: 'stage-start', id: row.id, phase: row.phase, usage: checkpoint.usage, elapsedMs: elapsed() });
         batchStarted.add(row.id);
       }
       let outcomes: PromiseSettledResult<StructuredInferenceResult>[] | undefined;
       try {
         outcomes = await engine.inferStructuredBatch(rows.map((row) => ({
-          options: { ...batchOptions, prompt: row.request, schema: claimSchema, maxNewTokens, contextWindowTokens: context },
-          context: { structured: compiledClaimSchema, budget: row.budget, diagnosticStage: { id: row.id, attempt: 1 }, promptPrefix: promptHead('section', true) },
+          options: { ...batchOptions, prompt: row.request, schema: row.schema, maxNewTokens, contextWindowTokens: context, ...(row.prepared ? { image: row.prepared.input } : {}) },
+          context: { structured: row.compiled, budget: row.budget, diagnosticStage: { id: row.id, attempt: 1 }, ...(row.prepared ? { preparedImages: [row.prepared] } : {}), ...(row.multiple ? { promptPrefix: promptHead(row.phase, true) } : {}) },
         })));
       } catch (reason) {
         outcomes = rows.map(() => ({ status: 'rejected' as const, reason }));
       }
       if (!outcomes) {
         for (const row of rows) checkpoint.timings.preprocessMs += row.timings.preprocessMs;
-        batchUnavailable = true; return;
+        batchUnavailable.add(kind); return;
       }
       // Every dispatched row is charged and journaled before callbacks, retries or cancellation can expose a checkpoint.
       for (const row of rows) {
@@ -524,7 +536,7 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         let items: EvidenceClaim[] | undefined; let error: NekoError | undefined;
         try {
           if (outcome.status === 'rejected') throw outcome.reason;
-          items = validateClaims(outcome.value.value, row.allowed, language, quotes);
+          items = validateClaims(row.multiple ? outcome.value.value : { claims: [outcome.value.value] }, row.allowed, language, quotes);
         } catch (cause) {
           error = cause instanceof NekoError ? new NekoError(cause.message, cause.stage, cause.code, { cause }) : new NekoError(cause instanceof Error ? cause.message : String(cause), 'report', 'OPERATION_FAILED', { cause });
           if (options.diagnostics) {
@@ -540,23 +552,28 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
             attachGenerationDiagnostic(error, diagnostic);
           }
         }
-        checkpoint.attempts.push({ id: row.id, phase: 'section', attempt: 1, requestHash: row.attemptHash, outcome: error ? 'error' : 'complete', errorCode: error?.code ?? null, usage, timings: { ...row.timings } });
+        checkpoint.attempts.push({ id: row.id, phase: row.phase, attempt: 1, requestHash: row.attemptHash, outcome: error ? 'error' : 'complete', errorCode: error?.code ?? null, usage, timings: { ...row.timings } });
         if (error) batchErrors.set(row.id, error);
         else {
-          checkpoint.completed[row.id] = { phase: 'section', requestHash: row.requestHash, claims: items!, usage, timings: result!.timings };
+          checkpoint.completed[row.id] = { phase: row.phase, requestHash: row.requestHash, claims: items!, usage, timings: result!.timings };
           batchCompleted.add(row.id);
         }
       }
       check();
       await save();
-      for (const row of rows) await notify({ type: batchErrors.has(row.id) ? 'stage-error' : 'stage-complete', id: row.id, phase: 'section', usage: batchErrors.has(row.id) ? checkpoint.usage : checkpoint.completed[row.id]!.usage, elapsedMs: elapsed() });
+      for (const row of rows) await notify({ type: batchErrors.has(row.id) ? 'stage-error' : 'stage-complete', id: row.id, phase: row.phase, usage: batchErrors.has(row.id) ? checkpoint.usage : checkpoint.completed[row.id]!.usage, elapsedMs: elapsed() });
+    };
+    /** Throws a batched row's failure when `run` may not retry it; otherwise `run` retries it alone. */
+    const settleBatched = (id: string, phase: ReportPhase): void => {
+      const batchError = batchErrors.get(id);
+      if (batchError && (!retryableOutput(batchError.code) || !(authorization.retries[phase] ?? 0))) throw batchError;
     };
     try {
       check();
       const images: ReportImage[] = []; const imageFacts: EvidenceClaim[] = [];
       if (options.resume && (await hashValue(sourceFacts) !== await hashValue(checkpoint.sourceFacts) || await hashValue(sectionPlan) !== await hashValue(checkpoint.sectionPlan))) failCheckpoint('Checkpoint source fact plan has changed');
       checkpoint.sourceFacts = sourceFacts; checkpoint.sectionPlan = sectionPlan;
-      for (const image of page.images) {
+      const prepareStage = async (image: Page['images'][number]) => {
         const provenance = { imageId: image.id, url: image.url, source: { kind: 'image' as const, imageId: image.id }, ...(image.alt === undefined ? {} : { alt: image.alt }) };
         try {
           check(); const preprocessingStarted = performance.now(); let prepared: PreparedImage;
@@ -565,21 +582,41 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
           Object.defineProperty(checkpoint.imageObservations, image.id, { value: { ...prepared.observation }, writable: true, configurable: true, enumerable: true });
           const observation = prepared.observation;
           const evidenceId = `i:${image.id}`; evidence.set(evidenceId, { kind: 'image-observation', snapshotId: snapshot.id, imageId: image.id, versionId: observation.versionId, sourceVersionId: observation.sourceVersionId, sourceWidth: observation.sourceWidth, sourceHeight: observation.sourceHeight, region: { ...observation.region }, normalizedRegion: { ...observation.normalizedRegion } });
-          const items = await run(`image:${image.id}`, 'image', { evidenceId }, new Set([evidenceId]), prepared);
-          const description = appendClaims(items, `images[${images.length}].description`); imageFacts.push(...items);
-          images.push({ ...provenance, status: 'described', description, observation: { ...prepared.observation, verification: 'model-observation' } });
-        } catch (cause) {
-          if (callbackFailed || signal?.aborted || imageFailurePolicy === 'error' || cause instanceof NekoError && ['POLICY_DENIED', 'CHECKPOINT_INVALID', 'BUDGET_EXCEEDED', 'SCHEMA_INVALID', 'SCHEMA_UNSUPPORTED', 'DEADLINE_EXCEEDED'].includes(cause.code)) throw cause;
-          const error = cause instanceof NekoError ? cause : new NekoError(cause instanceof Error ? cause.message : String(cause), 'image', 'OPERATION_FAILED', { cause });
-          images.push({ ...provenance, status: 'failed', error: { stage: error.stage, code: error.code, message: error.message } });
+          return { image, provenance, prepared, evidenceId };
+        } catch (cause) { return { image, provenance, failure: cause }; }
+      };
+      for (let index = 0; index < page.images.length;) {
+        // Where the engine batches images, the next one is prepared before this one is described so the two can decode together; any
+        // preparation failure is still handled (and, under the failure policy, thrown) only in its original turn.
+        const first = await prepareStage(page.images[index]!);
+        const pair = [first];
+        if (!('failure' in first) && engine.batchesImages && index + 1 < page.images.length) pair.push(await prepareStage(page.images[index + 1]!));
+        index += pair.length;
+        const ready = pair.flatMap((entry) => 'failure' in entry ? [] : [entry]);
+        if (ready.length === pair.length) await runBatch(ready.map(({ image, prepared, evidenceId }) => ({ id: `image:${image.id}`, phase: 'image' as const, source: { evidenceId }, allowed: new Set([evidenceId]), prepared })));
+        for (const entry of pair) {
+          try {
+            if ('failure' in entry) throw entry.failure;
+            const { image, prepared, evidenceId } = entry;
+            settleBatched(`image:${image.id}`, 'image');
+            const items = await run(`image:${image.id}`, 'image', { evidenceId }, new Set([evidenceId]), prepared);
+            const description = appendClaims(items, `images[${images.length}].description`); imageFacts.push(...items);
+            images.push({ ...entry.provenance, status: 'described', description, observation: { ...prepared.observation, verification: 'model-observation' } });
+          } catch (cause) {
+            if (callbackFailed || signal?.aborted || imageFailurePolicy === 'error' || cause instanceof NekoError && ['POLICY_DENIED', 'CHECKPOINT_INVALID', 'BUDGET_EXCEEDED', 'SCHEMA_INVALID', 'SCHEMA_UNSUPPORTED', 'DEADLINE_EXCEEDED'].includes(cause.code)) throw cause;
+            const error = cause instanceof NekoError ? cause : new NekoError(cause instanceof Error ? cause.message : String(cause), 'image', 'OPERATION_FAILED', { cause });
+            images.push({ ...entry.provenance, status: 'failed', error: { stage: error.stage, code: error.code, message: error.message } });
+          }
         }
       }
       const retainedFacts: EvidenceClaim[] = sourceFacts.map(({ id, citation }) => ({ text: citation.quote, evidenceIds: [id] }));
       const sections: ReportSection[] = []; const sectionFacts: EvidenceClaim[] = [];
       for (const [index, chunk] of chunks.entries()) {
-        await runSectionBatch(index);
-        const batchError = batchErrors.get(`section:${index}`);
-        if (batchError && (!retryableOutput(batchError.code) || !(authorization.retries.section ?? 0))) throw batchError;
+        await runBatch([0, 1].filter((offset) => index + offset < chunks.length).map((offset) => {
+          const batched = chunks[index + offset]!;
+          return { id: `section:${index + offset}`, phase: 'section' as const, source: batched, allowed: new Set(batched.map((item) => item.evidenceId)) };
+        }));
+        settleBatched(`section:${index}`, 'section');
         const items = await run(`section:${index}`, 'section', chunk, new Set(chunk.map((item) => item.evidenceId))); sectionFacts.push(...items);
         const keyPoints = items.map((item, point) => appendClaims([item], `sections[${index}].keyPoints[${point}]`));
         sections.push({ ...(chunk[0]?.heading ? { heading: chunk[0].heading } : {}), keyPoints, paragraphIds: [...new Set(chunk.map((item) => item.paragraphId))] });
@@ -599,12 +636,21 @@ export async function generateReport(engine: VisionEngine, input: string | Page,
         if (engine.countPrompt(JSON.stringify(next)) >= engine.countPrompt(JSON.stringify(reduced))) throw new NekoError('Generated claims cannot be reduced within context budget', 'report', 'CONTEXT_LIMIT');
         reduced = next; level++;
       }
-      const summaryFacts = await run('summary', 'summary', reduced, new Set(reduced.flatMap((item) => item.evidenceIds)));
-      const summary = appendClaims(summaryFacts, 'page.summary');
+      const summaryAllowed = new Set(reduced.flatMap((item) => item.evidenceIds));
+      // The conclusion does not depend on the summary, so the two decode together when it fits; otherwise the summary still runs first.
       const conclusionBasis = fits('conclusion', originalFacts) ? 'retained-source' as const : 'reduced-generated-claims' as const;
       const conclusionInput = conclusionBasis === 'retained-source' ? originalFacts : reduced;
-      if (!fits('conclusion', conclusionInput)) throw new NekoError('Facts exceed conclusion context budget', 'report', 'CONTEXT_LIMIT');
-      const conclusionFacts = await run('conclusion', 'conclusion', conclusionInput, new Set(conclusionInput.flatMap((item) => item.evidenceIds)));
+      const conclusionFits = fits('conclusion', conclusionInput);
+      const conclusionAllowed = new Set(conclusionInput.flatMap((item) => item.evidenceIds));
+      if (conclusionFits) {
+        await runBatch([{ id: 'summary', phase: 'summary', source: reduced, allowed: summaryAllowed }, { id: 'conclusion', phase: 'conclusion', source: conclusionInput, allowed: conclusionAllowed }]);
+        settleBatched('summary', 'summary');
+      }
+      const summaryFacts = await run('summary', 'summary', reduced, summaryAllowed);
+      const summary = appendClaims(summaryFacts, 'page.summary');
+      if (!conclusionFits) throw new NekoError('Facts exceed conclusion context budget', 'report', 'CONTEXT_LIMIT');
+      settleBatched('conclusion', 'conclusion');
+      const conclusionFacts = await run('conclusion', 'conclusion', conclusionInput, conclusionAllowed);
       const conclusion = appendClaims(conclusionFacts, 'conclusion');
       if (Object.keys(checkpoint.completed).some((id) => !used.has(id))) failCheckpoint('Checkpoint contains stages outside the current deterministic report plan');
       await save(); const backend: LoadedBackend = engine.readiness().backend;

@@ -11,7 +11,7 @@ import type { Page, StructuredReport } from '../../src/types.js';
 import { generateExtractiveReport, planExtractiveReport } from '../../src/report/extractive.js';
 
 // Deterministic tokens exercise the real engine, schemas, budgets and report planner without a model download.
-function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT' | 'POLICY_DENIED' | 'LANGUAGE_MISMATCH', behavior: { invalidSection?: number } = {}) {
+function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT' | 'POLICY_DENIED' | 'LANGUAGE_MISMATCH', behavior: { invalidSection?: number; invalidConclusion?: boolean } = {}) {
   const prompts: string[] = [];
   const encoded = (text: string) => Array.from(text, (character) => BigInt(character.codePointAt(0)!));
   let invisible = 256;
@@ -24,7 +24,7 @@ function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT
     tokenizer,
   });
   const profile = getRegisteredModelProfile();
-  let sectionCount = 0;
+  let sectionCount = 0; let conclusionCount = 0;
   const model = {
     sessions: Object.fromEntries(Object.entries(profile.dtype).map(([name, dtype]) => [name, { config: { device: 'cpu', dtype } }])),
     generation_config: { eos_token_id: 1000, pad_token_id: 0 },
@@ -41,9 +41,11 @@ function fixture(lossySections = false, firstSectionFailure?: 'STRUCTURED_OUTPUT
         const source = JSON.parse(prompt.split(/(?:Source JSON:|引用資料（JSON）：)\n/)[1]!.split(/\n(?:Now output|現在請只輸出)/)[0]!) as { evidenceId?: string; quote?: string; text?: string; evidenceIds?: string[] }[];
         const section = prompt.includes('Give separate key points') || prompt.includes('分別整理成繁體中文重點');
         if (section) sectionCount++;
+        const conclusion = prompt.includes('Conclude from the supplied source facts');
+        if (conclusion) conclusionCount++;
         if (section && firstSectionFailure && sectionCount === 1) throw new NekoError('Fixture first stage output failure', 'generate', firstSectionFailure);
         const facts = section && !lossySections ? source : source.slice(0, 1);
-        const claims = facts.map((fact) => ({ text: (fact.quote ?? fact.text)!.trim(), evidenceIds: section && sectionCount === behavior.invalidSection ? ['q999'] : fact.evidenceId ? [fact.evidenceId] : fact.evidenceIds! }));
+        const claims = facts.map((fact) => ({ text: (fact.quote ?? fact.text)!.trim(), evidenceIds: section && sectionCount === behavior.invalidSection || conclusion && conclusionCount === 1 && behavior.invalidConclusion ? ['q999'] : fact.evidenceId ? [fact.evidenceId] : fact.evidenceIds! }));
         const multiple = prompt.includes('with claims (an array') || prompt.includes('包含 claims 陣列');
         return encoded(JSON.stringify(multiple ? { claims } : claims[0]));
       });
@@ -329,4 +331,34 @@ test('a budget below full batch reservations still completes an affordable seque
       return true;
     });
   } finally { await engine.dispose(); }
+});
+
+test('summary and conclusion decode together, keep their ledger order and retry only an invalid row', async () => {
+  const tail = (events: { type: string; id: string }[]) => events.filter(({ id }) => id === 'summary' || id === 'conclusion').map(({ type, id }) => `${type}:${id}`);
+  const { engine } = fixture();
+  try {
+    const events: { type: string; id: string }[] = [];
+    await report(engine, { onEvent: (event) => { if ('id' in event) events.push({ type: event.type, id: event.id }); } });
+    assert.deepEqual(tail(events), ['stage-start:summary', 'stage-start:conclusion', 'stage-complete:summary', 'stage-complete:conclusion']);
+  } finally { await engine.dispose(); }
+  const failing = fixture(false, undefined, { invalidConclusion: true });
+  try {
+    let checkpoint: ReportCheckpoint | undefined; const events: { type: string; id: string }[] = [];
+    const result = await report(failing.engine, { retries: { conclusion: 1 }, onCheckpoint: (value) => { checkpoint = value; }, onEvent: (event) => { if ('id' in event) events.push({ type: event.type, id: event.id }); } });
+    assert.ok(checkpoint);
+    assert.deepEqual(checkpoint.attempts.filter(({ id }) => id === 'summary' || id === 'conclusion').map(({ id, outcome }) => `${id}:${outcome}`), ['summary:complete', 'conclusion:error', 'conclusion:complete']);
+    assert.deepEqual(tail(events), ['stage-start:summary', 'stage-start:conclusion', 'stage-complete:summary', 'stage-error:conclusion', 'stage-start:conclusion', 'stage-complete:conclusion']);
+    assert.equal(failing.prompts.filter((prompt) => prompt.includes('Retry 1:')).length, 1);
+    assert.equal(result.metadata.retryAttempts, 1);
+    assert.equal(result.metadata.usage.totalTokens, checkpoint.attempts.reduce((sum, attempt) => sum + attempt.usage.totalTokens, 0));
+  } finally { await failing.engine.dispose(); }
+  const unauthorized = fixture(false, undefined, { invalidConclusion: true });
+  try {
+    await assert.rejects(report(unauthorized.engine), (error: unknown) => {
+      assert.ok(error instanceof ReportError); assert.equal(error.code, 'STRUCTURED_OUTPUT');
+      assert.ok(error.checkpoint.completed.summary); assert.equal(error.checkpoint.completed.conclusion, undefined);
+      return true;
+    });
+    assert.ok(unauthorized.prompts.every((prompt) => !prompt.includes('Retry 1:')));
+  } finally { await unauthorized.engine.dispose(); }
 });

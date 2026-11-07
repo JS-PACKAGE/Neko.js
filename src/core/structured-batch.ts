@@ -1,6 +1,6 @@
 import { TextStreamer, DynamicCache, LogitsProcessor, LogitsProcessorList, StoppingCriteria, Tensor, type PreTrainedModel, type Processor } from '@huggingface/transformers';
 import { NekoError } from '../errors.js';
-import type { StructuredBatchRequest, StructuredInferenceResult, LoadedBackend, ModelIdentity } from './engine.js';
+import type { StructuredBatchRequest, StructuredInferenceResult, LoadedBackend, ModelIdentity, ImageObservation } from './engine.js';
 import { StopBuffer, type GenerationOptions } from './generation.js';
 import { JsonBoundary } from './json-boundary.js';
 import { JsonGrammarProcessor, type TokenByteTrie } from './json-grammar.js';
@@ -17,6 +17,9 @@ export interface PreparedBatchRow {
   inputTokens: number;
   preprocessing?: PreprocessingReuse | undefined;
   prefixTokens?: bigint[] | undefined;
+  /** The row's own image patches and grid, encoded only in its prefill. */
+  vision?: { pixel_values: Tensor; image_grid_thw: Tensor } | undefined;
+  images?: ImageObservation[] | undefined;
 }
 interface BatchRuntime {
   model: PreTrainedModel;
@@ -97,7 +100,7 @@ export async function generateStructuredBatch(runtime: BatchRuntime, inputs: Rec
       state.result = { status: 'fulfilled', value: { text: state.response, value, finishReason: 'stop', usage: { inputTokens: state.row.inputTokens, outputTokens: state.tokens, totalTokens: state.row.inputTokens + state.tokens },
         model: runtime.identity, backend: runtime.backend, structured: { mode: state.row.effective.mode === 'constrained' ? 'tokenizer-constrained-runtime-validation' : 'json-boundary-runtime-validation', dialect: 'draft-07' },
         timings: { loadMs: runtime.loadMs, preprocessMs: generationStarted - runtime.started, firstTokenMs: state.firstTokenMs, generationMs: now - generationStarted, totalMs: now - runtime.started }, memory: { jsHeapBytes: null, gpuBytes: null },
-        ...(state.row.preprocessing ? { preprocessing: state.row.preprocessing } : {}) } };
+        ...(state.row.images ? { images: state.row.images } : {}), ...(state.row.preprocessing ? { preprocessing: state.row.preprocessing } : {}) } };
     } catch (cause) { reject(state, cause instanceof NekoError ? cause : new NekoError('Invalid structured output', 'generate', 'STRUCTURED_OUTPUT', { cause }), stopped ? 'stop' : 'length'); }
   };
   for (const state of states) state.buffer = new StopBuffer(settings.stop, (text) => { state.response += text; });

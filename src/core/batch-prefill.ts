@@ -1,7 +1,7 @@
 import { DynamicCache, Tensor } from '@huggingface/transformers';
 import { InferenceReuseCache, type GenerationStateSnapshot } from './reuse.js';
 
-export interface BatchPrefillRow { inputTokens: number; prefixTokens?: bigint[] | undefined; }
+export interface BatchPrefillRow { inputTokens: number; prefixTokens?: bigint[] | undefined; vision?: { pixel_values: Tensor; image_grid_thw: Tensor } | undefined; }
 
 function dispose(tensors: Iterable<Tensor>): void {
   for (const tensor of new Set(tensors)) if (tensor.location !== 'none') tensor.dispose();
@@ -52,8 +52,10 @@ export async function prefillBatch(modelInputs: Record<string, unknown>, rows: r
           const inputPositions = from === 0 && to === row.inputTokens ? fullPositions : own(fullPositions.slice(null, null, [from, to]));
           const attention = own(new Tensor('int64', new BigInt64Array(to).fill(1n), [1, to]));
           const inputs: Record<string, unknown> = { ...modelInputs, input_ids: inputIds, position_ids: inputPositions, attention_mask: attention, past_key_values: cache };
-          // No per-row preparation: the caller's full-batch RoPE deltas must remain untouched.
-          delete inputs.pixel_values;
+          // No per-row preparation: the caller's full-batch RoPE deltas must remain untouched. Only the row's own image (never a
+          // prefix: image rows have none) is encoded and merged, exactly as an unbatched prefill of that prompt does.
+          if (row.vision) { inputs.pixel_values = row.vision.pixel_values; inputs.image_grid_thw = row.vision.image_grid_thw; }
+          else { delete inputs.pixel_values; delete inputs.image_grid_thw; }
           check();
           const output = await forward(inputs);
           for (const tensor of Object.values(output)) if (tensor instanceof Tensor) temporary.add(tensor);
