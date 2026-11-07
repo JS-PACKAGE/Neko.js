@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Examples (extension): the report language now follows the text being read instead of the page's declared `lang`. A Chinese page declaring `lang="en"` asked the model for English, which the 0.8B model answered in Chinese, so every section failed the English language check (`Report claim did not satisfy the requested English language check`) after its retries. In a headed Chromium WebGPU run the sample page served with `lang="en"` now finished its report in Traditional Chinese.
+
 ## 1.9.1 — 2026-11-08
 
 - Browser: a `modelSource.baseUrl` inside the installed package that holds the SDK bundle (a browser extension's own `chrome-extension:` origin) is accepted and read in place. Every load still hashes each file against the pinned size and SHA-256; nothing is copied into Cache Storage, no network policy or model request is involved, `clear()`/`importBundle()` reject with `POLICY_DENIED`, and `diagnostics().backend` is the new `'package'`. HTTP(S) sources, including same-origin ones, are unchanged.

@@ -30,6 +30,31 @@ function isPrivateHost(hostname) {
   return host === '::' || host === '::1' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host);
 }
 
+// Simplified-only forms; a few in Traditional Chinese text mean it was really Simplified Chinese.
+const SIMPLIFIED = /[这为与个从们来时会说对国学实应现过还进种无点开关颜红]/gu;
+/**
+ * The report is written in the language of the text being read. The 0.8B model does not reliably translate, so asking
+ * for English about Chinese text (common: page templates declare lang="en") fails the SDK's language check on every retry.
+ * The declared lang only picks between variants of the detected script.
+ */
+function reportLanguage(text, declared) {
+  const count = (pattern) => text.match(pattern)?.length ?? 0;
+  const han = count(/\p{Script=Han}/gu), latin = count(/\p{Script=Latin}/gu);
+  const kana = count(/[\p{Script=Hiragana}\p{Script=Katakana}]/gu), hangul = count(/\p{Script=Hangul}/gu);
+  let hint = 'und';
+  try { hint = Intl.getCanonicalLocales(declared || 'und')[0]; } catch { /* invalid lang attribute: ignore it */ }
+  const primary = hint.split('-')[0].toLowerCase();
+  if (kana && kana * 4 >= han) return 'ja';
+  if (hangul > latin && hangul > han) return 'ko';
+  if (han && han * 2 >= latin) {
+    if (primary === 'zh' && /-(?:hans|cn|sg|my)\b/i.test(hint)) return 'zh-CN';
+    if (primary === 'zh' && /-(?:hant|tw|hk|mo)\b/i.test(hint)) return 'zh-TW';
+    return count(SIMPLIFIED) * 50 > han ? 'zh-CN' : 'zh-TW';
+  }
+  if (latin) return primary && !['zh', 'ja', 'ko', 'und'].includes(primary) ? hint : 'en';
+  return hint === 'und' ? 'en' : hint;
+}
+
 function instance(report) {
   if (current) return current;
   let loading = true;
@@ -96,6 +121,8 @@ async function read(request, port, signal) {
     paragraphIds.push(paragraph.id); characters += paragraph.text.length;
   }
   if (!page.paragraphs.length) throw new Error('這個頁面沒有可解析的文字。');
+  const selected = new Set(paragraphIds);
+  const language = reportLanguage(page.paragraphs.filter((paragraph) => selected.has(paragraph.id)).map((paragraph) => paragraph.text).join('\n'), request.language);
   const stages = { image: [], section: [], summary: [], conclusion: [] };
   let latest;
   const names = { image: '描述圖片', section: '整理段落', summary: '撰寫摘要', conclusion: '撰寫結論' };
@@ -103,7 +130,7 @@ async function read(request, port, signal) {
   const report = await neko.describe(page, {
     // A blocked or broken image is reported as failed instead of failing the whole report. A stage whose output is
     // invalid (e.g. JSON cut off at the token limit) or in the wrong language is retried with a corrective instruction.
-    format: 'json', language: request.language || 'en', maxNewTokens: 512, imageFailurePolicy: 'omit', sources: { paragraphIds, imageIds: describedImageIds },
+    format: 'json', language, maxNewTokens: 512, imageFailurePolicy: 'omit', sources: { paragraphIds, imageIds: describedImageIds },
     retries: { image: 2, section: 2, summary: 2, conclusion: 2 }, signal,
     // The extension can fetch any host, so a page must not be able to make it read internal addresses.
     validateDestination(url) {
