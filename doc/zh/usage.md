@@ -577,7 +577,9 @@ Vision encoder 在所有 backend 上每次只處理一張圖片。固定的 0.8B
 
 瀏覽器 WebGPU 會將單 token decode 的 embedding 保留在 GPU，不再於每一步讀回 CPU 再上傳。Prefill embedding 仍可由 CPU 讀取，以合併圖片特徵。內部建立的 GPU embedding 在 decoder 完成或失敗後釋放；呼叫端提供的 embedding 不會轉移所有權。實際 Chromium 文字與圖片報告在量測情境中保留相同生成內容。這不改變 Node 路徑，也不代表效能保證。
 
-打包的瀏覽器 runtime 也會重用每個 compute pipeline 不可變的 bind-group-zero layout，不再於每次 dispatch 取得新 wrapper。此內部快取以 pipeline 為弱參照 key；不快取 buffer bindings 或模型資料、不修改 WebGPU prototype，也不改變固定資產的驗證或 Node 執行。實際文字／圖片報告，以及 engine 重新載入／runtime owner 重新建立後的輸出皆保持一致。總耗時有漂移，因此不宣稱穩定的端到端加速比例。
+打包的瀏覽器 runtime 也會重用每個 compute pipeline 不可變的 bind-group-zero layout，不再於每次 dispatch 取得新 wrapper；並且對重複出現的（layout、buffer 範圍）綁定重用 bind group，而不是每個 kernel dispatch 都建立一個。layout 快取以 pipeline 為弱參照 key；bind group 快取以 layout 與各 buffer 的物件身分加上每個 binding 的 offset／size 為 key，每次命中都完整比對，最多保留兩代各 16,384 個 group，因此可能暫時保留 runtime 已銷毀之 buffer 的 wrapper 物件（其 GPU 記憶體仍已釋放）。不快取模型資料、不修改 WebGPU prototype，也不改變固定資產的驗證或 Node 執行。一份實際 inline 文字報告內容完全相同，而 `createBindGroup` 呼叫次數由約 108 萬次降到約 6.6 萬次。總耗時有漂移，因此不宣稱穩定的端到端加速比例。
+
+所有 runtime 都會在下一次 decoder run 開始時，釋放前一步的原始 logits buffer（生成流程已複製取樣列）。瀏覽器中這讓一份有 GC 追蹤的文字報告之完整 mark-compact 從 19 次降到 8 次；此過程不會讀取 GPU 上的狀態。
 
 ### 並行下載與 validator-bound 續傳
 

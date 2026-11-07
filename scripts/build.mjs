@@ -42,8 +42,12 @@ const replaceOnce = (source, target, replacement, path) => {
 // - Text-only RoPE deltas subtract the padded prompt length: adding it instead shifts every decode position by twice that length.
 // - Metadata probes must recognize native cache path hits too. Ignoring them probes an unrelated local path, which the verified
 //   fetch correctly rejects. A path hit has unknown metadata size; the verified cache still checks bytes before returning the path.
-// - The browser native bridge reuses immutable group-zero layouts per pipeline. Weak keys do not retain pipelines, and no buffer
-//   bindings or model data are cached. Patch the embedded ORT bundle, not the separately copied runtime asset or WebGPU prototypes.
+// - The browser native bridge reuses immutable group-zero layouts per pipeline (weak keys do not retain pipelines) and bind groups
+//   for repeated (layout, buffer-range) bindings: ORT's WebGPU provider created about 1.08 million per text report, one per kernel
+//   dispatch, mostly identical. No model data is cached. Patch the embedded ORT bundle, not the separately copied runtime asset or
+//   WebGPU prototypes.
+// - Per-dispatch native queries churned the JS heap: uniform uploads sliced a view, handle release deleted Map entries (tombstones,
+//   rehashing) and buffer size/usage queries boxed BigInts. Each is replaced by an allocation-free equivalent.
 // - Empty native extension chains skip callback tables and captured state. Keep that state in a nonempty-branch-only function:
 //   capturing a converter variable allocates a context even when dispatch is skipped. Refresh heap views before probing; nonempty
 //   chains retain upstream dispatch, including its rejection of unsupported extensions.
@@ -138,17 +142,44 @@ function nekoGreedyArgmax(data) {
         // Size fresh entry arrays from the heap count; undefined counts still produce an empty list.
         source = replaceOnce(source, 'function qu(e,t){',
           'function nekoNativeBindGroupEntries(u,c){for(var h=new Array(u>>>0),b=0;b<u;++b)h[b]=nekoNativeBindGroupEntry(c+40*b);return h}function qu(e,t){', path);
+        // Reuse bind groups for repeated (layout, buffer-range) bindings. Entries are hashed into a numeric key and verified exactly
+        // against the stored descriptor, so a collision is only a miss. Identities come from per-object ids, so a released handle
+        // reassigned to a new buffer or layout never aliases a cached group; chains, non-buffer resources and oversized entry lists
+        // take the upstream path. Two bounded generations avoid per-hit Map churn; destroyed buffers simply age out with their groups.
+        source = replaceOnce(source,
+          'function qu(e,t){e>>>=0,t={label:Ne(4+(t>>>=0)),layout:L((p(),A)[t+12>>>2>>>0]),entries:nekoNativeBindGroupEntries((p(),A)[t+16>>>2>>>0],(p(),A)[t+20>>>2>>>0])},e=L(e);var o=yo(0);return uu(o,e.createBindGroup(t)),o}',
+          'function nekoDescribeBindGroup(t){return{label:Ne(4+t),layout:L((p(),A)[t+12>>>2>>>0]),entries:nekoNativeBindGroupEntries((p(),A)[t+16>>>2>>>0],(p(),A)[t+20>>>2>>>0])}}'
+          + 'var nekoBindGroupFresh=new Map,nekoBindGroupStale=new Map,nekoResourceIds=new WeakMap,nekoNextResourceId=1,nekoBindGroupScratch=new Int32Array(97);'
+          + 'function nekoResourceId(o){var i=nekoResourceIds.get(o);if(i===void 0){i=nekoNextResourceId++;nekoResourceIds.set(o,i)}return i}'
+          + 'function nekoSameDescriptor(d,s,n){if(d.length!==n)return!1;for(var i=0;i<n;++i)if(d[i]!==s[i])return!1;return!0}'
+          + 'function nekoCachedBindGroup(e,t){var h=(p(),A),layout=L(h[t+12>>>2>>>0]),count=h[t+16>>>2>>>0]>>>0,c=h[t+20>>>2>>>0],s=nekoBindGroupScratch;if(!layout||count>16)return e.createBindGroup(nekoDescribeBindGroup(t));'
+          + 'var k1=nekoResourceId(layout),k2=k1^count,n=1;s[0]=k1;'
+          + 'for(var b=0;b<count;++b){var u=c+40*b,buffer=h[u>>>2>>>0]?void 0:L(h[u+8>>>2>>>0]);if(!buffer)return e.createBindGroup(nekoDescribeBindGroup(t));'
+          + 'var binding=h[u+4>>>2>>>0],id=nekoResourceId(buffer),ol=h[u+16>>>2>>>0]|0,oh=h[u+20>>>2>>>0]|0,sl=h[u+24>>>2>>>0]|0,sh=h[u+28>>>2>>>0]|0;s[n++]=binding;s[n++]=id;s[n++]=ol;s[n++]=oh;s[n++]=sl;s[n++]=sh;'
+          + 'k1=Math.imul(k1^binding,2654435761)+id|0;k1=Math.imul(k1^ol,2246822519)^sl;k2=Math.imul(k2+id,16777619)^oh;k2=Math.imul(k2^sh,3266489917)+binding|0}'
+          + 'var key=(k1^Math.imul(k2,2654435761))&1073741823,cached=nekoBindGroupFresh.get(key);'
+          + 'if(cached===void 0){cached=nekoBindGroupStale.get(key);if(cached!==void 0){nekoBindGroupStale.delete(key);nekoBindGroupFresh.set(key,cached)}}'
+          + 'if(cached!==void 0&&nekoSameDescriptor(cached.descriptor,s,n))return cached.group;'
+          + 'var group=e.createBindGroup(nekoDescribeBindGroup(t));if(nekoBindGroupFresh.size>=16384){nekoBindGroupStale=nekoBindGroupFresh;nekoBindGroupFresh=new Map}nekoBindGroupFresh.set(key,{group:group,descriptor:s.slice(0,n)});return group}'
+          + 'function qu(e,t){e>>>=0,t>>>=0;var o=yo(0);return uu(o,nekoCachedBindGroup(L(e),t)),o}', path);
         // Pin the decoder's malformed-UTF-8 behavior; only batch its ASCII string construction.
         const nativeUtf8Decoder = 'xn=(e,t=0,n,o)=>{if(16<(n=In(e,t>>>=0,n,o))-t&&e.buffer&&An)return An.decode(e.buffer instanceof ArrayBuffer?e.subarray(t,n):e.slice(t,n));for(o="";t<n;){var u=e[t++];if(128&u){var c=63&e[t++];if((224&u)==192)o+=String.fromCharCode((31&u)<<6|c);else{var h=63&e[t++];65536>(u=(240&u)==224?(15&u)<<12|c<<6|h:(7&u)<<18|c<<12|h<<6|63&e[t++])?o+=String.fromCharCode(u):(u-=65536,o+=String.fromCharCode(55296|u>>10,56320|1023&u))}}else o+=String.fromCharCode(u)}return o}';
         source = replaceOnce(source, nativeUtf8Decoder, replaceOnce(nativeUtf8Decoder,
           'else o+=String.fromCharCode(u)',
           'else if(t+1<n&&!((c=e[t])&128)&&!((h=e[t+1])&128)){var b;if(t+2<n&&!((b=e[t+2])&128)){o+=String.fromCharCode(u,c,h,b);t+=3}else{o+=String.fromCharCode(u,c,h);t+=2}}else o+=String.fromCharCode(u)', path), path);
-        // Pointer keys need no array length. Preserve unsigned handles and explicit resource deletion.
+        // Upload uniform data straight from the heap view with an element offset instead of a per-call subarray.
+        source = replaceOnce(source, 'o=(p(),J).subarray(o>>>0,o+u>>>0),e.writeBuffer(t,n,o,0,u)}', 'e.writeBuffer(t,n,(p(),J),o,u)}', path);
+        // Buffer size/usage are immutable, but every native query boxed a fresh BigInt. Remember both per buffer object.
+        source = replaceOnce(source, 'function Pu(e){return BigInt(L(e>>>0).size)}function _u(e){return BigInt(L(e>>>0).usage)}',
+          'var nekoBufferFacts=new WeakMap;function nekoBufferFact(e){var b=L(e>>>0),f=nekoBufferFacts.get(b);if(f===void 0){f={size:BigInt(b.size),usage:BigInt(b.usage)};nekoBufferFacts.set(b,f)}return f}'
+          + 'function Pu(e){return nekoBufferFact(e).size}function _u(e){return nekoBufferFact(e).usage}', path);
+        // Pointer keys need no array length. Preserve unsigned handles. Releasing clears the slot instead of deleting it: handles are
+        // reused malloc addresses, so the registry stays bounded by peak liveness without per-release tombstones and rehashing.
         for (const [before, after] of [
           ['de=[]', 'de=new Map()'],
           ['uu=(e,t)=>{de[e>>>0]=t}', 'uu=(e,t)=>{de.set(e>>>0,t)}'],
           ['L=e=>{if(e)return de[e>>>0]}', 'L=e=>{if(e)return de.get(e>>>0)}'],
-          ['function Eu(e){delete de[e>>>0]}', 'function Eu(e){de.delete(e>>>0)}'],
+          ['function Eu(e){delete de[e>>>0]}', 'function Eu(e){de.set(e>>>0,void 0)}'],
           ['de[u>>>0]=B.queue,de[o>>>0]=B,G', 'de.set(u>>>0,B.queue),de.set(o>>>0,B),G'],
           ['de[n>>>0]=u,o&&(Re[n]=[])', 'de.set(n>>>0,u),o&&(Re[n]=[])'],
           ['de[o>>>0]=u,Pr(', 'de.set(o>>>0,u),Pr('],
