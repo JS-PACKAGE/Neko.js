@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reports: the `zh-TW` language check weighs Han characters against Latin words instead of Latin letters (a claim fails when Latin words × 2 exceed Han characters). Product names and identifiers made ordinary Traditional Chinese fail every retry, for example `TypeSafe AI 是後來 ChatGPT 誕生的基石。` (17 letters against 8 Han characters). Han-free, Simplified and Latin-dominated text still fails.
+- Examples (extension): only paragraphs whose every sentence passes the report language's check are read. On a mixed Chinese/English README the model restated the other language's sentences, and every retry failed the check. Stages may also write up to 1024 tokens (was 512): the summary of that README restated its Chinese sources nearly verbatim and was cut off as incomplete JSON on every retry.
 - Examples (extension): the report language now follows the text being read instead of the page's declared `lang`. A Chinese page declaring `lang="en"` asked the model for English, which the 0.8B model answered in Chinese, so every section failed the English language check (`Report claim did not satisfy the requested English language check`) after its retries. In a headed Chromium WebGPU run the sample page served with `lang="en"` now finished its report in Traditional Chinese.
 
 ## 1.9.1 — 2026-11-08

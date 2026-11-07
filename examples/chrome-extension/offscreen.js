@@ -31,7 +31,7 @@ function isPrivateHost(hostname) {
 }
 
 // Simplified-only forms; a few in Traditional Chinese text mean it was really Simplified Chinese.
-const SIMPLIFIED = /[这为与个从们来时会说对国学实应现过还进种无点开关颜红]/gu;
+const SIMPLIFIED = /[这为与个从们来时会说对国学实应现过还进种无点开关颜红蓝]/gu;
 /**
  * The report is written in the language of the text being read. The 0.8B model does not reliably translate, so asking
  * for English about Chinese text (common: page templates declare lang="en") fails the SDK's language check on every retry.
@@ -53,6 +53,21 @@ function reportLanguage(text, declared) {
   }
   if (latin) return primary && !['zh', 'ja', 'ko', 'und'].includes(primary) ? hint : 'en';
   return hint === 'und' ? 'en' : hint;
+}
+
+/**
+ * Mirrors the SDK's script check for the report language on every sentence. The small model restates a sentence in its
+ * own script, so a section built from an English sentence in a Chinese report (or the reverse, common in READMEs) fails
+ * on every retry.
+ */
+function inLanguage(text, language) {
+  return text.split(/(?<=[。！？])|\n|(?<=[.!?])\s+/u).every((sentence) => {
+    const han = sentence.match(/\p{Script=Han}/gu)?.length ?? 0, latin = sentence.match(/\p{Script=Latin}/gu)?.length ?? 0;
+    if (!han && !latin) return true;
+    if (language === 'zh-TW') return han > 0 && (sentence.match(/\p{Script=Latin}+/gu)?.length ?? 0) * 2 <= han && sentence.search(SIMPLIFIED) === -1;
+    if (language === 'en') return latin > 0 && han <= latin;
+    return true;
+  });
 }
 
 function instance(report) {
@@ -114,15 +129,21 @@ async function read(request, port, signal) {
   const describedImageIds = candidates.slice(0, MAX_DESCRIBED_IMAGES).map((image) => image.id);
   const long = page.paragraphs.filter((paragraph) => paragraph.text.length >= MIN_PARAGRAPH_CHARACTERS);
   const readable = long.length >= 3 ? long : page.paragraphs;
-  const paragraphIds = [];
-  let characters = 0;
-  for (const paragraph of readable) {
-    if (paragraphIds.length && characters + paragraph.text.length > MAX_CHARACTERS) break;
-    paragraphIds.push(paragraph.id); characters += paragraph.text.length;
-  }
+  const leading = (paragraphs) => {
+    const taken = [];
+    let characters = 0;
+    for (const paragraph of paragraphs) {
+      if (taken.length && characters + paragraph.text.length > MAX_CHARACTERS) break;
+      taken.push(paragraph); characters += paragraph.text.length;
+    }
+    return taken;
+  };
   if (!page.paragraphs.length) throw new Error('這個頁面沒有可解析的文字。');
-  const selected = new Set(paragraphIds);
-  const language = reportLanguage(page.paragraphs.filter((paragraph) => selected.has(paragraph.id)).map((paragraph) => paragraph.text).join('\n'), request.language);
+  const language = reportLanguage(leading(readable).map((paragraph) => paragraph.text).join('\n'), request.language);
+  // Mixed-language pages (a Chinese README under English GitHub chrome) read only the paragraphs in the report language.
+  const matching = readable.filter((paragraph) => inLanguage(paragraph.text, language));
+  const chosen = matching.length ? matching : readable;
+  const paragraphIds = leading(chosen).map((paragraph) => paragraph.id);
   const stages = { image: [], section: [], summary: [], conclusion: [] };
   let latest;
   const names = { image: '描述圖片', section: '整理段落', summary: '撰寫摘要', conclusion: '撰寫結論' };
@@ -130,7 +151,9 @@ async function read(request, port, signal) {
   const report = await neko.describe(page, {
     // A blocked or broken image is reported as failed instead of failing the whole report. A stage whose output is
     // invalid (e.g. JSON cut off at the token limit) or in the wrong language is retried with a corrective instruction.
-    format: 'json', language, maxNewTokens: 512, imageFailurePolicy: 'omit', sources: { paragraphIds, imageIds: describedImageIds },
+    // Chinese costs about a token per character and the model often restates its sources almost verbatim, so the summary
+    // of a Chinese README overran 512 tokens on every retry; output stops at the end of the JSON, not at the limit.
+    format: 'json', language, maxNewTokens: 1024, imageFailurePolicy: 'omit', sources: { paragraphIds, imageIds: describedImageIds },
     retries: { image: 2, section: 2, summary: 2, conclusion: 2 }, signal,
     // The extension can fetch any host, so a page must not be able to make it read internal addresses.
     validateDestination(url) {
@@ -149,7 +172,7 @@ async function read(request, port, signal) {
       send({ type: 'status', text: `${names[event.phase]}（第 ${seen.indexOf(event.id) + 1} 項${retry ? '，重試' : ''}）…` });
     },
   });
-  send({ type: 'result', report, seconds: (performance.now() - begun) / 1000, paragraphs: paragraphIds.length, totalParagraphs: readable.length, images: page.images.length, describedImages: describedImageIds.length });
+  send({ type: 'result', report, seconds: (performance.now() - begun) / 1000, paragraphs: paragraphIds.length, totalParagraphs: chosen.length, images: page.images.length, describedImages: describedImageIds.length });
 }
 
 chrome.runtime.onConnect.addListener((port) => {
